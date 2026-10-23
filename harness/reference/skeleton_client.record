@@ -1,0 +1,182 @@
+# nolf1 run record v1
+host   mode client
+tree   dir GOTY-disc2/Game 0
+tree   dir GOTY-disc1/Data 0
+tree   dir GOTY-disc2/Data 0
+tree   rez nolf.rez 4871
+tree   rez nolf2.rez 6075
+tree   rez nolfu003.rez 25
+tree   rez nolfgoty.rez 387
+host   trees 7
+file   autoexec.cfg 10002 Game
+file   CRES.DLL 774144 nolfgoty.rez
+res    CRES.DLL 6031 strings
+mode   set 640x480x32 hw=1 nullrender
+host   CreateClientShell ok
+impl   ILTClient::GetScreenSurface
+impl   ILTClient::GetEngineHook
+impl   ILTClient::GetConsoleVar
+impl   ILTClient::RunConsoleString
+file   Attributes\ClientSnd.txt 439 nolf2.rez
+file   Attributes\Debris.txt 40289 nolf2.rez
+file   Attributes\Fx.txt 339310 nolfu003.rez
+impl   ILTCSBase::GetVarValueFloat
+file   Attributes\SoundFilters.txt 11118 nolf2.rez
+file   Attributes\Weapons.txt 184829 nolfu003.rez
+file   Attributes\Weapons.txt 184829 nolfu003.rez
+file   Attributes\ModelButes.txt 44088 nolfu003.rez
+file   Attributes\Surface.txt 68219 nolfu003.rez
+file   Attributes\Missions.txt 40167 nolfgoty.rez
+file   Attributes\ClientButes.txt 12924 nolfu003.rez
+impl   ILTClient::RegisterConsoleProgram
+file   Attributes\Attachments.txt 15306 nolfgoty.rez
+stub   ILTClient::SetModelHook
+impl   ILTClient::SetRenderMode
+mode   set 640x480x32 hw=1 skeleton
+impl   ILTCursor::LoadCursorBitmapResource
+cursor load #104 (no bitmap)
+cursor set #104
+file   Attributes\ServerOptions.txt 2887 nolf2.rez
+file   Attributes\Layout.txt 52396 nolfu003.rez
+impl   ILTClient::GetRenderMode
+file   interface\fonts\font_help.pcx 5587 nolf2.rez
+file   interface\fonts\font_small_0.pcx 5587 nolf2.rez
+file   interface\fonts\font_med_0.pcx 27067 nolf2.rez
+file   interface\fonts\font_large_0.pcx 14967 nolf2.rez
+file   interface\fonts\font_title.pcx 19664 nolf2.rez
+file   interface\fonts\MsgFontFore.pcx 25714 nolf2.rez
+file   interface\fonts\NumberFontFore.pcx 13146 nolf2.rez
+file   interface\fonts\font_air.pcx 6093 nolf2.rez
+file   interface\fonts\HUD_chooser.pcx 6563 nolf2.rez
+draw   FillRect
+impl   ILTClient::CreateSurfaceFromBitmap
+file   StatBar\Art\Unarmed.pcx 935 nolf2.rez
+bmp    StatBar\Art\Unarmed.pcx 13x13 planes=1
+file   StatBar\Art\Activate.pcx 1246 nolf2.rez
+bmp    StatBar\Art\Activate.pcx 62x62 planes=3
+file   StatBar\Art\Innocent.pcx 1103 nolf2.rez
+bmp    StatBar\Art\Innocent.pcx 62x62 planes=3
+file   StatBar\Art\ActivateGadget.pcx 1760 nolf2.rez
+bmp    StatBar\Art\ActivateGadget.pcx 62x62 planes=3
+impl   ILTClient::SetupColor1
+file   StatBar\Art\Bar_Health.pcx 945 nolf2.rez
+bmp    StatBar\Art\Bar_Health.pcx 3x12 planes=1
+file   StatBar\Art\Bar_Armor.pcx 933 nolf2.rez
+bmp    StatBar\Art\Bar_Armor.pcx 3x12 planes=1
+file   StatBar\Art\Icon_Health.pcx 1261 nolf2.rez
+bmp    StatBar\Art\Icon_Health.pcx 20x20 planes=1
+file   StatBar\Art\Icon_Armor.pcx 1289 nolf2.rez
+bmp    StatBar\Art\Icon_Armor.pcx 20x20 planes=1
+file   StatBar\Art\Bar_Ammo.pcx 933 nolf2.rez
+bmp    StatBar\Art\Bar_Ammo.pcx 3x12 planes=1
+file   StatBar\Art\ammo_full.pcx 1057 nolf2.rez
+bmp    StatBar\Art\ammo_full.pcx 7x12 planes=1
+file   StatBar\Art\ammo_Empty.pcx 1005 nolf2.rez
+bmp    StatBar\Art\ammo_Empty.pcx 7x12 planes=1
+file   StatBar\Art\Bar_Air.pcx 933 nolf2.rez
+bmp    StatBar\Art\Bar_Air.pcx 3x12 planes=1
+file   StatBar\Art\Icon_Air.pcx 1317 nolf2.rez
+bmp    StatBar\Art\Icon_Air.pcx 32x32 planes=1
+file   statbar\art\icon_bleed.pcx 1292 nolf2.rez
+bmp    statbar\art\icon_bleed.pcx 32x32 planes=1
+file   statbar\art\icon_poison.pcx 1697 nolf2.rez
+bmp    statbar\art\icon_poison.pcx 32x32 planes=1
+file   statbar\art\icon_stun.pcx 2100 nolf2.rez
+bmp    statbar\art\icon_stun.pcx 32x32 planes=1
+file   statbar\art\icon_sleep.pcx 1322 nolf2.rez
+bmp    statbar\art\icon_sleep.pcx 32x32 planes=1
+file   statbar\art\icon_burn.pcx 1487 nolf2.rez
+bmp    statbar\art\icon_burn.pcx 32x32 planes=1
+file   statbar\art\icon_choke.pcx 1317 nolf2.rez
+bmp    statbar\art\icon_choke.pcx 32x32 planes=1
+file   statbar\art\icon_electrocute.pcx 1241 nolf2.rez
+bmp    statbar\art\icon_electrocute.pcx 32x32 planes=1
+draw   ScaleSurfaceToSurfaceTransparent
+file   Interface\Photos\Weapons\holster_sm.pcx 1481 nolf2.rez
+bmp    Interface\Photos\Weapons\holster_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\p38_sm.pcx 1460 nolf2.rez
+bmp    Interface\Photos\Weapons\p38_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\sw38_sm.pcx 1498 nolf2.rez
+bmp    Interface\Photos\Weapons\sw38_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\luger_sm.pcx 1461 nolf2.rez
+bmp    Interface\Photos\Weapons\luger_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\sterling_sm.pcx 1490 nolf2.rez
+bmp    Interface\Photos\Weapons\sterling_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\wsmg_sm.pcx 1463 nolf2.rez
+bmp    Interface\Photos\Weapons\wsmg_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\ak47_sm.pcx 1481 nolf2.rez
+bmp    Interface\Photos\Weapons\ak47_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\crossbow_sm.pcx 1498 nolf2.rez
+bmp    Interface\Photos\Weapons\crossbow_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\delisle_sm.pcx 1529 nolf2.rez
+bmp    Interface\Photos\Weapons\delisle_sm.pcx 24x24 planes=1
+file   Interface\Photos\Weapons\dragunov_sm.pcx 1582 nolf2.rez
+bmp    Interface\Photos\Weapons\dragunov_sm.pcx 24x24 planes=1
+file   interface\check-on.pcx 1385 nolf2.rez
+bmp    interface\check-on.pcx 32x32 planes=1
+file   interface\mb_back.pcx 2801 nolf2.rez
+bmp    interface\mb_back.pcx 240x160 planes=1
+file   Interface\DlgWnd\dialogueframetopleft.pcx 911 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframetopleft.pcx 3x3 planes=1
+file   Interface\DlgWnd\dialogueframetop.pcx 903 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframetop.pcx 1x3 planes=1
+file   Interface\DlgWnd\dialogueframetopright.pcx 908 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframetopright.pcx 3x3 planes=1
+file   Interface\DlgWnd\dialogueframeright.pcx 901 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframeright.pcx 3x1 planes=1
+file   Interface\DlgWnd\dialogueframebottomright.pcx 909 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframebottomright.pcx 3x3 planes=1
+file   Interface\DlgWnd\dialogueframebottom.pcx 903 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframebottom.pcx 1x3 planes=1
+file   Interface\DlgWnd\dialogueframebottomleft.pcx 911 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframebottomleft.pcx 3x3 planes=1
+file   Interface\DlgWnd\dialogueframeleft.pcx 901 nolf2.rez
+bmp    Interface\DlgWnd\dialogueframeleft.pcx 3x1 planes=1
+file   statbar\art\boss_empty.pcx 957 nolf2.rez
+bmp    statbar\art\boss_empty.pcx 3x16 planes=1
+file   statbar\art\boss_full.pcx 957 nolf2.rez
+bmp    statbar\art\boss_full.pcx 3x16 planes=1
+impl   ILTClient::WriteConfigFile
+cfg    REFUSED write of autoexec.cfg
+impl   ILTClient::CreateObject
+impl   ILTClient::SetCameraRect
+impl   ILTClient::SetCameraFOV
+file   Attributes\DamageFX.txt 5326 nolfu003.rez
+file   Menu\Art\splash.pcx 88045 nolfgoty.rez
+bmp    Menu\Art\splash.pcx 640x480 planes=1
+draw   ClearScreen
+host   OnEngineInitialized 0
+draw   Start3D
+draw   StartOptimized2D
+draw   ScaleSurfaceToSurface
+draw   EndOptimized2D
+draw   End3D
+draw   FlipScreen
+impl   ILTCSBase::RemoveObject
+surf   dims of unknown surface
+impl   ILTClient::SetGlobalLightScale
+surf   dims of unknown surface
+host   frames 3
+count  stubs 1
+count  files-opened 68
+count  files-missing 0
+drawn  FillRect 22
+drawn  ScaleSurfaceToSurfaceTransparent 5
+drawn  ClearScreen 1
+drawn  Start3D 3
+drawn  StartOptimized2D 3
+drawn  ScaleSurfaceToSurface 3
+drawn  EndOptimized2D 3
+drawn  End3D 3
+drawn  FlipScreen 3
+count  bitmaps-loaded 43
+count  bitmaps-missing 0
+count  surfaces-made 65
+count  surfaces-live 2
+count  cursors-loaded 1
+count  cursor-refreshes 0
+count  strings-table 6031
+count  strings-created 21
+count  strings-leaked 10
+count  strings-missing 0
+# end

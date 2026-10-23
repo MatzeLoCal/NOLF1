@@ -1,0 +1,1 @@
+../../../LT2/lithshared/gamespy/gamespyclientmgr/gamespyserver.h

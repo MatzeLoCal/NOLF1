@@ -1,0 +1,1165 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1DC49E4B64415120128CDB28 /* nolf1 in Embed Game */ = {isa = PBXBuildFile; fileRef = 1736FF0A2ADF996916ADD3F2 /* nolf1 */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		2E1C05D3F6A40116E42CF46B /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 67FD5AA3EF4C9D7CE30A767A /* Cocoa.framework */; };
+		2FA548333085967D00999826 /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2FA548323085967D00999826 /* Images.xcassets */; };
+		56104E5FAFB56ED77080F5FF /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AF5C1122BFF2E64F52BE687 /* QuartzCore.framework */; };
+		750F0A84DA59D9B196C6B522 /* libnolfobject.dylib in Embed Game */ = {isa = PBXBuildFile; fileRef = 0349ABFBFD7CC065F95E0CC3 /* libnolfobject.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		76F21D7950A364FA90FBA6CA /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F0226477C15C69B85D9A27C6 /* Metal.framework */; };
+		B329ECB358092ADCA5396FE9 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D7FBC7CFA81222BE19E14C0 /* AudioToolbox.framework */; };
+		D0494144252F263289A9960F /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C5CBBC427F8B9AAF6A3E8C05 /* CoreFoundation.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		00D4A4F59CF8050AE5481B3B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8D6261D67E55699873A0B202;
+			remoteInfo = nolfobject;
+		};
+		2956A1B4CF4994C1FD949D5F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8D6261D67E55699873A0B202;
+			remoteInfo = nolfobject;
+		};
+		9680F81A99F560DB3C44EBF7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 0D13A16574A97FECB61409EF;
+			remoteInfo = nolf1;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		199D298C53FEF3DAE8A463A8 /* Embed Game */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = Contents/Helpers;
+			dstSubfolderSpec = 1;
+			files = (
+				1DC49E4B64415120128CDB28 /* nolf1 in Embed Game */,
+				750F0A84DA59D9B196C6B522 /* libnolfobject.dylib in Embed Game */,
+			);
+			name = "Embed Game";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0349ABFBFD7CC065F95E0CC3 /* libnolfobject.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libnolfobject.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		1736FF0A2ADF996916ADD3F2 /* nolf1 */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nolf1; sourceTree = BUILT_PRODUCTS_DIR; };
+		21FFE7C225508CF261CF23F1 /* NOLF1.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NOLF1.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2FA548323085967D00999826 /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Images.xcassets; sourceTree = "<group>"; };
+		3D7FBC7CFA81222BE19E14C0 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
+		67FD5AA3EF4C9D7CE30A767A /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
+		8AF5C1122BFF2E64F52BE687 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		C5CBBC427F8B9AAF6A3E8C05 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
+		F0226477C15C69B85D9A27C6 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		062CFE53CE8D20C21A91AF31 /* Exceptions for "engine" folder in "nolfobject" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				compat/windows_compat.c,
+				kernel/console/ltconsole.cpp,
+				kernel/io/ltfilemgr.cpp,
+				kernel/io/ltfilestream.cpp,
+				kernel/io/ltrezfile.cpp,
+				kernel/math/ltmathimpl.cpp,
+				kernel/math/ltmathlt.cpp,
+				kernel/record/ltrecord.cpp,
+				kernel/res/ltperes.cpp,
+				kernel/res/ltstringmgr.cpp,
+				kernel/tex/ltdtx.cpp,
+				kernel/tex/ltpcx.cpp,
+				kernel/tex/ltspr.cpp,
+				kernel/time/ltclock.cpp,
+				model/ltabc.cpp,
+				model/ltmodeldraw.cpp,
+				platform/ltbindings.cpp,
+				platform/ltinput.cpp,
+				platform/ltwindow.mm,
+				render/lt2d.cpp,
+				render/lt3d.cpp,
+				render/ltcomp.cpp,
+				render/ltfont.cpp,
+				render/ltmetal.mm,
+				render/ltnullcursor.cpp,
+				render/ltnullrender.cpp,
+				render/ltscene.cpp,
+				server/ltserverbrush.cpp,
+				server/ltserverhost.cpp,
+				server/ltserverobjects.cpp,
+				server/ltserverphysics.cpp,
+				shared/ltconparse.cpp,
+				shared/ltmessage.cpp,
+				shared/ltreplicate.cpp,
+				shared/ltsession.cpp,
+				skeleton/ltstub.cpp,
+				skeleton/skeleton_generated.cpp,
+				skeleton/skeleton_host.cpp,
+				sound/ltaudio.mm,
+				sound/ltdls.cpp,
+				sound/ltdmfiles.cpp,
+				sound/ltdmhost.cpp,
+				sound/ltdmmgr.cpp,
+				sound/ltdmperf.cpp,
+				sound/ltdmsynth.cpp,
+				sound/ltmixer.cpp,
+				sound/ltsoundmgr.cpp,
+				sound/ltsurfaces.cpp,
+				sound/ltwav.cpp,
+				world/ltproptypes.cpp,
+				world/ltworld.cpp,
+				world/ltworldcollide.cpp,
+				world/ltworlddoors.cpp,
+				world/ltworldmetal.cpp,
+				world/ltworldrender.cpp,
+				world/ltworldscene.cpp,
+				world/ltworldvis.cpp,
+				world/ltworldwalk.cpp,
+			);
+			target = 8D6261D67E55699873A0B202 /* nolfobject */;
+		};
+		3F2FE1376E58B1B11438B0DA /* Exceptions for "engine" folder in "nolf1" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				generated/AnimationLex.cpp,
+				generated/AnimationParse.cpp,
+			);
+			target = 0D13A16574A97FECB61409EF /* nolf1 */;
+		};
+		48FD1BDEECB4EDA6EDF655D2 /* Exceptions for "NOLF" folder in "nolfobject" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ClientRes/main.cpp,
+				ClientShellDLL/BaseFolder.cpp,
+				ClientShellDLL/BaseLineSystemFX.cpp,
+				ClientShellDLL/BaseMenu.cpp,
+				ClientShellDLL/BaseParticleSystemFX.cpp,
+				ClientShellDLL/BasePolyDrawFX.cpp,
+				ClientShellDLL/BaseScaleFX.cpp,
+				ClientShellDLL/BaseSelectionFolder.cpp,
+				ClientShellDLL/BeamFX.cpp,
+				ClientShellDLL/BitmapCtrl.cpp,
+				ClientShellDLL/BodyFX.cpp,
+				ClientShellDLL/BulletTrailFX.cpp,
+				ClientShellDLL/CameraOffsetMgr.cpp,
+				ClientShellDLL/CharacterFX.cpp,
+				ClientShellDLL/client_physics.cpp,
+				ClientShellDLL/ClientButeMgr.cpp,
+				ClientShellDLL/ClientInfoMgr.cpp,
+				ClientShellDLL/ClientSoundMgr.cpp,
+				ClientShellDLL/ClientUtilities.cpp,
+				ClientShellDLL/ClientWeaponUtils.cpp,
+				ClientShellDLL/CMoveMgr.cpp,
+				ClientShellDLL/Credits.cpp,
+				ClientShellDLL/CycleCtrl.cpp,
+				ClientShellDLL/DamageFXMgr.cpp,
+				ClientShellDLL/DeathFX.cpp,
+				ClientShellDLL/DebrisFX.cpp,
+				ClientShellDLL/DynamicLightFX.cpp,
+				ClientShellDLL/ExplosionFX.cpp,
+				ClientShellDLL/FireFX.cpp,
+				ClientShellDLL/FlashLight.cpp,
+				ClientShellDLL/FolderAdvDisplay.cpp,
+				ClientShellDLL/FolderAudio.cpp,
+				ClientShellDLL/FolderAwards.cpp,
+				ClientShellDLL/FolderBriefing.cpp,
+				ClientShellDLL/FolderControls.cpp,
+				ClientShellDLL/FolderCrosshair.cpp,
+				ClientShellDLL/FolderCustomControls.cpp,
+				ClientShellDLL/FolderCustomLevel.cpp,
+				ClientShellDLL/FolderDifficulty.cpp,
+				ClientShellDLL/FolderDisplay.cpp,
+				ClientShellDLL/FolderEffects.cpp,
+				ClientShellDLL/FolderEscape.cpp,
+				ClientShellDLL/FolderFavoriteLevels.cpp,
+				ClientShellDLL/FolderGadgets.cpp,
+				ClientShellDLL/FolderGallery.cpp,
+				ClientShellDLL/FolderGame.cpp,
+				ClientShellDLL/FolderGear.cpp,
+				ClientShellDLL/FolderHost.cpp,
+				ClientShellDLL/FolderHostLevels.cpp,
+				ClientShellDLL/FolderHostOptions.cpp,
+				ClientShellDLL/FolderIntel.cpp,
+				ClientShellDLL/FolderInventory.cpp,
+				ClientShellDLL/FolderJoin.cpp,
+				ClientShellDLL/FolderJoinLAN.cpp,
+				ClientShellDLL/FolderJoystick.cpp,
+				ClientShellDLL/FolderKeyboard.cpp,
+				ClientShellDLL/FolderLoad.cpp,
+				ClientShellDLL/FolderMain.cpp,
+				ClientShellDLL/FolderMgr.cpp,
+				ClientShellDLL/FolderMission.cpp,
+				ClientShellDLL/FolderMods.cpp,
+				ClientShellDLL/FolderMouse.cpp,
+				ClientShellDLL/FolderMulti.cpp,
+				ClientShellDLL/FolderMultiBriefing.cpp,
+				ClientShellDLL/FolderMultiSummary.cpp,
+				ClientShellDLL/FolderNew.cpp,
+				ClientShellDLL/FolderObjectives.cpp,
+				ClientShellDLL/FolderOptions.cpp,
+				ClientShellDLL/FolderPerformance.cpp,
+				ClientShellDLL/FolderPlayer.cpp,
+				ClientShellDLL/FolderSave.cpp,
+				ClientShellDLL/FolderSingle.cpp,
+				ClientShellDLL/FolderStats.cpp,
+				ClientShellDLL/FolderSummary.cpp,
+				ClientShellDLL/FolderTexture.cpp,
+				ClientShellDLL/FolderViewInventory.cpp,
+				ClientShellDLL/FolderWeaponControls.cpp,
+				ClientShellDLL/FolderWeapons.cpp,
+				ClientShellDLL/GameClientShell.cpp,
+				ClientShellDLL/GameSettings.cpp,
+				ClientShellDLL/GibFX.cpp,
+				ClientShellDLL/GlobalClientMgr.cpp,
+				ClientShellDLL/GroupCtrl.cpp,
+				ClientShellDLL/HeadBobMgr.cpp,
+				ClientShellDLL/IntelItemMgr.cpp,
+				ClientShellDLL/InterfaceMeter.cpp,
+				ClientShellDLL/InterfaceMgr.cpp,
+				ClientShellDLL/InterfaceResMgr.cpp,
+				ClientShellDLL/InterfaceSurfMgr.cpp,
+				ClientShellDLL/InterfaceTimer.cpp,
+				ClientShellDLL/IpMgr.cpp,
+				ClientShellDLL/JoystickAxis.cpp,
+				ClientShellDLL/KeyFixes.cpp,
+				ClientShellDLL/LaserBeam.cpp,
+				ClientShellDLL/LaserTriggerFX.cpp,
+				ClientShellDLL/LayoutMgr.cpp,
+				ClientShellDLL/LeashFX.cpp,
+				ClientShellDLL/LensFlareFX.cpp,
+				ClientShellDLL/LightFX.cpp,
+				ClientShellDLL/LightningFX.cpp,
+				ClientShellDLL/LightScaleMgr.cpp,
+				ClientShellDLL/LineSystemFX.cpp,
+				ClientShellDLL/ListCtrl.cpp,
+				ClientShellDLL/LoadingScreen.cpp,
+				ClientShellDLL/LTDecisionWnd.cpp,
+				ClientShellDLL/LTDialogueWnd.cpp,
+				ClientShellDLL/LTMaskedWnd.cpp,
+				ClientShellDLL/LTMenuWnd.cpp,
+				ClientShellDLL/LTMultiWnd.cpp,
+				ClientShellDLL/LTTextWnd.cpp,
+				ClientShellDLL/LtWnd.cpp,
+				ClientShellDLL/MarkSFX.cpp,
+				ClientShellDLL/MessageBox.cpp,
+				ClientShellDLL/MessageBoxCtrl.cpp,
+				ClientShellDLL/MessageMgr.cpp,
+				ClientShellDLL/MineFX.cpp,
+				ClientShellDLL/MissionText.cpp,
+				ClientShellDLL/MouseMgr.cpp,
+				ClientShellDLL/MultiplayerMenu.cpp,
+				ClientShellDLL/Music.cpp,
+				ClientShellDLL/MuzzleFlashFX.cpp,
+				ClientShellDLL/MuzzleFlashParticleFX.cpp,
+				ClientShellDLL/NetInfo.cpp,
+				ClientShellDLL/NodeController.cpp,
+				ClientShellDLL/NodeLinesFX.cpp,
+				ClientShellDLL/ObjEditMgr.cpp,
+				ClientShellDLL/ObjSpriteFX.cpp,
+				ClientShellDLL/ParticleExplosionFX.cpp,
+				ClientShellDLL/ParticleShowerFX.cpp,
+				ClientShellDLL/ParticleSystemFX.cpp,
+				ClientShellDLL/ParticleTrailFX.cpp,
+				ClientShellDLL/ParticleTrailSegmentFX.cpp,
+				ClientShellDLL/PickupItemFX.cpp,
+				ClientShellDLL/PlayerCamera.cpp,
+				ClientShellDLL/PlayerData.cpp,
+				ClientShellDLL/PlayerSoundFX.cpp,
+				ClientShellDLL/PlayerStats.cpp,
+				ClientShellDLL/PlayerVehicleFX.cpp,
+				ClientShellDLL/PolyDebrisFX.cpp,
+				ClientShellDLL/PolyGridFX.cpp,
+				ClientShellDLL/PolyLineFX.cpp,
+				ClientShellDLL/PopupText.cpp,
+				ClientShellDLL/ProjectileFX.cpp,
+				ClientShellDLL/PVFXMgr.cpp,
+				ClientShellDLL/RandomSparksFX.cpp,
+				ClientShellDLL/ScreenTintMgr.cpp,
+				ClientShellDLL/SearchLightFX.cpp,
+				ClientShellDLL/SFXMgr.cpp,
+				ClientShellDLL/ShellCasingFX.cpp,
+				ClientShellDLL/SliderCtrl.cpp,
+				ClientShellDLL/SmokeFX.cpp,
+				ClientShellDLL/SoundFX.cpp,
+				ClientShellDLL/Sparam.cpp,
+				ClientShellDLL/SpecialFXList.cpp,
+				ClientShellDLL/sprinklesfx.cpp,
+				ClientShellDLL/StaticTextCtrl.cpp,
+				ClientShellDLL/SteamFX.cpp,
+				ClientShellDLL/Subtitle.cpp,
+				ClientShellDLL/TracerFX.cpp,
+				ClientShellDLL/VehicleMgr.cpp,
+				ClientShellDLL/VideoFX.cpp,
+				ClientShellDLL/VKDefs.cpp,
+				ClientShellDLL/WeaponChooser.cpp,
+				ClientShellDLL/WeaponFX.cpp,
+				ClientShellDLL/WeaponModel.cpp,
+				ClientShellDLL/WeatherFX.cpp,
+				ClientShellDLL/WinUtil.cpp,
+				ObjectDLL/AICmd.cpp,
+				ObjectDLL/AICmdMgr.cpp,
+				ObjectDLL/AIGoal.cpp,
+				ObjectDLL/AIGoalMgr.cpp,
+				ObjectDLL/AIVolumeNeighbor.cpp,
+				ObjectDLL/AnimationLex.l,
+				ObjectDLL/AnimationParse.y,
+				ObjectDLL/ClientFX.cpp,
+				Shared/DebugMgr.cpp,
+			);
+			target = 8D6261D67E55699873A0B202 /* nolfobject */;
+		};
+		789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				sdk/inc/ltengineobjects.cpp,
+			);
+			target = 0D13A16574A97FECB61409EF /* nolf1 */;
+		};
+		909E3F37E78342C72E308FB9 /* Exceptions for "NOLF" folder in "nolf1" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				ClientRes/main.cpp,
+				ClientShellDLL/NetInfo.cpp,
+				ClientShellDLL/PlayerData.cpp,
+				ObjectDLL/AI.cpp,
+				ObjectDLL/AIAnimal.cpp,
+				ObjectDLL/AIAnimalState.cpp,
+				ObjectDLL/AIAnimalStrategy.cpp,
+				ObjectDLL/AIBrain.cpp,
+				ObjectDLL/AIButeMgr.cpp,
+				ObjectDLL/AICmd.cpp,
+				ObjectDLL/AICmdMgr.cpp,
+				ObjectDLL/AIDog.cpp,
+				ObjectDLL/AIDogReactions.cpp,
+				ObjectDLL/AIGoal.cpp,
+				ObjectDLL/AIGoalMgr.cpp,
+				ObjectDLL/AIGroup.cpp,
+				ObjectDLL/AIHelicopter.cpp,
+				ObjectDLL/AIHuman.cpp,
+				ObjectDLL/AIHumanReactions.cpp,
+				ObjectDLL/AIHumans.cpp,
+				ObjectDLL/AIHumanState.cpp,
+				ObjectDLL/AIHumanStrategy.cpp,
+				ObjectDLL/AIMovement.cpp,
+				ObjectDLL/AINode.cpp,
+				ObjectDLL/AINodeMgr.cpp,
+				ObjectDLL/AINudge.cpp,
+				ObjectDLL/AIPath.cpp,
+				ObjectDLL/AIPathMgr.cpp,
+				ObjectDLL/AIPoodle.cpp,
+				ObjectDLL/AIReactions.cpp,
+				ObjectDLL/AIRegion.cpp,
+				ObjectDLL/AIRegionMgr.cpp,
+				ObjectDLL/AISense.cpp,
+				ObjectDLL/AIShark.cpp,
+				ObjectDLL/AISounds.cpp,
+				ObjectDLL/AIState.cpp,
+				ObjectDLL/AISteering.cpp,
+				ObjectDLL/AITarget.cpp,
+				ObjectDLL/AIUtils.cpp,
+				ObjectDLL/AIVehicle.cpp,
+				ObjectDLL/AIVehicleState.cpp,
+				ObjectDLL/AIVehicleStrategy.cpp,
+				ObjectDLL/AIVolume.cpp,
+				ObjectDLL/AIVolumeMgr.cpp,
+				ObjectDLL/AIVolumeNeighbor.cpp,
+				ObjectDLL/Alarm.cpp,
+				ObjectDLL/AmmoBox.cpp,
+				ObjectDLL/AnimationLex.l,
+				ObjectDLL/AnimationMgr.cpp,
+				ObjectDLL/AnimationMgrHuman.cpp,
+				ObjectDLL/AnimationParse.y,
+				ObjectDLL/AnimationParser.cpp,
+				ObjectDLL/AnimatorAIAnimal.cpp,
+				ObjectDLL/AnimatorAIVehicle.cpp,
+				ObjectDLL/AnimatorPlayer.cpp,
+				ObjectDLL/Attachments.cpp,
+				ObjectDLL/Body.cpp,
+				ObjectDLL/BodyState.cpp,
+				ObjectDLL/Breakable.cpp,
+				ObjectDLL/CachedFiles.cpp,
+				ObjectDLL/Camera.cpp,
+				ObjectDLL/Character.cpp,
+				ObjectDLL/CharacterHitBox.cpp,
+				ObjectDLL/CharacterMgr.cpp,
+				ObjectDLL/CinematicTrigger.cpp,
+				ObjectDLL/ClientFX.cpp,
+				ObjectDLL/ClientLightFX.cpp,
+				ObjectDLL/ClientSFX.cpp,
+				ObjectDLL/ClientWeaponSFX.cpp,
+				ObjectDLL/CommandMgr.cpp,
+				ObjectDLL/Controller.cpp,
+				ObjectDLL/DebrisFuncs.cpp,
+				ObjectDLL/Destructible.cpp,
+				ObjectDLL/DestructibleModel.cpp,
+				ObjectDLL/DialogueWindow.cpp,
+				ObjectDLL/DisplayMeter.cpp,
+				ObjectDLL/DisplayTimer.cpp,
+				ObjectDLL/Door.cpp,
+				ObjectDLL/DoorKnob.cpp,
+				ObjectDLL/Editable.cpp,
+				ObjectDLL/EventCounter.cpp,
+				ObjectDLL/ExitTrigger.cpp,
+				ObjectDLL/Explosion.cpp,
+				ObjectDLL/Fire.cpp,
+				ObjectDLL/GameBase.cpp,
+				ObjectDLL/GameServerShell.cpp,
+				ObjectDLL/GameStartPoint.cpp,
+				ObjectDLL/GearItems.cpp,
+				ObjectDLL/GlobalServerMgr.cpp,
+				ObjectDLL/Group.cpp,
+				ObjectDLL/HHWeaponModel.cpp,
+				ObjectDLL/HingedDoor.cpp,
+				ObjectDLL/Intelligence.cpp,
+				ObjectDLL/IntelMgr.cpp,
+				ObjectDLL/Key.cpp,
+				ObjectDLL/KeyData.cpp,
+				ObjectDLL/keyframer_light.cpp,
+				ObjectDLL/KeyFramer.cpp,
+				ObjectDLL/KeyPad.cpp,
+				ObjectDLL/LaserTrigger.cpp,
+				ObjectDLL/Lightning.cpp,
+				ObjectDLL/Lock.cpp,
+				ObjectDLL/Mine.cpp,
+				ObjectDLL/ModItem.cpp,
+				ObjectDLL/MusicMgr.cpp,
+				ObjectDLL/MyGameSpyMgr.cpp,
+				ObjectDLL/NodeLine.cpp,
+				ObjectDLL/object_list.cpp,
+				ObjectDLL/ObjectiveSprite.cpp,
+				ObjectDLL/ObjectRemover.cpp,
+				ObjectDLL/ParticleSystem.cpp,
+				ObjectDLL/PickupItem.cpp,
+				ObjectDLL/PlayerObj.cpp,
+				ObjectDLL/PlayerVehicle.cpp,
+				ObjectDLL/PolyGrid.cpp,
+				ObjectDLL/Projectile.cpp,
+				ObjectDLL/ProjectileTypes.cpp,
+				ObjectDLL/Prop.cpp,
+				ObjectDLL/PropType.cpp,
+				ObjectDLL/PropTypeMgr.cpp,
+				ObjectDLL/RandomSpawner.cpp,
+				ObjectDLL/RotatingDoor.cpp,
+				ObjectDLL/RotatingWorldModel.cpp,
+				ObjectDLL/ScaleSprite.cpp,
+				ObjectDLL/Scanner.cpp,
+				ObjectDLL/ScreenShake.cpp,
+				ObjectDLL/SearchLight.cpp,
+				ObjectDLL/SecurityCamera.cpp,
+				ObjectDLL/ServerButeMgr.cpp,
+				ObjectDLL/ServerMark.cpp,
+				ObjectDLL/ServerSoundMgr.cpp,
+				ObjectDLL/ServerUtilities.cpp,
+				ObjectDLL/SFXFuncs.cpp,
+				ObjectDLL/SoundFX.cpp,
+				ObjectDLL/Sparam.cpp,
+				ObjectDLL/Spawner.cpp,
+				ObjectDLL/Speaker.cpp,
+				ObjectDLL/Sprinkles.cpp,
+				ObjectDLL/Steam.cpp,
+				ObjectDLL/Switch.cpp,
+				ObjectDLL/TeleportPoint.cpp,
+				ObjectDLL/TranslucentWorldModel.cpp,
+				ObjectDLL/Trigger.cpp,
+				ObjectDLL/Video.cpp,
+				ObjectDLL/VolumeBrush.cpp,
+				ObjectDLL/VolumeBrushTypes.cpp,
+				ObjectDLL/Weapon.cpp,
+				ObjectDLL/WeaponItems.cpp,
+				ObjectDLL/Weapons.cpp,
+				ObjectDLL/WorldModelDebris.cpp,
+				ObjectDLL/WorldProperties.cpp,
+				ObjectDLL/ZipHook.cpp,
+				Shared/DebugMgr.cpp,
+			);
+			target = 0D13A16574A97FECB61409EF /* nolf1 */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		1540F1F808D4612E720D6B90 /* LT2 */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1" target */,
+			);
+			path = LT2;
+			sourceTree = "<group>";
+		};
+		86C6A0342689A52A62469693 /* launcher */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = launcher;
+			sourceTree = "<group>";
+		};
+		9125C0C211D047F008A7269C /* harness */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = harness;
+			sourceTree = "<group>";
+		};
+		F07E7013BA4CFF80ED913296 /* engine */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				3F2FE1376E58B1B11438B0DA /* Exceptions for "engine" folder in "nolf1" target */,
+				062CFE53CE8D20C21A91AF31 /* Exceptions for "engine" folder in "nolfobject" target */,
+			);
+			path = engine;
+			sourceTree = "<group>";
+		};
+		FA3BA48FB77DABF0421EA28E /* NOLF */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				909E3F37E78342C72E308FB9 /* Exceptions for "NOLF" folder in "nolf1" target */,
+				48FD1BDEECB4EDA6EDF655D2 /* Exceptions for "NOLF" folder in "nolfobject" target */,
+			);
+			path = NOLF;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		62E10E43F9A9BBBFA052A89F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2E1C05D3F6A40116E42CF46B /* Cocoa.framework in Frameworks */,
+				76F21D7950A364FA90FBA6CA /* Metal.framework in Frameworks */,
+				56104E5FAFB56ED77080F5FF /* QuartzCore.framework in Frameworks */,
+				B329ECB358092ADCA5396FE9 /* AudioToolbox.framework in Frameworks */,
+				D0494144252F263289A9960F /* CoreFoundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E9E1057136253339F649EFC9 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EE93D960FB59BA63A77B60C7 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2B731CEFC6751AAE0EC69B98 = {
+			isa = PBXGroup;
+			children = (
+				2FA548313085964800999826 /* assets */,
+				86C6A0342689A52A62469693 /* launcher */,
+				F07E7013BA4CFF80ED913296 /* engine */,
+				1540F1F808D4612E720D6B90 /* LT2 */,
+				FA3BA48FB77DABF0421EA28E /* NOLF */,
+				9125C0C211D047F008A7269C /* harness */,
+				EC148643C97903A61FBA5521 /* Frameworks */,
+				86024CAD1E83101D97359D73 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		2FA548313085964800999826 /* assets */ = {
+			isa = PBXGroup;
+			children = (
+				2FA548323085967D00999826 /* Images.xcassets */,
+			);
+			path = assets;
+			sourceTree = "<group>";
+		};
+		86024CAD1E83101D97359D73 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1736FF0A2ADF996916ADD3F2 /* nolf1 */,
+				0349ABFBFD7CC065F95E0CC3 /* libnolfobject.dylib */,
+				21FFE7C225508CF261CF23F1 /* NOLF1.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		EC148643C97903A61FBA5521 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				67FD5AA3EF4C9D7CE30A767A /* Cocoa.framework */,
+				F0226477C15C69B85D9A27C6 /* Metal.framework */,
+				8AF5C1122BFF2E64F52BE687 /* QuartzCore.framework */,
+				3D7FBC7CFA81222BE19E14C0 /* AudioToolbox.framework */,
+				C5CBBC427F8B9AAF6A3E8C05 /* CoreFoundation.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0D13A16574A97FECB61409EF /* nolf1 */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1FAE93E1A062C88175B3EEF8 /* Build configuration list for PBXNativeTarget "nolf1" */;
+			buildPhases = (
+				0D2730CBF834966C1A563231 /* Sources */,
+				62E10E43F9A9BBBFA052A89F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E13CA47CB97B3F4934A2EF52 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				1540F1F808D4612E720D6B90 /* LT2 */,
+				F07E7013BA4CFF80ED913296 /* engine */,
+				FA3BA48FB77DABF0421EA28E /* NOLF */,
+			);
+			name = nolf1;
+			packageProductDependencies = (
+			);
+			productName = nolf1;
+			productReference = 1736FF0A2ADF996916ADD3F2 /* nolf1 */;
+			productType = "com.apple.product-type.tool";
+		};
+		8D6261D67E55699873A0B202 /* nolfobject */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BEC8DA169D4EB3FF3AB53846 /* Build configuration list for PBXNativeTarget "nolfobject" */;
+			buildPhases = (
+				BF70B2C7ACC6F9A1813B692A /* Sources */,
+				E9E1057136253339F649EFC9 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				F07E7013BA4CFF80ED913296 /* engine */,
+				FA3BA48FB77DABF0421EA28E /* NOLF */,
+			);
+			name = nolfobject;
+			packageProductDependencies = (
+			);
+			productName = nolfobject;
+			productReference = 0349ABFBFD7CC065F95E0CC3 /* libnolfobject.dylib */;
+			productType = "com.apple.product-type.library.dynamic";
+		};
+		F8ADD7DD5C938D0EECC169E4 /* NOLF1Launcher */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A865F31FC35BBEB9DF6001C3 /* Build configuration list for PBXNativeTarget "NOLF1Launcher" */;
+			buildPhases = (
+				46DA4A039EF6B8A0DF612E69 /* Sources */,
+				EE93D960FB59BA63A77B60C7 /* Frameworks */,
+				06813E6CE67BFB7C13640AF8 /* Resources */,
+				199D298C53FEF3DAE8A463A8 /* Embed Game */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B862DAD36DF68825EF973C2E /* PBXTargetDependency */,
+				4234B424FCE5DFBAF7F4D00A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				86C6A0342689A52A62469693 /* launcher */,
+			);
+			name = NOLF1Launcher;
+			packageProductDependencies = (
+			);
+			productName = NOLF1Launcher;
+			productReference = 21FFE7C225508CF261CF23F1 /* NOLF1.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		46F86FAA6BBF9AC94A7E4595 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2710;
+				TargetAttributes = {
+					0D13A16574A97FECB61409EF = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					8D6261D67E55699873A0B202 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					F8ADD7DD5C938D0EECC169E4 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 660F07F5912AE5806D5C961D /* Build configuration list for PBXProject "NOLF1" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 2B731CEFC6751AAE0EC69B98;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 86024CAD1E83101D97359D73 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0D13A16574A97FECB61409EF /* nolf1 */,
+				8D6261D67E55699873A0B202 /* nolfobject */,
+				F8ADD7DD5C938D0EECC169E4 /* NOLF1Launcher */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		06813E6CE67BFB7C13640AF8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2FA548333085967D00999826 /* Images.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		0D2730CBF834966C1A563231 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		46DA4A039EF6B8A0DF612E69 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BF70B2C7ACC6F9A1813B692A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		4234B424FCE5DFBAF7F4D00A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8D6261D67E55699873A0B202 /* nolfobject */;
+			targetProxy = 00D4A4F59CF8050AE5481B3B /* PBXContainerItemProxy */;
+		};
+		B862DAD36DF68825EF973C2E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 0D13A16574A97FECB61409EF /* nolf1 */;
+			targetProxy = 9680F81A99F560DB3C44EBF7 /* PBXContainerItemProxy */;
+		};
+		E13CA47CB97B3F4934A2EF52 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8D6261D67E55699873A0B202 /* nolfobject */;
+			targetProxy = 2956A1B4CF4994C1FD949D5F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		097C9ED01A6A957708EFCBA2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = lib;
+				OTHER_LDFLAGS = (
+					"-undefined",
+					dynamic_lookup,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		3249C7225427685CDA0B8597 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 1;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					NO_PRAGMA_LIBS,
+					_NOLFBUILD,
+					_REZFILE,
+					_FINAL,
+					NDEBUG,
+					_LITHTECH_,
+					_LITHTECH2,
+					STRICT,
+				);
+				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/engine/compat",
+					"$(SRCROOT)/engine/compat/include-shims",
+					"$(SRCROOT)/LT2/sdk/inc",
+					"$(SRCROOT)/LT2/lithshared/incs",
+					"$(SRCROOT)/LT2/lithshared/butemgr",
+					"$(SRCROOT)/LT2/lithshared/stdlith",
+					"$(SRCROOT)/LT2/lithshared/ltguimgr",
+					"$(SRCROOT)/LT2/lithshared/lithfontmgr",
+					"$(SRCROOT)/LT2/lithshared/lith",
+					"$(SRCROOT)/LT2/lithshared/cryptmgr",
+					"$(SRCROOT)/LT2/lithshared/mfcstub",
+					"$(SRCROOT)/LT2/lithshared/gamespy/gamespyclientmgr",
+					"$(SRCROOT)/engine/server",
+					"$(SRCROOT)/engine/shared",
+					"$(SRCROOT)/engine/skeleton",
+					"$(SRCROOT)/engine/generated",
+					"$(SRCROOT)/engine/kernel/io",
+					"$(SRCROOT)/engine/kernel/record",
+					"$(SRCROOT)/engine/kernel/res",
+					"$(SRCROOT)/engine/kernel/tex",
+					"$(SRCROOT)/engine/kernel/time",
+					"$(SRCROOT)/engine/render",
+					"$(SRCROOT)/engine/platform",
+					"$(SRCROOT)/engine/sound",
+					"$(SRCROOT)/engine/model",
+					"$(SRCROOT)/engine/kernel/console",
+					"$(SRCROOT)/engine/kernel/math",
+					"$(SRCROOT)/engine/world",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				OTHER_CFLAGS = (
+					"-fdeclspec",
+					"-Wno-everything",
+				);
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				USER_HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/NOLF/Shared",
+					"$(SRCROOT)/NOLF/ObjectDLL",
+					"$(SRCROOT)/NOLF/ClientShellDLL",
+				);
+				USE_HEADERMAP = NO;
+			};
+			name = Release;
+		};
+		5BE763F4D79F3E096315BDEF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 2;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = NOLF1;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.launcher;
+				PRODUCT_NAME = NOLF1;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		931B0E0BF115A07E62EC3A7F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = nolf1.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = NO;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					_CLIENTBUILD,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.engine;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				STRIP_STYLE = "non-global";
+			};
+			name = Release;
+		};
+		99DCFB553C8FA686DB9CDD59 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++17";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 1;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					NO_PRAGMA_LIBS,
+					_NOLFBUILD,
+					_REZFILE,
+					_FINAL,
+					NDEBUG,
+					_LITHTECH_,
+					_LITHTECH2,
+					STRICT,
+				);
+				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_INHIBIT_ALL_WARNINGS = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/engine/compat",
+					"$(SRCROOT)/engine/compat/include-shims",
+					"$(SRCROOT)/LT2/sdk/inc",
+					"$(SRCROOT)/LT2/lithshared/incs",
+					"$(SRCROOT)/LT2/lithshared/butemgr",
+					"$(SRCROOT)/LT2/lithshared/stdlith",
+					"$(SRCROOT)/LT2/lithshared/ltguimgr",
+					"$(SRCROOT)/LT2/lithshared/lithfontmgr",
+					"$(SRCROOT)/LT2/lithshared/lith",
+					"$(SRCROOT)/LT2/lithshared/cryptmgr",
+					"$(SRCROOT)/LT2/lithshared/mfcstub",
+					"$(SRCROOT)/LT2/lithshared/gamespy/gamespyclientmgr",
+					"$(SRCROOT)/engine/server",
+					"$(SRCROOT)/engine/shared",
+					"$(SRCROOT)/engine/skeleton",
+					"$(SRCROOT)/engine/generated",
+					"$(SRCROOT)/engine/kernel/io",
+					"$(SRCROOT)/engine/kernel/record",
+					"$(SRCROOT)/engine/kernel/res",
+					"$(SRCROOT)/engine/kernel/tex",
+					"$(SRCROOT)/engine/kernel/time",
+					"$(SRCROOT)/engine/render",
+					"$(SRCROOT)/engine/platform",
+					"$(SRCROOT)/engine/sound",
+					"$(SRCROOT)/engine/model",
+					"$(SRCROOT)/engine/kernel/console",
+					"$(SRCROOT)/engine/kernel/math",
+					"$(SRCROOT)/engine/world",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_CFLAGS = (
+					"-fdeclspec",
+					"-Wno-everything",
+				);
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				USER_HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/NOLF/Shared",
+					"$(SRCROOT)/NOLF/ObjectDLL",
+					"$(SRCROOT)/NOLF/ClientShellDLL",
+				);
+				USE_HEADERMAP = NO;
+			};
+			name = Debug;
+		};
+		BE0ED6976B1A5A78EF701416 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				EXECUTABLE_PREFIX = lib;
+				OTHER_LDFLAGS = (
+					"-undefined",
+					dynamic_lookup,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		C568C7B7F64F44949CE19136 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = nolf1.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = NO;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					_CLIENTBUILD,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.engine;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				STRIP_STYLE = "non-global";
+			};
+			name = Debug;
+		};
+		C5DAA6D7F2E3029ACC62812C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 2;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = NOLF1;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.games";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.launcher;
+				PRODUCT_NAME = NOLF1;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1FAE93E1A062C88175B3EEF8 /* Build configuration list for PBXNativeTarget "nolf1" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C568C7B7F64F44949CE19136 /* Debug */,
+				931B0E0BF115A07E62EC3A7F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		660F07F5912AE5806D5C961D /* Build configuration list for PBXProject "NOLF1" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				99DCFB553C8FA686DB9CDD59 /* Debug */,
+				3249C7225427685CDA0B8597 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A865F31FC35BBEB9DF6001C3 /* Build configuration list for PBXNativeTarget "NOLF1Launcher" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C5DAA6D7F2E3029ACC62812C /* Debug */,
+				5BE763F4D79F3E096315BDEF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		BEC8DA169D4EB3FF3AB53846 /* Build configuration list for PBXNativeTarget "nolfobject" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				097C9ED01A6A957708EFCBA2 /* Debug */,
+				BE0ED6976B1A5A78EF701416 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 46F86FAA6BBF9AC94A7E4595 /* Project object */;
+}

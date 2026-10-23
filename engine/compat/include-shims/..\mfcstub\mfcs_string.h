@@ -1,0 +1,1 @@
+../../../LT2/lithshared/mfcstub/mfcs_string.h
