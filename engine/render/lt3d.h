@@ -395,6 +395,24 @@ struct LT3DTexture
     // sized from its pixels.
     int                     m_nUVShift;
 
+    // ⚠️ A MIRROR'S REFLECTION, SAMPLED WHERE THE PIXEL IS (HANDOVER 5de).
+    // Set, the triangle writes the colour this buffer holds at the SAME
+    // screen pixel -- the reflected scene, rendered from the mirrored camera
+    // at the target's size -- and its depth, with no lighting, fog or
+    // texture: that pass already lit and fogged it. Null for every ordinary
+    // texture, so the rasteriser's usual path is untouched.
+    const unsigned char*    m_pScreenRGBA;
+    int                     m_nScreenW, m_nScreenH;
+
+    // The mirror plane a stand-in texture belongs to (-1: an ordinary
+    // texture), and the surface's real texture, drawn instead when that
+    // plane has no reflection this frame. See CLTWorldScene's mirrors.
+    int                     m_nMirrorPlane;
+    const LT3DTexture*      m_pMirrorFallback;
+    // ...and that plane's reflection slot THIS frame (-1: none), set where the
+    // stand-in is used, so the GPU backend can name the reflection's texture.
+    int                     m_nMirrorSlot;
+
     // ⚠️ A CONSTRUCTOR, not an aggregate. Every existing caller builds one of
     // these by assigning the four fields above and nothing else; leaving
     // m_nMips as stack garbage would make the sampler index a mip array full
@@ -404,7 +422,9 @@ struct LT3DTexture
         : m_pRGBA(0), m_Width(0), m_Height(0), m_bAlphaTest(false),
           m_fAlphaRef(0.5f), m_bFullyTransparent(false), m_bBlend(false),
           m_fConstAlpha(1.0f), m_bTexAlpha(true), m_nBlendOp(0),
-          m_nMips(0), m_nUVShift(0)
+          m_nMips(0), m_nUVShift(0),
+          m_pScreenRGBA(0), m_nScreenW(0), m_nScreenH(0),
+          m_nMirrorPlane(-1), m_pMirrorFallback(0), m_nMirrorSlot(-1)
     {
         for (int i = 0; i < kMaxMips; ++i)
         {

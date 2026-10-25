@@ -214,6 +214,15 @@ namespace
         void Emit(const LT3DTexture* pTex, std::vector<LTMetalVert>& verts)
         {
             if (verts.empty() || !pTex || !m_pHandles || !m_pMVP) return;
+            // ⚠️ A MIRROR'S STAND-IN (HANDOVER 5de) names its reflection by
+            // the slot DrawModel gave it -- it has no texture of its own.
+            if (pTex->m_pMirrorFallback)
+            {
+                const unsigned int hR = LTMetal_ReflectionTexture(pTex->m_nMirrorSlot);
+                if (hR) LTMetal_DrawTris(m_pMVP, hR, &verts[0], (int)verts.size(),
+                                         false, 0.5f, false, 1.0f, true, 0);
+                return;
+            }
             std::map<const LT3DTexture*, unsigned int>::const_iterator h =
                 m_pHandles->find(pTex);
             if (h == m_pHandles->end() || h->second == 0) return;
@@ -337,20 +346,25 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     if (!m_bLoaded) return false;
     CPassTimer pt;                  // LT_PASSTIME=1
 
-    const float up[3] = { 0, 1, 0 };
+    // The camera's up -- reflected inside a mirror's pass (HANDOVER 5de).
+    const float up[3] = { m_CamUp[0], m_CamUp[1], m_CamUp[2] };
     const float fAspect = (float)nWidth / (float)(nHeight ? nHeight : 1);
 
     // ⚠️ THREE TARGETS, ONE BODY: offscreen + readback (the tests, and the
     // old game path), the window's drawable (walk mode), or the compositor's
     // native 3D target (m_pMetalScene, HANDOVER 5bq).
     const MetalSceneTarget* pScene = m_pMetalScene;
-    const bool bBegun = pScene
+    // ...and a fourth: a mirror's reflection (HANDOVER 5de), encoded inside
+    // the frame the outer call began.
+    const bool bBegun = m_bReflecting
+        ? LTMetal_BeginReflection(m_nReflSlot, m_nReflW, m_nReflH)
+        : pScene
         ? LTMetal_BeginScene(pScene->m_OutW, pScene->m_OutH, pScene->m_X, pScene->m_Y,
                              pScene->m_W, pScene->m_H, pScene->m_bClear)
         : bOffscreen
         ? LTMetal_BeginOffscreen(nWidth, nHeight, 0.055f, 0.067f, 0.086f)
         : LTMetal_BeginFrame(0.055f, 0.067f, 0.086f);
-    if (!bBegun) return (bOffscreen || pScene) ? false : true;   // on-screen: window minimised
+    if (!bBegun) return (bOffscreen || pScene || m_bReflecting) ? false : true;   // on-screen: window minimised
     pt.Mark(CPassTimer::kBegin);
 
     // ⚠️ AFTER the frame has begun, and that ORDER IS THE WHOLE POINT. Uploading
@@ -436,6 +450,9 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         float I[16]; LT3D::Identity(I);
         LT3DTarget rt; rt.m_Width = nWidth; rt.m_Height = nHeight;
         Stats rst;
+        // ⚠️ Mirror polygons go under their stand-ins (5de), so each mirror
+        // is a run of its own the frame can point at its reflection.
+        m_bRecordingStatic = true;
         for (size_t i = 0; i < sm.size(); ++i)
         {
             if (&sm[i] == m_pSky) continue;
@@ -457,6 +474,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                 out.m_Runs.push_back(r);
             }
         }
+        m_bRecordingStatic = false;
         m_Static.m_nBuffer = all.empty() ? 0 : LTMetal_CreateBuffer(&all[0], (int)all.size());
         m_Static.m_bValid = (m_Static.m_nBuffer != 0) || all.empty();
         printf("[LT3D] static world on the GPU: %u vertices in %zu models, %.1f MB\n",
@@ -496,6 +514,44 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                                                        pC->m_Tex.m_bAlphaTest, pC->m_Tex.m_fAlphaRef);
     }
     pt.Mark(CPassTimer::kUpload);
+
+    // ---- pass 0: MIRRORS (HANDOVER 5de) -------------------------------- //
+    //
+    // The software path's rule (ltworldrender.cpp pass 0): each chosen mirror
+    // is this whole function again, from the mirrored camera, into a
+    // reflection target the size of the view; then the main pass resumes and
+    // the mirrors' stand-ins are pointed at those targets.
+    if (!m_bReflecting)
+    {
+        const int nMir = SelectMirrors(pEye3, pAt3, fFovY, fAspect, pXform);
+        if (nMir > 0)
+        {
+            m_nReflW = pScene ? pScene->m_W : nWidth;
+            m_nReflH = pScene ? pScene->m_H : nHeight;
+            for (int s = 0; s < nMir; ++s)
+            {
+                float e2[3], a2[3], u2[3];
+                ReflectCamera(m_ActiveMirror[s], pEye3, pAt3, e2, a2, u2);
+                SetReflectPlane(m_ActiveMirror[s]);
+                memcpy(m_CamUp, u2, sizeof(m_CamUp));
+                m_bReflecting = true;
+                m_nReflSlot = s;
+                LTWorldSetPortalPass(true);
+                if (!RenderMetalInto(bOffscreen, 0, nWidth, nHeight, e2, a2, fFovY, pXform, pDyn))
+                    m_Mirrors[m_ActiveMirror[s]].m_nSlot = -1;     // no picture: draw it plain
+                LTWorldSetPortalPass(false);
+                m_bReflecting = false;
+                m_CamUp[0] = 0.0f; m_CamUp[1] = 1.0f; m_CamUp[2] = 0.0f;
+            }
+            LTMetal_ResumeAfterReflections();
+        }
+        // The stand-ins' slots this frame (the static world's runs are not
+        // drawn through DrawModel, which syncs at use); no software picture.
+        m_nReflScreenW = m_nReflScreenH = 0;
+        for (std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.begin();
+             it != m_MirrorPseudo.end(); ++it)
+            SyncMirrorPseudo(it->second);
+    }
 
     Stats st;
     st.m_nWorldTris = st.m_nObjTris = st.m_nPixels = st.m_nSkyPixels = st.m_nObjects = 0;
@@ -545,6 +601,8 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         // within seconds -- agreement 99.7% -> 81.5%, mean difference 1.39 ->
         // 20.46 -- because the two backends were rendering opposite worlds.
         if (LTWorldMirror()) for (int k = 0; k < 4; ++k) SP[k] = -SP[k];
+        // Reflected in a mirror's pass, as the software path does (5de).
+        if (m_bReflecting) for (int k = 0; k < 4; ++k) SP[k] = -SP[k];
 
         LT3D::LookAt(c, at, up, SV);
         LT3D::Multiply(SP, SV, SMVP);
@@ -577,6 +635,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     LT3D::Perspective(fFovY, fAspect, 4.0f, WorldFar(), P);
     if (LTWorldMirror()) for (int k = 0; k < 4; ++k) P[k] = -P[k];
     LT3D::LookAt(pEye3, pAt3, up, V);
+    ReflectProjection(P, V);        // a mirror's pass only (5de)
     LT3D::Multiply(P, V, MVP);
 
     // ⚠️ The SAME camera basis the software path builds, and built here rather
@@ -627,6 +686,23 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         std::map<const LT3DTexture*, std::vector<std::pair<unsigned int, unsigned int> > > pending;
         auto drawRun = [&](const float* pM, const LT3DTexture* pTex, unsigned int nFirst, unsigned int nCount)
         {
+            // ⚠️ A MIRROR'S RUN (5de): its reflection when the plane has one
+            // this frame (and we are not inside a reflection), else the
+            // surface's real texture, exactly as before.
+            // ...and a reflection never draws its own mirror (5dg).
+            if (pTex && pTex->m_pMirrorFallback && m_bReflecting
+                && pTex->m_nMirrorPlane == m_nReflPlaneIdx && !NoReflSelfSkip())
+                return;
+            if (pTex && pTex->m_pMirrorFallback
+                && (m_bReflecting || !MirrorActive(pTex->m_nMirrorPlane)))
+                pTex = pTex->m_pMirrorFallback;
+            if (pTex && pTex->m_pMirrorFallback)
+            {
+                const unsigned int hR = LTMetal_ReflectionTexture(pTex->m_nMirrorSlot);
+                if (hR) LTMetal_DrawTrisFrom(pM, hR, m_Static.m_nBuffer, (int)nFirst, (int)nCount,
+                                             false, 0.5f, false, 1.0f, true, 0);
+                return;
+            }
             std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(pTex);
             if (!pTex || h == m_MetalTex.end() || h->second == 0) return;
             LTMetal_DrawTrisFrom(pM, h->second, m_Static.m_nBuffer, (int)nFirst, (int)nCount,
@@ -730,6 +806,18 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     }
     batch.Flush(m_MetalTex);
     }   // LT_WORLDSTATIC=0
+
+    // ...and the reflections of mirrors on a model pass 2 skipped (5de) --
+    // the software pass's rule (ltworldrender.cpp).
+    ForEachActiveMirror(false, MVP, MVPBias, pXform,
+        [&](const LTWorldModelHeader& M, const float* pM, const std::vector<const LT3DTexture*>& otex,
+            const std::vector<int>& polys)
+        {
+            batch.SetMVP(pM);
+            DrawModel(dummy, pM, M, otex, st, &polys, &batch, kPassOpaque);
+            batch.Flush(m_MetalTex);
+        });
+    batch.SetMVP(MVP);
     pt.Mark(CPassTimer::kWorld);
     pt.Tris(st.m_nWorldTris);
 
@@ -1207,6 +1295,20 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     // ⚠️ ORDERED BATCHING. See CMetalBatcher::SetOrdered -- grouping by texture
     // would undo the sort that makes this pass correct.
     batch.SetOrdered(true);
+
+    // The mirrors' own textures over their reflections first -- the
+    // software pass's order (ltworldrender.cpp pass 4, 5de).
+    m_bMirrorOverlay = true;
+    ForEachActiveMirror(true, MVP, MVPBias, pXform,
+        [&](const LTWorldModelHeader& M, const float* pM, const std::vector<const LT3DTexture*>& btex,
+            const std::vector<int>& polys)
+        {
+            batch.SetMVP(pM);
+            DrawModel(dummy, pM, M, btex, st, &polys, &batch, kPassBlended);
+            batch.Flush(m_MetalTex);
+        });
+    m_bMirrorOverlay = false;
+
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         if (&mdl[i] == m_pSky) continue;
@@ -1314,8 +1416,8 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
 
     // ---- pass 6: FLAG_REALLYCLOSE -- the player-view weapon -------------- //
     // The software pass's rule (ltworldrender.cpp pass 6): last, depth
-    // cleared, its own near plane, same x/y projection.
-    if (pDyn)
+    // cleared, its own near plane, same x/y projection. Never in a mirror.
+    if (pDyn && !m_bReflecting)
     {
         float PC[16], MVPC[16];
         LT3D::Perspective(fFovY, fAspect, LTReallyCloseNear(), 40000.0f, PC);
@@ -1378,6 +1480,12 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
 
     LTMetal_SetFog(false, 0.0f, 1.0f, 0);    // nobody else draws fogged
     LTMetal_SetFogRange(0.0f, 0.0f);
+    // A mirror's pass ends here: its target is complete, the frame goes on.
+    if (m_bReflecting)
+    {
+        LTMetal_EndReflection();
+        return true;
+    }
     if (pScene)
     {
         LTMetal_SceneLightScale(pScene->m_Scale, pScene->m_Add);

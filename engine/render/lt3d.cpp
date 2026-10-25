@@ -324,6 +324,24 @@ namespace
                     if (invW <= t.m_pDepth[nIdx]) continue;
                 }
 
+                // ⚠️ A MIRROR: the reflected scene at this very pixel, as
+                // rendered (lit, fogged) by its own pass -- see
+                // LT3DTexture::m_pScreenRGBA. Depth is written, so what stands
+                // in front of the mirror still hides it.
+                if (pTex && pTex->m_pScreenRGBA)
+                {
+                    if (x < pTex->m_nScreenW && y < pTex->m_nScreenH)
+                    {
+                        const unsigned char* s = pTex->m_pScreenRGBA
+                                               + ((size_t)y * pTex->m_nScreenW + x) * 4;
+                        unsigned char* d = t.m_pRGBA + (size_t)nIdx * 4;
+                        d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = 255;
+                    }
+                    if (t.m_pDepth) t.m_pDepth[nIdx] = invW;
+                    ++nWritten;
+                    continue;
+                }
+
                 // Perspective-correct recovery: interpolate u/w, then divide.
                 float w = 1.0f / invW;
                 float u = (l0 * p0->uOverW + l1 * p1->uOverW + l2 * p2->uOverW) * w;

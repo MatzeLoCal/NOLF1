@@ -5569,14 +5569,38 @@ namespace
         {
             SRec* p = g_Objects.RecordAt(i);
             if (!p || !g_Objects.IsLive(p) || !p->m_pGame || !p->m_pClass) return false;
-            if (!(p->m_Flags & FLAG_VISIBLE)) return false;
+            // ⚠️ IN A MIRROR (5df) LT2 draws FLAG_PORTALVISIBLE objects too --
+            // "Draw in portals even if the object is invisible" (ltbasedefs.h).
+            // No server object here sets FLAG2_PORTALINVISIBLE (only client
+            // code does), so the server half of the rule is this one test.
+            const bool bPortal = LTWorldPortalPass();
+            // LT_PORTALTRACE=1 -- the player record as a mirror pass sees it
+            // (every 60th ask): flags, model, position.
+            if (bPortal && getenv("LT_PORTALTRACE") && ClassIsA(p->m_pClass, "CPlayerObj"))
+            {
+                static int s_n = 0;
+                if ((s_n++ % 60) == 0)
+                {
+                    float R[16]; LT3D::FromQuatPos(p->m_Rot, p->m_Pos, R);
+                    printf("[PORTAL] player flags 0x%08x%s%s model '%s' anim %d pos (%.0f %.0f %.0f) forward (%.2f %.2f %.2f)\n",
+                           (unsigned)p->m_Flags, (p->m_Flags & FLAG_VISIBLE) ? " VISIBLE" : "",
+                           (p->m_Flags & FLAG_PORTALVISIBLE) ? " PORTALVISIBLE" : "",
+                           p->m_sFilename.c_str(), p->m_nAnim, p->m_Pos[0], p->m_Pos[1], p->m_Pos[2],
+                           R[2], R[6], R[10]);
+                    fflush(stdout);
+                }
+            }
+            if (!(p->m_Flags & (bPortal ? (FLAG_VISIBLE | FLAG_PORTALVISIBLE) : FLAG_VISIBLE)))
+                return false;
             if (!IsModelFile(p->m_sFilename)) return false;
 
             // ⚠️ THE LOCAL PLAYER IS NOT DRAWN. In first person the camera sits
             // inside that model, and drawing it puts the inside of Cate's head
             // over the whole screen. The weapon in her hands is the view
             // model's job, not this pass's.
-            if (ClassIsA(p->m_pClass, "CPlayerObj"))    return false;
+            // ⚠️ ...EXCEPT IN A MIRROR (5df): that is what the game hides her
+            // for and marks her FLAG_PORTALVISIBLE for (PlayerObj.cpp:167).
+            if (ClassIsA(p->m_pClass, "CPlayerObj") && !bPortal) return false;
             // ⚠️ ...AND ONLY THE PLAYER'S HAND-HELD WEAPON MODEL (HANDOVER 5cl).
             // Every weapon anyone holds is a CHHWeaponModel attached to a
             // RightHand socket (Attachments.cpp CreateAttachment) -- the AI's
@@ -5589,9 +5613,11 @@ namespace
                     if (b) { printf("[SERVER] LT_NOHHWEAPONS=1 -- no hand-held weapon model is drawn (old)\n"); fflush(stdout); }
                     return b; }();
                 const Attach* a = AttachOfChild(p);
-                if (s_bHideAll || !a || !a->pParent || !g_Objects.IsLive(a->pParent)
-                    || !a->pParent->m_pClass || ClassIsA(a->pParent->m_pClass, "CPlayerObj"))
+                if (s_bHideAll || !a || !a->pParent || !g_Objects.IsLive(a->pParent) || !a->pParent->m_pClass)
                     return false;
+                // The player's own gun only in a mirror, in her hand there
+                // (Attachments.cpp:424 makes it FLAG_PORTALVISIBLE).
+                if (ClassIsA(a->pParent->m_pClass, "CPlayerObj") && !bPortal) return false;
             }
 
             // ⚠️ WORLD-FILE OBJECTS ARE DRAWN BY PASS 3 already, from their own

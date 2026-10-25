@@ -2976,11 +2976,15 @@ public:
                 else         p->m_Flags &= ~FLAG_WASDRAWN;
                 continue;
             }
-            if (!(p->m_Flags & FLAG_VISIBLE)) continue;
+            // ⚠️ AND FLAG_PORTALVISIBLE (5df): hidden here, drawn in a mirror
+            // -- the player's first-person-hidden attachments. Get() decides
+            // per pass; only what the MAIN view shows is "in the game view".
+            if (!(p->m_Flags & (FLAG_VISIBLE | FLAG_PORTALVISIBLE))) continue;
             if (LTReplicate_IsMirror(p)) continue;
-            if (p->m_nType == OT_SPRITE && !p->m_sFilename.empty()) { m_Sprites.push_back(p); continue; }
+            if (p->m_nType == OT_SPRITE && !p->m_sFilename.empty())
+            { if (p->m_Flags & FLAG_VISIBLE) m_Sprites.push_back(p); continue; }
             if (p->m_nType != OT_MODEL || !p->m_pModel) continue;
-            p->m_bInGameView = true;
+            if (p->m_Flags & FLAG_VISIBLE) p->m_bInGameView = true;
             m_Client.push_back(p);
         }
     }
@@ -3017,6 +3021,8 @@ public:
     {
         if (i >= m_Sprites.size()) return false;
         const LTSceneObject* p = m_Sprites[i];
+        // In a mirror: never FLAG2_PORTALINVISIBLE (the player-view FX, 5df).
+        if (LTWorldPortalPass() && (p->m_Flags2 & FLAG2_PORTALINVISIBLE)) return false;
         out.m_Draw.m_sSprite  = p->m_sFilename;
         out.m_Draw.m_fScaleX  = p->m_Scale[0] > 0.0f ? p->m_Scale[0] : 1.0f;
         out.m_Draw.m_fScaleY  = p->m_Scale[1] > 0.0f ? p->m_Scale[1] : 1.0f;
@@ -3051,6 +3057,14 @@ public:
         i -= nS;
         if (i >= m_Client.size()) return false;
         const LTSceneObject* p = m_Client[i];
+        // ⚠️ LT2'S PORTAL RULE (5df): the main view draws FLAG_VISIBLE; a
+        // mirror draws FLAG_VISIBLE or FLAG_PORTALVISIBLE, never
+        // FLAG2_PORTALINVISIBLE (the view weapon, the zipcord, PV FX).
+        if (LTWorldPortalPass())
+        {
+            if (p->m_Flags2 & FLAG2_PORTALINVISIBLE) return false;
+        }
+        else if (!(p->m_Flags & FLAG_VISIBLE)) return false;
 
         out.sModel = p->m_sFilename;
         out.sSkins.clear();

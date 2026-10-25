@@ -1006,6 +1006,12 @@ static void LTHost_UpdateFog()
         if (!(fFarZ > 4.0f)) fFarZ = 10000.0f;
     }
     pW->SetFarZ(fFarZ);
+    // ⚠️ MIRRORS (HANDOVER 5de): the game's own "Mirrors" option writes
+    // DrawPortals (FolderAdvDisplay.cpp:196) -- and FolderDisplay forces it
+    // to 0 whenever BitDepth is 16. Not set at all = on: the port always
+    // renders 32-bit, which is what the original asks for before it offers
+    // reflections.
+    LTWorldSetMirrors(F("DrawPortals", 1.0f) != 0.0f);
     LTFogState w, sky;
     if (!s_bOff)
     {
@@ -1530,6 +1536,44 @@ private:
         // The client reaches it through Common() for the same trigger strings
         // the server does.
         LTRESULT Parse(ConParse* pParse) override { return LTConParse_Common(pParse); }
+
+        // ⚠️ THE PLAYER'S FACING, AND IT NEVER REACHED THE SERVER (HANDOVER
+        // 5df). CommonUtilities.cpp's CompressRotationByte -- how the client
+        // sends its yaw in every MID_PLAYER_UPDATE (GameClientShell.cpp:2246)
+        // -- asks THIS interface for the rotation's vectors, and the stub
+        // wrote none: atan2 of untouched locals, the server's player always
+        // facing +Z whatever way she looked. Seen first in a mirror, where
+        // Cate stood with her back to it. The server's twin of these two
+        // (ltserverhost.cpp LTHostServerCommon) uses the same LTMathImpl, so
+        // both ends agree on what a yaw is. LT_OLDCLIENTROT=1 = the stubs
+        // (old, says so).
+        static bool OldClientRot()
+        {
+            static const bool b = []() {
+                const bool v = (getenv("LT_OLDCLIENTROT") != 0);
+                if (v) { printf("[HOST] LT_OLDCLIENTROT=1 -- client ILTCommon rotation helpers are stubs (old)\n"); fflush(stdout); }
+                return v; }();
+            return b;
+        }
+        LTRESULT GetRotationVectors(LTRotation& rot, LTVector& up, LTVector& right, LTVector& fwd) override
+        {
+            LTIMPL("ILTCommon::GetRotationVectors");
+            if (OldClientRot()) return LTStub_ILTCommon::GetRotationVectors(rot, up, right, fwd);
+            const float q[4] = { rot.m_Quat[0], rot.m_Quat[1], rot.m_Quat[2], rot.m_Quat[3] };
+            float r[3], u[3], f[3];
+            LTMathImpl::GetVectors(q, r, u, f);
+            right.Init(r[0], r[1], r[2]); up.Init(u[0], u[1], u[2]); fwd.Init(f[0], f[1], f[2]);
+            return LT_OK;
+        }
+        LTRESULT SetupEuler(LTRotation& rot, float pitch, float yaw, float roll) override
+        {
+            LTIMPL("ILTCommon::SetupEuler");
+            if (OldClientRot()) return LTStub_ILTCommon::SetupEuler(rot, pitch, yaw, roll);
+            float q[4];
+            LTMathImpl::SetupEuler(q, pitch, yaw, roll);
+            rot.Init(q[0], q[1], q[2], q[3]);
+            return LT_OK;
+        }
 
         // ⚠️ THE PLAYER'S SIZE. CMoveMgr asks for this to size its collision
         // box (CMoveMgr.cpp:1674); the stub left it at its (1,1,1) default, so

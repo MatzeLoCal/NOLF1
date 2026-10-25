@@ -29,6 +29,8 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
+#include <functional>
 
 #include "ltworld.h"
 #include "lt3d.h"
@@ -106,6 +108,21 @@ bool LTFogRange();
 // Are prop objects drawn? LT_NOOBJECTS=1 skips them, for bisecting a
 // difference into "the level" or "the things standing in it".
 bool LTObjectsEnabled();
+
+// ⚠️ MIRRORS (HANDOVER 5de): reflections are drawn when the game's "Mirrors"
+// option is on -- console DrawPortals, which the host pushes in each frame
+// (absent = on). LT_NOMIRRORS=1 = never (says so). Both renderers ask this.
+void LTWorldSetMirrors(bool bOn);
+bool LTMirrorsEnabled();
+
+// ⚠️ TRUE WHILE A MIRROR'S REFLECTION IS BEING DRAWN (HANDOVER 5df). The
+// object lists ask it, because LT2 draws a different set in a "portal":
+// FLAG_VISIBLE *or* FLAG_PORTALVISIBLE, and never FLAG2_PORTALINVISIBLE. The
+// first-person player is exactly that case -- the game hides her
+// (ShowPlayer(FALSE)) and CPlayerObj carries FLAG_PORTALVISIBLE, so Cate is
+// seen in a mirror and nowhere else; the view weapon is PORTALINVISIBLE.
+bool LTWorldPortalPass();
+void LTWorldSetPortalPass(bool b);
 
 // ----------------------------------------------------------------------- //
 //
@@ -898,6 +915,92 @@ private:
         std::vector<StaticModel>    m_Models;           // indexed like GetModels()
     };
     StaticWorld                             m_Static;
+
+    // ---- MIRRORS (HANDOVER 5de) ----------------------------------------- //
+    //
+    // ⚠️ A MIRROR IS A SURFACE EFFECT, not a flag: `Mirror Overlay` in the
+    // surface's effect list (64 surfaces in 10 levels; no surface carries the
+    // donor's SURF_MIRROR bit 23, and the donor never draws one). LT2 renders
+    // the scene reflected through it when DrawPortals is on, then lays the
+    // surface's own texture over it. Here: the mirror polygons are grouped by
+    // plane at load; each frame up to kMirrorSlots planes that face the camera
+    // and cover the most screen get a REFLECTION PASS -- the whole scene from
+    // the mirrored camera, near plane on the mirror -- into a target the size
+    // of the view. The mirror's polygons then write that target's pixel at
+    // their own pixel (opaque pass) and their texture blends over it (blended
+    // pass). A plane with no reflection this frame draws as before.
+    enum { kMirrorSlots = 2 };
+    struct MirrorPlane
+    {
+        size_t              m_nModel;       // index into GetModels()
+        float               m_Plane[4];     // rest pose: n.x + d = 0, n unit
+        float               m_Point[3];     // a point on it (rest pose)
+        float               m_Min[3], m_Max[3];
+        std::vector<int>    m_PolyIdx;      // its polygons, indices into the model
+        int                 m_nSlot;        // this frame's reflection, -1 none
+        float               m_Live[4];      // this frame's plane (a door moves it)
+    };
+    std::vector<MirrorPlane>                m_Mirrors;
+    std::map<const LTWorldPoly*, int>       m_MirrorOfPoly;     // polygon -> plane
+    std::set<const LTWorldModelHeader*>     m_MirrorModels;
+    // Stand-in textures, one per (plane, real texture); stable pointers.
+    std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*> m_MirrorPseudo;
+    int                                     m_ActiveMirror[kMirrorSlots];
+    int                                     m_nActiveMirrors = 0;
+    std::vector<unsigned char>              m_ReflRGBA[kMirrorSlots];
+    std::vector<float>                      m_ReflDepth[kMirrorSlots];
+
+    // Inside a reflection pass: the plane (kept side positive), the camera's
+    // reflected up, and which target it renders into.
+    bool                                    m_bReflecting = false;
+    float                                   m_ReflPlane[4] = { 0, 1, 0, 0 };
+    float                                   m_CamUp[3] = { 0, 1, 0 };
+    int                                     m_nReflSlot = 0;
+    // ...and WHICH plane: a reflection never draws its own mirror (5dg).
+    int                                     m_nReflPlaneIdx = -1;
+    // While the GPU's static world is recorded, mirror polygons always go
+    // under their stand-in, so they become runs of their own.
+    bool                                    m_bRecordingStatic = false;
+    // Set only while pass 4 draws the mirrors' own textures over their
+    // reflections -- the ordinary blended walk never draws a mirror.
+    bool                                    m_bMirrorOverlay = false;
+    // The reflection target's size in the Metal backend (the view's pixels).
+    int                                     m_nReflW = 0, m_nReflH = 0;
+
+    void                BuildMirrors();
+    // The mirrors' own walks, the same for both backends: each reflected
+    // plane's model, the matrix it is drawn with, its textures and its
+    // polygons. bGlass: pass 4's -- BLENDED textures (the object-alpha ones
+    // for a model translucent as a whole); the caller draws kPassBlended with
+    // m_bMirrorOverlay set. !bGlass: pass 2's FILL, only for a model pass 2
+    // skips (translucent by its object's alpha, 5cf); kPassOpaque.
+    void                ForEachActiveMirror(bool bGlass, const float* MVP, const float* MVPBias,
+                                            const ILTWorldModelXform* pXform,
+                                            const std::function<void(const LTWorldModelHeader&,
+                                                                     const float*,
+                                                                     const std::vector<const LT3DTexture*>&,
+                                                                     const std::vector<int>&)>& fn);
+    LT3DTexture*        MirrorPseudo(int nPlane, const LT3DTexture* pReal);
+    // Points a stand-in at its plane's reflection this frame: the slot, and
+    // (software) the picture. ⚠️ AT EVERY USE, not once per frame -- a stand-in
+    // is made the first time its polygon is drawn, after any per-frame pass.
+    void                SyncMirrorPseudo(LT3DTexture* p) const;
+    // The software reflections' size this frame (0: none drawn in software).
+    int                                     m_nReflScreenW = 0, m_nReflScreenH = 0;
+    bool                MirrorActive(int nPlane) const
+                        { return nPlane >= 0 && nPlane < (int)m_Mirrors.size() && m_Mirrors[nPlane].m_nSlot >= 0; }
+    // Chooses this frame's reflections (sets m_nSlot, m_Live); returns how many.
+    int                 SelectMirrors(const float* pEye3, const float* pAt3, float fFovY,
+                                      float fAspect, const ILTWorldModelXform* pXform);
+    // The mirrored camera for plane nPlane: eye, look-at and up.
+    void                ReflectCamera(int nPlane, const float* pEye3, const float* pAt3,
+                                      float* pEyeOut, float* pAtOut, float* pUpOut) const;
+    // Inside a reflection pass: P's x row negated once more (a reflection
+    // flips handedness) and its near plane moved onto the mirror (oblique).
+    void                ReflectProjection(float* P, const float* V) const;
+    // m_ReflPlane / m_nReflPlaneIdx for a reflection of plane nPlane (5dg).
+    void                SetReflectPlane(int nPlane);
+    static bool         NoReflSelfSkip();
 
     bool                                    m_bLoaded;
     std::string                             m_sError;

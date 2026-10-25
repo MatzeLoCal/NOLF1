@@ -59,6 +59,20 @@ bool LTMetal_BeginFrame(float fR, float fG, float fB);
 // sky occludes the level.
 void LTMetal_ClearDepth();
 
+// ---- mirrors (HANDOVER 5de) ------------------------------------------ //
+//
+// A mirror's REFLECTION is a whole scene drawn from the mirrored camera into a
+// target of its own, before the main pass draws anything. Call inside a frame
+// (after LTMetal_BeginScene / BeginOffscreen / BeginFrame), once per mirror:
+// BeginReflection, the scene's draws, EndReflection. Then
+// ResumeAfterReflections puts the main pass back (its colour kept, depth
+// cleared). ReflectionTexture(slot) is a texture handle drawn by SCREEN
+// position: a triangle using it writes the reflection's pixel at its own.
+bool LTMetal_BeginReflection(int nSlot, int nWidth, int nHeight);
+void LTMetal_EndReflection();
+void LTMetal_ResumeAfterReflections();
+unsigned int LTMetal_ReflectionTexture(int nSlot);
+
 // ---- offscreen ------------------------------------------------------- //
 //
 // ⚠️ RENDERING WITHOUT A WINDOW, and it is what makes the GPU path TESTABLE.

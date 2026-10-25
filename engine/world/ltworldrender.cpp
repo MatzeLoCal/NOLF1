@@ -114,6 +114,8 @@ CLTWorldScene::~CLTWorldScene()
          it != m_Textures.end(); ++it) delete it->second;
     for (std::map<std::string, CachedModel*>::iterator it = m_Models.begin();
          it != m_Models.end(); ++it) delete it->second;
+    for (std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.begin();
+         it != m_MirrorPseudo.end(); ++it) delete it->second;
 }
 
 
@@ -582,6 +584,32 @@ bool LTObjectsEnabled()
 {
     static const bool b = (getenv("LT_NOOBJECTS") == 0);
     return b;
+}
+
+
+// See ltworldrender.h. The console value arrives from the host every frame;
+// the environment switch is the A/B and wins.
+namespace { bool s_bMirrorsConsole = true; bool s_bPortalPass = false; }
+void LTWorldSetMirrors(bool bOn) { s_bMirrorsConsole = bOn; }
+// LT_NOPORTALRULE=1: a mirror shows only what the main view shows -- no
+// first-person player, FLAG2_PORTALINVISIBLE ignored (old, says so). 5df.
+bool LTWorldPortalPass()
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOPORTALRULE") != 0);
+        if (b) { printf("[LT3D] LT_NOPORTALRULE=1 -- mirrors draw only what the main view draws (old)\n"); fflush(stdout); }
+        return b; }();
+    return s_bPortalPass && !s_bOff;
+}
+// Kept in step with CLTWorldScene::m_bReflecting by both renderers.
+void LTWorldSetPortalPass(bool b) { s_bPortalPass = b; }
+bool LTMirrorsEnabled()
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOMIRRORS") != 0);
+        if (b) { printf("[LT3D] LT_NOMIRRORS=1 -- mirrors show their texture, no reflection (old)\n"); fflush(stdout); }
+        return b; }();
+    return !s_bOff && s_bMirrorsConsole;
 }
 
 
@@ -1688,7 +1716,388 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
 
     BuildModelLights();
 
+    BuildMirrors();
+
     return true;
+}
+
+
+// ---- MIRRORS (HANDOVER 5de) -- see ltworldrender.h ------------------------ //
+
+void CLTWorldScene::BuildMirrors()
+{
+    for (std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.begin();
+         it != m_MirrorPseudo.end(); ++it)
+    {
+        m_MetalTex.erase(it->second);
+        delete it->second;
+    }
+    m_MirrorPseudo.clear();
+    m_Mirrors.clear();
+    m_MirrorOfPoly.clear();
+    m_MirrorModels.clear();
+    m_nActiveMirrors = 0;
+
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    for (size_t i = 0; i < mdl.size(); ++i)
+    {
+        const LTWorldModelHeader& M = mdl[i];
+        if (!M.m_bBodyParsed || &M == m_pSky) continue;
+        for (size_t q = 0; q < M.m_Polys.size(); ++q)
+        {
+            const LTWorldPoly& po = M.m_Polys[q];
+            if (po.m_Verts.size() < 3 || po.m_nSurface >= M.m_Surfaces.size()) continue;
+            const LTWorldSurface& sf = M.m_Surfaces[po.m_nSurface];
+            // An invisible or sky surface is never drawn, so it reflects nothing
+            // (M09S03's mirror boxes carry the effect on invisible sides).
+            if (sf.m_nFlags & (kSURF_INVISIBLE | kSURF_SKY)) continue;
+            bool bMirror = false;
+            for (size_t e = 0; e < sf.m_Effects.size(); ++e)
+                if (strcasecmp(sf.m_Effects[e].m_sName.c_str(), "mirror") == 0) bMirror = true;
+            if (!bMirror) continue;
+
+            // ⚠️ THE FRONT IS THE WINDING'S SIDE: (b-a) x (c-a) of the stored
+            // order points at the side the surface is seen from (measured on
+            // M01S02's paintings, 5dc). Newell's sum, so a sliver's first three
+            // points cannot make it degenerate.
+            float n[3] = { 0, 0, 0 }, c[3] = { 0, 0, 0 };
+            int nPts = 0;
+            for (size_t k = 0; k < po.m_Verts.size(); ++k)
+            {
+                const unsigned short a = po.m_Verts[k].m_nPoint;
+                const unsigned short b = po.m_Verts[(k + 1) % po.m_Verts.size()].m_nPoint;
+                if (a >= M.m_Points.size() || b >= M.m_Points.size()) continue;
+                const float* pa = M.m_Points[a].m_Pos;
+                const float* pb = M.m_Points[b].m_Pos;
+                n[0] += (pa[1] - pb[1]) * (pa[2] + pb[2]);
+                n[1] += (pa[2] - pb[2]) * (pa[0] + pb[0]);
+                n[2] += (pa[0] - pb[0]) * (pa[1] + pb[1]);
+                for (int j = 0; j < 3; ++j) c[j] += pa[j];
+                ++nPts;
+            }
+            const float l = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+            if (nPts < 3 || l < 1e-6f) continue;
+            for (int j = 0; j < 3; ++j) { n[j] /= l; c[j] /= (float)nPts; }
+            const float d = -(n[0]*c[0] + n[1]*c[1] + n[2]*c[2]);
+
+            int nPlane = -1;
+            for (size_t k = 0; k < m_Mirrors.size(); ++k)
+            {
+                const MirrorPlane& mp = m_Mirrors[k];
+                if (mp.m_nModel != i) continue;
+                if (n[0]*mp.m_Plane[0] + n[1]*mp.m_Plane[1] + n[2]*mp.m_Plane[2] < 0.999f) continue;
+                if (fabsf(d - mp.m_Plane[3]) > 0.5f) continue;
+                nPlane = (int)k;
+                break;
+            }
+            if (nPlane < 0)
+            {
+                MirrorPlane mp;
+                mp.m_nModel = i;
+                for (int j = 0; j < 3; ++j) { mp.m_Plane[j] = n[j]; mp.m_Point[j] = c[j];
+                                              mp.m_Min[j] = 1e30f; mp.m_Max[j] = -1e30f; }
+                mp.m_Plane[3] = d;
+                mp.m_nSlot = -1;
+                for (int j = 0; j < 4; ++j) mp.m_Live[j] = mp.m_Plane[j];
+                m_Mirrors.push_back(mp);
+                nPlane = (int)m_Mirrors.size() - 1;
+            }
+            MirrorPlane& mp = m_Mirrors[nPlane];
+            for (size_t k = 0; k < po.m_Verts.size(); ++k)
+            {
+                if (po.m_Verts[k].m_nPoint >= M.m_Points.size()) continue;
+                const float* p = M.m_Points[po.m_Verts[k].m_nPoint].m_Pos;
+                for (int j = 0; j < 3; ++j)
+                { if (p[j] < mp.m_Min[j]) mp.m_Min[j] = p[j]; if (p[j] > mp.m_Max[j]) mp.m_Max[j] = p[j]; }
+            }
+            mp.m_PolyIdx.push_back((int)q);
+            m_MirrorOfPoly[&po] = nPlane;
+            m_MirrorModels.insert(&M);
+        }
+    }
+    if (!m_Mirrors.empty())
+    {
+        printf("[LT3D] %zu mirror plane(s) from %zu polygon(s) in %zu model(s)%s\n",
+               m_Mirrors.size(), m_MirrorOfPoly.size(), m_MirrorModels.size(),
+               LTMirrorsEnabled() ? "" : " -- reflections OFF");
+        fflush(stdout);
+    }
+}
+
+
+void CLTWorldScene::SyncMirrorPseudo(LT3DTexture* p) const
+{
+    if (!p) return;
+    const int s = MirrorActive(p->m_nMirrorPlane) ? m_Mirrors[p->m_nMirrorPlane].m_nSlot : -1;
+    p->m_nMirrorSlot = s;
+    const bool bSoft = s >= 0 && m_nReflScreenW > 0 && m_nReflScreenH > 0
+                    && m_ReflRGBA[s].size() == (size_t)m_nReflScreenW * m_nReflScreenH * 4;
+    p->m_pScreenRGBA = bSoft ? &m_ReflRGBA[s][0] : 0;
+    p->m_nScreenW = m_nReflScreenW; p->m_nScreenH = m_nReflScreenH;
+}
+
+
+LT3DTexture* CLTWorldScene::MirrorPseudo(int nPlane, const LT3DTexture* pReal)
+{
+    const std::pair<int, const LT3DTexture*> key(nPlane, pReal);
+    std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.find(key);
+    if (it != m_MirrorPseudo.end()) return it->second;
+    LT3DTexture* p = new LT3DTexture();
+    // The real texture's size and UV shift, so the polygon's UVs come out as
+    // they would (unused by a reflection, but finite); no alpha test, no blend.
+    if (pReal) { p->m_Width = pReal->m_Width; p->m_Height = pReal->m_Height; p->m_nUVShift = pReal->m_nUVShift; }
+    if (p->m_Width <= 0)  p->m_Width = 1;
+    if (p->m_Height <= 0) p->m_Height = 1;
+    p->m_nMirrorPlane = nPlane;
+    p->m_pMirrorFallback = pReal;
+    m_MirrorPseudo[key] = p;
+    return p;
+}
+
+
+// ⚠️ WHICH MIRRORS GET A REFLECTION THIS FRAME. Each costs a whole scene, so:
+// the camera must be in front of it, some of it must be on screen, and of
+// those the ones covering the most screen win (a 4-unit edge strip of a
+// mirror box never outbids its face). A mirror on a door moves with the door.
+int CLTWorldScene::SelectMirrors(const float* pEye3, const float* pAt3, float fFovY,
+                                 float fAspect, const ILTWorldModelXform* pXform)
+{
+    m_nActiveMirrors = 0;
+    for (size_t k = 0; k < m_Mirrors.size(); ++k) m_Mirrors[k].m_nSlot = -1;
+    if (m_Mirrors.empty() || !LTMirrorsEnabled()) return 0;
+
+    const float up[3] = { 0, 1, 0 };
+    float P[16], V[16], MVP[16];
+    LT3D::Perspective(fFovY, fAspect, 4.0f, WorldFar(), P);
+    LT3D::LookAt(pEye3, pAt3, up, V);
+    LT3D::Multiply(P, V, MVP);
+
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    std::vector<std::pair<float, int> > cand;
+    for (size_t k = 0; k < m_Mirrors.size(); ++k)
+    {
+        MirrorPlane& mp = m_Mirrors[k];
+        const LTWorldModelHeader& M = mdl[mp.m_nModel];
+        if (!Drawable(M, pXform)) continue;
+        { float a; if (ModelObjectAlpha(M, pXform, &a) && a <= 0.0f) continue; }
+
+        // The live plane and box: the rest pose through the model's own
+        // transform when something moves it.
+        float Local[16];
+        const bool bMoved = pXform && pXform->GetModelTransform(M.m_sName, Local);
+        float n[3] = { mp.m_Plane[0], mp.m_Plane[1], mp.m_Plane[2] };
+        float p0[3] = { mp.m_Point[0], mp.m_Point[1], mp.m_Point[2] };
+        if (bMoved)
+        {
+            float t[3], t4[4];
+            for (int r = 0; r < 3; ++r) t[r] = Local[r*4+0]*n[0] + Local[r*4+1]*n[1] + Local[r*4+2]*n[2];
+            for (int r = 0; r < 3; ++r) n[r] = t[r];
+            LT3D::TransformPoint(Local, mp.m_Point, t4);
+            for (int r = 0; r < 3; ++r) p0[r] = t4[r];
+        }
+        const float d = -(n[0]*p0[0] + n[1]*p0[1] + n[2]*p0[2]);
+        const float fSide = n[0]*pEye3[0] + n[1]*pEye3[1] + n[2]*pEye3[2] + d;
+        if (fSide < 1.0f) continue;
+
+        // The box's corners on screen: a clipped NDC rectangle's area (0..4).
+        float mn[2] = { 1e30f, 1e30f }, mx[2] = { -1e30f, -1e30f };
+        int nBehind = 0;
+        for (int c = 0; c < 8; ++c)
+        {
+            float w[4] = { (c & 1) ? mp.m_Max[0] : mp.m_Min[0],
+                           (c & 2) ? mp.m_Max[1] : mp.m_Min[1],
+                           (c & 4) ? mp.m_Max[2] : mp.m_Min[2], 1.0f };
+            if (bMoved) { float t4[4]; LT3D::TransformPoint(Local, w, t4); for (int r = 0; r < 3; ++r) w[r] = t4[r]; }
+            float cl[4];
+            LT3D::TransformPoint(MVP, w, cl);
+            if (cl[3] <= 4.0f) { ++nBehind; continue; }
+            const float x = cl[0] / cl[3], y = cl[1] / cl[3];
+            if (x < mn[0]) mn[0] = x; if (x > mx[0]) mx[0] = x;
+            if (y < mn[1]) mn[1] = y; if (y > mx[1]) mx[1] = y;
+        }
+        float fArea;
+        if (nBehind == 8) continue;
+        if (nBehind > 0) fArea = 4.0f;                  // straddles the eye: assume it fills the view
+        else
+        {
+            const float x0 = mn[0] < -1.0f ? -1.0f : mn[0], x1 = mx[0] > 1.0f ? 1.0f : mx[0];
+            const float y0 = mn[1] < -1.0f ? -1.0f : mn[1], y1 = mx[1] > 1.0f ? 1.0f : mx[1];
+            if (x1 <= x0 || y1 <= y0) continue;
+            fArea = (x1 - x0) * (y1 - y0);
+        }
+        if (fArea < 0.004f) continue;                   // 0.1% of the view
+        mp.m_Live[0] = n[0]; mp.m_Live[1] = n[1]; mp.m_Live[2] = n[2]; mp.m_Live[3] = d;
+        cand.push_back(std::make_pair(-fArea, (int)k));
+    }
+    std::sort(cand.begin(), cand.end());
+    for (size_t k = 0; k < cand.size() && m_nActiveMirrors < kMirrorSlots; ++k)
+    {
+        // A second mirror only when it is a real one, not the 4-unit edge
+        // strip of the first's box (M04S01's cabinet carries the effect on
+        // every face): a quarter of the first one's screen at least.
+        if (k > 0 && cand[k].first > 0.25f * cand[0].first) break;
+        // ⚠️ ...and not one HIDDEN BEHIND a chosen one (5dg): parallel, facing
+        // the same way, overlapping it across the plane, and farther away.
+        // M07S01's two-sided mirror boards carry the effect on their inner
+        // faces too, and the inner face of the far board always won the
+        // second slot -- a whole scene per frame for a picture nobody sees.
+        {
+            const MirrorPlane& c = m_Mirrors[cand[k].second];
+            bool bHidden = false;
+            for (int s = 0; s < m_nActiveMirrors && !bHidden; ++s)
+            {
+                const MirrorPlane& a = m_Mirrors[m_ActiveMirror[s]];
+                if (c.m_Live[0]*a.m_Live[0] + c.m_Live[1]*a.m_Live[1] + c.m_Live[2]*a.m_Live[2] < 0.999f) continue;
+                bool bOverlap = true;
+                for (int j = 0; j < 3 && bOverlap; ++j)
+                {
+                    if (fabsf(a.m_Live[j]) > 0.5f) continue;            // the normal's axis
+                    if (c.m_Max[j] < a.m_Min[j] || c.m_Min[j] > a.m_Max[j]) bOverlap = false;
+                }
+                const float dc = c.m_Live[0]*pEye3[0] + c.m_Live[1]*pEye3[1] + c.m_Live[2]*pEye3[2] + c.m_Live[3];
+                const float da = a.m_Live[0]*pEye3[0] + a.m_Live[1]*pEye3[1] + a.m_Live[2]*pEye3[2] + a.m_Live[3];
+                if (bOverlap && dc > da) bHidden = true;
+            }
+            if (bHidden) continue;
+        }
+        m_Mirrors[cand[k].second].m_nSlot = m_nActiveMirrors;
+        m_ActiveMirror[m_nActiveMirrors++] = cand[k].second;
+    }
+
+    static const bool s_bTrace = (getenv("LT_MIRRORTRACE") != 0);
+    if (s_bTrace)
+    {
+        static int s_nLast = -1;
+        if (m_nActiveMirrors != s_nLast)
+        {
+            printf("[MIRROR] %d reflection(s) this frame", m_nActiveMirrors);
+            for (int s = 0; s < m_nActiveMirrors; ++s)
+            {
+                const MirrorPlane& mp = m_Mirrors[m_ActiveMirror[s]];
+                printf("  [plane %d, %s, n=(%.2f %.2f %.2f), %zu poly, box (%.0f %.0f %.0f)-(%.0f %.0f %.0f)]",
+                       m_ActiveMirror[s], mdl[mp.m_nModel].m_sName.c_str(),
+                       mp.m_Live[0], mp.m_Live[1], mp.m_Live[2], mp.m_PolyIdx.size(),
+                       mp.m_Min[0], mp.m_Min[1], mp.m_Min[2], mp.m_Max[0], mp.m_Max[1], mp.m_Max[2]);
+            }
+            printf("\n"); fflush(stdout);
+            s_nLast = m_nActiveMirrors;
+        }
+    }
+    return m_nActiveMirrors;
+}
+
+
+// LT_OLDREFLCLIP=1: the reflection draws its own mirror and clips exactly at
+// it, as 5de did (it flickered -- says so). 5dg.
+bool CLTWorldScene::NoReflSelfSkip()
+{
+    static const bool b = []() {
+        const bool v = (getenv("LT_OLDREFLCLIP") != 0);
+        if (v) { printf("[LT3D] LT_OLDREFLCLIP=1 -- a reflection draws its own mirror, clip exactly on it (old)\n"); fflush(stdout); }
+        return v; }();
+    return b;
+}
+
+// The plane a reflection pass clips at, and which mirror it is. ⚠️ HALF A
+// UNIT INTO THE ROOM: anything else flush with the mirror -- the wall face
+// behind it -- would otherwise sit on the near plane too and flicker the same
+// way. Nothing worth reflecting is within half a unit of the glass.
+void CLTWorldScene::SetReflectPlane(int nPlane)
+{
+    memcpy(m_ReflPlane, m_Mirrors[nPlane].m_Live, sizeof(m_ReflPlane));
+    if (!NoReflSelfSkip()) m_ReflPlane[3] -= 0.5f;
+    m_nReflPlaneIdx = nPlane;
+}
+
+
+void CLTWorldScene::ReflectCamera(int nPlane, const float* pEye3, const float* pAt3,
+                                  float* pEyeOut, float* pAtOut, float* pUpOut) const
+{
+    const float* L = m_Mirrors[nPlane].m_Live;
+    const float de = L[0]*pEye3[0] + L[1]*pEye3[1] + L[2]*pEye3[2] + L[3];
+    const float da = L[0]*pAt3[0]  + L[1]*pAt3[1]  + L[2]*pAt3[2]  + L[3];
+    const float du = L[1];                       // n . (0, 1, 0)
+    for (int k = 0; k < 3; ++k)
+    {
+        pEyeOut[k] = pEye3[k] - 2.0f * de * L[k];
+        pAtOut[k]  = pAt3[k]  - 2.0f * da * L[k];
+        pUpOut[k]  = (k == 1 ? 1.0f : 0.0f) - 2.0f * du * L[k];
+    }
+}
+
+
+// ⚠️ TWO CHANGES TO THE PROJECTION, AND BOTH ARE THE REFLECTION.
+//
+// (1) Rendering the real scene through view(mirrored eye, at, up) gives the
+// picture a camera BEHIND the glass would see; the mirror shows it flipped
+// left to right, because a reflection reverses handedness. That is one more
+// negation of P's x row, on top of whatever MirrorWorld already does.
+//
+// (2) Everything between that camera and the mirror -- the wall the mirror
+// hangs on, the room behind it -- must not be drawn. The near plane is moved
+// onto the mirror (Lengyel's oblique frustum): both backends clip on
+// z >= -w, so that IS the mirror plane, with no clipper of either renderer
+// touched. The software depth test is on 1/w, which this leaves alone.
+void CLTWorldScene::ReflectProjection(float* P, const float* V) const
+{
+    if (!m_bReflecting) return;
+    for (int k = 0; k < 4; ++k) P[k] = -P[k];
+
+    // The plane into view space: V is rigid, n_v = R n, d_v = d - n_v . t.
+    const float* W = m_ReflPlane;
+    float C[4];
+    for (int r = 0; r < 3; ++r) C[r] = V[r*4+0]*W[0] + V[r*4+1]*W[1] + V[r*4+2]*W[2];
+    C[3] = W[3] - (C[0]*V[3] + C[1]*V[7] + C[2]*V[11]);
+
+    // The frustum corner opposite the plane, in view space. P is
+    // [[a,0,0,0],[0,e,0,0],[0,0,A,B],[0,0,-1,0]]; a and e may be NEGATIVE (the
+    // flips), so the clip-space signs are sgn(C.x / a), sgn(C.y / e).
+    const float a = P[0], e = P[5], A = P[10], B = P[11];
+    if (a == 0.0f || e == 0.0f || B == 0.0f) return;
+    const float sx = (C[0] / a) >= 0.0f ? 1.0f : -1.0f;
+    const float sy = (C[1] / e) >= 0.0f ? 1.0f : -1.0f;
+    const float q[4] = { sx / a, sy / e, -1.0f, (1.0f + A) / B };
+    const float dq = C[0]*q[0] + C[1]*q[1] + C[2]*q[2] + C[3]*q[3];
+    if (fabsf(dq) < 1e-12f) return;
+    const float s = 2.0f / dq;
+    // Row 2 = c - row 3, row 3 being (0, 0, -1, 0).
+    P[8]  = C[0] * s;
+    P[9]  = C[1] * s;
+    P[10] = C[2] * s + 1.0f;
+    P[11] = C[3] * s;
+}
+
+
+void CLTWorldScene::ForEachActiveMirror(bool bGlass, const float* MVP, const float* MVPBias,
+                                        const ILTWorldModelXform* pXform,
+                                        const std::function<void(const LTWorldModelHeader&,
+                                                                 const float*,
+                                                                 const std::vector<const LT3DTexture*>&,
+                                                                 const std::vector<int>&)>& fn)
+{
+    if (m_bReflecting) return;
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    for (int s = 0; s < m_nActiveMirrors; ++s)
+    {
+        const MirrorPlane& mp = m_Mirrors[m_ActiveMirror[s]];
+        const LTWorldModelHeader& M = mdl[mp.m_nModel];
+        float fObjAlpha = 1.0f;
+        const bool bObjAlpha = ModelObjectAlpha(M, pXform, &fObjAlpha);
+        if (!bGlass && !bObjAlpha) continue;        // pass 2 filled it already
+        std::vector<const LT3DTexture*> btex(M.m_Textures.size(), (const LT3DTexture*)0);
+        for (size_t k = 0; k < M.m_Textures.size(); ++k)
+            btex[k] = !bGlass   ? GetTexture(M.m_Textures[k])
+                    : bObjAlpha ? GetObjectAlphaTexture(M.m_Textures[k], fObjAlpha)
+                                : GetTexture(M.m_Textures[k], true);
+        const float* pUse = LTIsMainWorldBSP(M) ? MVP : MVPBias;
+        float Local[16], ModelMVP[16];
+        if (pXform && pXform->GetModelTransform(M.m_sName, Local))
+        {
+            LT3D::Multiply(pUse, Local, ModelMVP);
+            pUse = ModelMVP;
+        }
+        fn(M, pUse, btex, mp.m_PolyIdx);
+    }
 }
 
 
@@ -2074,8 +2483,13 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                               EGeomPass ePass)
 {
     // ⚠️ pOrder is a DRAW ORDER, not a subset -- every polygon is still drawn.
-    // Null means file order, which is what this always did.
+    // Null means file order, which is what this always did. (Pass 4's mirror
+    // walk is the one caller that hands in a subset: a mirror's polygons.)
     const size_t nDraw = pOrder ? pOrder->size() : M.m_Polys.size();
+
+    // Does this model carry a mirror at all (5de)? Almost none do, so the
+    // per-polygon lookup below is skipped for the rest.
+    const bool bMirrorModel = !m_MirrorModels.empty() && m_MirrorModels.count(&M) != 0;
 
     for (size_t nAt = 0; nAt < nDraw; ++nAt)
     {
@@ -2098,6 +2512,50 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         if (sf.m_nTexture < tex.size()) pTex = tex[sf.m_nTexture];
         if (!pTex) continue;
 
+        // ⚠️ A MIRROR WITH A REFLECTION THIS FRAME (5de) is drawn TWICE: in
+        // the opaque pass as its stand-in -- the reflected scene, pixel for
+        // pixel -- and in pass 4's mirror walk as its own texture blended
+        // over that. Without a reflection it is the surface it always was.
+        // The GPU's static world records every mirror polygon under its
+        // stand-in, so mirrors are runs of their own there; the backend
+        // swaps the real texture back in when a plane has no reflection.
+        bool bMirrorLive = false, bMirrorFill = false, bMirrorGlass = false;
+        if (bMirrorModel)
+        {
+            std::map<const LTWorldPoly*, int>::const_iterator mi = m_MirrorOfPoly.find(&po);
+            const int nPlane = (mi != m_MirrorOfPoly.end()) ? mi->second : -1;
+            if (nPlane >= 0)
+            {
+                // ⚠️ A REFLECTION NEVER DRAWS ITS OWN MIRROR (5dg). The polygon
+                // lies ON the oblique near plane, so rounding decided, frame by
+                // frame, whether it was clipped -- and when it survived it was
+                // the nearest thing to the mirrored camera and covered the
+                // whole reflection with the glass texture: the mirror flickered
+                // between reflection and texture as the player moved.
+                if (m_bReflecting && nPlane == m_nReflPlaneIdx && !NoReflSelfSkip()) continue;
+                if (m_bRecordingStatic) pTex = MirrorPseudo(nPlane, pTex);
+                else if (!m_bReflecting && MirrorActive(nPlane))
+                {
+                    bMirrorLive = true;
+                    if (ePass == kPassBlended) bMirrorGlass = m_bMirrorOverlay;
+                    else if (ePass == kPassOpaque)
+                    {
+                        LT3DTexture* pStand = MirrorPseudo(nPlane, pTex);
+                        SyncMirrorPseudo(pStand);
+                        pTex = pStand;
+                        bMirrorFill = true;
+                    }
+                }
+            }
+        }
+        // The mirror walk draws mirrors only; the ordinary blended walk never
+        // draws a mirror that has its reflection (the mirror walk did).
+        if (m_bMirrorOverlay && !bMirrorGlass) continue;
+        if (ePass == kPassBlended && bMirrorLive && !bMirrorGlass) continue;
+        // The object-alpha walk (kPassAll) leaves a reflected mirror to its
+        // fill (pass 2) and its glass (pass 4).
+        if (ePass == kPassAll && bMirrorLive) continue;
+
         // ⚠️ THE LEVEL SAYS THIS SURFACE IS SEE-THROUGH AND ITS TEXTURE SHOWS
         // NOTHING, so draw nothing. The alpha-test guard deliberately refuses
         // to punch a wholly transparent texture -- that erases props whose
@@ -2106,14 +2564,14 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         // `tex\invisible.dtx` is on 88 surfaces and was drawing as a solid
         // panel.
         const bool bTrans = (sf.m_nFlags & kSURF_TRANSPARENT) != 0;
-        if (bTrans && pTex->m_bFullyTransparent) continue;
+        if (bTrans && !bMirrorLive && pTex->m_bFullyTransparent) continue;
 
         // ⚠️ EACH SURFACE BELONGS TO EXACTLY ONE PASS. Blended geometry writes
         // no depth, so it has to be drawn after everything opaque -- which
         // means the world is walked twice and each walk skips the other half.
         // A surface drawn in BOTH would blend over itself.
-        if (ePass == kPassOpaque  &&  bTrans) continue;
-        if (ePass == kPassBlended && !bTrans) continue;
+        if (ePass == kPassOpaque  &&  bTrans && !bMirrorFill) continue;
+        if (ePass == kPassBlended && !bTrans && !bMirrorGlass) continue;
 
         // ⚠️ SURF_BRIGHT means FULLBRIGHT -- ignore lighting. Every skybox
         // face carries it, and an unlit brush stores vertex RGB 255, which the
@@ -2900,13 +3358,62 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     st.m_nDynamic = 0;
     if (!m_bLoaded || !pRGBA || !pDepth) return st;
 
+    // ---- pass 0: MIRRORS (HANDOVER 5de) ---------------------------------- //
+    //
+    // ⚠️ FIRST, because each is a whole scene of its own -- this function,
+    // from the mirrored camera, into a target the size of this one -- and the
+    // mirror's polygons below write that target's pixel at their own pixel.
+    // A reflection draws no mirrors of its own (m_bReflecting).
+    if (!m_bReflecting)
+    {
+        const float fAsp = (float)nWidth / (float)(nHeight ? nHeight : 1);
+        const int nMir = SelectMirrors(pEye3, pAt3, fFovY, fAsp, pXform);
+        for (int s = 0; s < nMir; ++s)
+        {
+            const size_t nPix = (size_t)nWidth * (size_t)nHeight;
+            m_ReflRGBA[s].resize(nPix * 4);
+            m_ReflDepth[s].resize(nPix);
+            float e2[3], a2[3], u2[3];
+            ReflectCamera(m_ActiveMirror[s], pEye3, pAt3, e2, a2, u2);
+            SetReflectPlane(m_ActiveMirror[s]);
+            memcpy(m_CamUp, u2, sizeof(m_CamUp));
+            m_bReflecting = true;
+            m_nReflSlot = s;
+            LTWorldSetPortalPass(true);
+            Render(&m_ReflRGBA[s][0], &m_ReflDepth[s][0], nWidth, nHeight, e2, a2, fFovY, pXform, pDyn);
+            LTWorldSetPortalPass(false);
+            m_bReflecting = false;
+            m_CamUp[0] = 0.0f; m_CamUp[1] = 1.0f; m_CamUp[2] = 0.0f;
+            // LT_MIRRORDUMP=<prefix>: each reflection as <prefix>_<slot>.ppm,
+            // the picture the mirror samples (overwritten every frame).
+            if (const char* pDump = getenv("LT_MIRRORDUMP"))
+            {
+                char szPath[512];
+                snprintf(szPath, sizeof szPath, "%s_%d.ppm", pDump, s);
+                if (FILE* f = fopen(szPath, "wb"))
+                {
+                    fprintf(f, "P6\n%d %d\n255\n", nWidth, nHeight);
+                    for (size_t i = 0; i < nPix; ++i) fwrite(&m_ReflRGBA[s][i * 4], 1, 3, f);
+                    fclose(f);
+                }
+            }
+        }
+        // Every stand-in at its plane's picture this frame, or at nothing
+        // (and again wherever one is used -- SyncMirrorPseudo).
+        m_nReflScreenW = nWidth; m_nReflScreenH = nHeight;
+        for (std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.begin();
+             it != m_MirrorPseudo.end(); ++it)
+            SyncMirrorPseudo(it->second);
+    }
+
     LT3DTarget t;
     t.m_pRGBA = pRGBA; t.m_pDepth = pDepth;
     t.m_Width = nWidth; t.m_Height = nHeight;
 
     // ⚠️ LT_UVPROBE -- see LTWorldScene_ProbeDump. Held at id 0 by default, so
     // world geometry and every other model stamp "not the one I asked for".
-    if (ProbeOn())
+    // (Not inside a mirror's reflection: the probe describes the frame.)
+    if (ProbeOn() && !m_bReflecting)
     {
         const size_t n = (size_t)nWidth * nHeight;
         s_nProbeW = nWidth; s_nProbeH = nHeight;
@@ -2958,7 +3465,9 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     if (t.m_nMaxAniso < 1)  t.m_nMaxAniso = 1;
     if (t.m_nMaxAniso > 16) t.m_nMaxAniso = 16;
 
-    const float up[3] = { 0, 1, 0 };
+    // ⚠️ THE CAMERA'S UP IS REFLECTED TOO inside a mirror's pass (5de): a
+    // floor mirror -- water -- turns it upside down.
+    const float up[3] = { m_CamUp[0], m_CamUp[1], m_CamUp[2] };
     const float fAspect = (float)nWidth / (float)(nHeight ? nHeight : 1);
 
     LT3D::ClearColor(t, 0x0E1116);
@@ -3008,6 +3517,9 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         float SP[16], SV[16], SMVP[16];
         LT3D::Perspective(fFovY, fAspect, sr * 0.001f + 0.1f, sr * 4.0f, SP);
         if (MirrorWorld()) for (int k = 0; k < 4; ++k) SP[k] = -SP[k];
+        // In a mirror's pass the sky is reflected as well; it is at infinity,
+        // so it gets the handedness flip and no near plane (5de).
+        if (m_bReflecting) for (int k = 0; k < 4; ++k) SP[k] = -SP[k];
         LT3D::LookAt(sc, sat, up, SV);
         LT3D::Multiply(SP, SV, SMVP);
 
@@ -3042,6 +3554,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     LT3D::Perspective(fFovY, fAspect, 4.0f, WorldFar(), P);
     if (MirrorWorld()) for (int k = 0; k < 4; ++k) P[k] = -P[k];
     LT3D::LookAt(pEye3, pAt3, up, V);
+    ReflectProjection(P, V);        // a mirror's pass only (5de)
     LT3D::Multiply(P, V, MVP);
 
     // ⚠️ THE CAMERA BASIS, BUILT THE SAME WAY LT3D::LookAt BUILDS IT -- forward
@@ -3119,6 +3632,13 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             DrawModel(t, pVP, M, tex, st, BuildOrder(M, pEye3));
         }
     }
+
+    // ...and the reflections of mirrors on a model pass 2 skipped -- one
+    // translucent by its object's alpha (5de; see ForEachActiveMirror).
+    ForEachActiveMirror(false, MVP, MVPBias, pXform,
+        [&](const LTWorldModelHeader& M, const float* pM, const std::vector<const LT3DTexture*>& otex,
+            const std::vector<int>& polys)
+        { DrawModel(t, pM, M, otex, st, &polys, 0, kPassOpaque); });
 
     // ---- pass 3: the objects -------------------------------------------- //
     //
@@ -3425,6 +3945,19 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
 
             if (ProbeOn()) { LT3D::g_bProbeHold = true; LT3D::g_nProbeID = 0; }
 
+            // LT_PORTALTRACE=1 -- each character a mirror's pass draws, with
+            // where and how many pixels it wrote (every 60th pass).
+            if (m_bReflecting && getenv("LT_PORTALTRACE"))
+            {
+                static int s_nPass = 0;
+                static const void* s_pFirst = 0;
+                if (!s_pFirst) s_pFirst = (const void*)&d;
+                if ((s_nPass % 60) == 0)
+                    printf("[PORTAL] drew %-40s at (%.0f %.0f %.0f): %d tris, %d px\n", d.sModel.c_str(),
+                           d.m_Pos[0], d.m_Pos[1], d.m_Pos[2], ms.m_nTriangles, ms.m_nPixels);
+                if (i + 1 == nDyn) ++s_nPass;
+            }
+
             ++st.m_nObjects;
             ++st.m_nDynamic;
             st.m_nObjTris += ms.m_nTriangles;
@@ -3451,6 +3984,16 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     // the wrong order -- a known limitation, cheap to state and expensive to
     // fix, and NOLF's windows are flat panes set into walls rather than
     // intersecting volumes.
+    // ⚠️ THE MIRRORS' OWN TEXTURES FIRST (5de): over the reflections the
+    // opaque pass wrote, blended by their alpha -- a mirror is a wall, so
+    // glass in front of it must composite after.
+    m_bMirrorOverlay = true;
+    ForEachActiveMirror(true, MVP, MVPBias, pXform,
+        [&](const LTWorldModelHeader& M, const float* pM, const std::vector<const LT3DTexture*>& btex,
+            const std::vector<int>& polys)
+        { DrawModel(t, pM, M, btex, st, &polys, 0, kPassBlended); });
+    m_bMirrorOverlay = false;
+
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         if (&mdl[i] == m_pSky) continue;
@@ -3570,7 +4113,9 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     // is 4 units, and a view weapon sits closer than that to the eye.
     // Same x/y projection as the world, so it lines up with what it fires at.
     t.m_fFarW = 0.0f;       // the view weapon is never far-clipped
-    if (pDyn)
+    // (Not inside a mirror's pass: the view weapon is drawn in the camera's
+    // own space, and a reflection has no business with it -- 5de.)
+    if (pDyn && !m_bReflecting)
     {
         float PC[16], MVPC[16];
         LT3D::Perspective(fFovY, fAspect, LTReallyCloseNear(), 40000.0f, PC);
@@ -3622,7 +4167,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         }
     }
 
-    if (ProbeOn())
+    if (ProbeOn() && !m_bReflecting)
     {
         s_ProbeFinal.assign(pRGBA, pRGBA + (size_t)nWidth * nHeight * 4);
         LT3D::g_bProbeHold = false;         // leave modelview-style callers alone

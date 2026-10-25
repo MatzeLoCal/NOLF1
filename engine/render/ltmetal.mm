@@ -81,6 +81,10 @@ struct VOut {
     // kept so both rules can be compared from a single binary -- see
     // LT_AFFINECOLOUR and HANDOVER §5i.
     float3 rgbPersp;
+
+    // The clip position, interpolated, for a MIRROR (HANDOVER 5de): its
+    // reflection is sampled where the pixel is on screen, xy/w.
+    float4 clipPos;
 };
 
 struct Uniforms {
@@ -124,7 +128,10 @@ struct Uniforms {
     float    fogNear;
     float    fogFar;
     int      fogOn;
-    int      pad_d;
+    // ⚠️ TAKES pad_d (HANDOVER 5de): 1 = the texture is a mirror's
+    // reflection, sampled at the pixel's own screen position and written as
+    // it is. The buffer stays 128 bytes.
+    int      screen;
 };
 
 vertex VOut vs_world(VIn vin [[stage_in]],
@@ -137,6 +144,7 @@ vertex VOut vs_world(VIn vin [[stage_in]],
     o.rgbPersp = vin.rgb;
     o.fogZ = o.pos.w;
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
+    o.clipPos = o.pos;
     return o;
 }
 
@@ -145,6 +153,15 @@ fragment float4 fs_world(VOut in [[stage_in]],
                          texture2d<float> tex [[texture(0)]],
                          sampler smp [[sampler(0)]])
 {
+    // ⚠️ A MIRROR (HANDOVER 5de): the reflected scene, rendered by its own
+    // pass from the mirrored camera into a target the size of this view, at
+    // THIS pixel. Already lit and fogged there, so neither is applied again.
+    // Metal's clip-to-target mapping is y-down, hence 0.5 - y/2.
+    if (u.screen != 0)
+    {
+        const float2 ndc = in.clipPos.xy / in.clipPos.w;
+        return float4(tex.sample(smp, float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5)).rgb, 1.0);
+    }
     float4 t = tex.sample(smp, in.uv);
     // The alpha's screen-space rate, for the sharpened coverage below. Taken
     // here, in uniform control flow, before any fragment can be discarded.
@@ -296,6 +313,7 @@ vertex VOut vs_skin(uint vid [[vertex_id]],
     o.rgbPersp = rgb;
     o.fogZ = o.pos.w;
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
+    o.clipPos = o.pos;
     return o;
 }
 )METAL";
@@ -348,6 +366,8 @@ namespace
     id<MTLRenderCommandEncoder> g_Enc      = nil;
 
     std::vector<id<MTLTexture> > g_Textures;   // handle 1..N -> index 0..N-1
+    // Per handle: 1 = a mirror's reflection, sampled by screen position (5de).
+    std::vector<unsigned char>   g_TexScreen;
 
     // ⚠️ A PER-FRAME VERTEX ARENA, because `setVertexBytes` is capped at 4 KB
     // and a level is three orders of magnitude past that. Vertices are appended
@@ -375,6 +395,17 @@ namespace
     bool           g_bSceneVP = false;
     MTLViewport    g_SceneViewport;
     MTLScissorRect g_SceneScissor;
+
+    // ---- MIRRORS (HANDOVER 5de): reflection targets, one per slot ---- //
+    enum { kReflSlots = 2 };
+    id<MTLTexture> g_ReflTex[kReflSlots]   = { nil, nil };
+    id<MTLTexture> g_ReflDepth[kReflSlots] = { nil, nil };
+    unsigned int   g_ReflHandle[kReflSlots] = { 0, 0 };
+    bool           g_bReflecting = false;       // inside a reflection pass
+    int            g_nReflSlot = 0;
+    bool           g_bAfterMain = false;        // the main pass's encoder was ended for them
+    bool           g_bSavedSceneVP = false;
+    id<MTLTexture> g_SavedColour = nil;
 
     // ⚠️ MULTISAMPLED (HANDOVER 5bq, LT_MSAA, default 4): the scene pass draws
     // into g_SceneMSAA and resolves into g_SceneTex, which the composite reads.
@@ -657,7 +688,7 @@ bool LTMetal_Attach(int nWidth, int nHeight)
     }
 
     // Handle 0 means "no texture", so index 0 is never used.
-    g_Textures.clear();
+    g_Textures.clear(); g_TexScreen.clear(); g_ReflHandle[0] = g_ReflHandle[1] = 0;
     g_Textures.push_back(nil);
     return true;
 }
@@ -666,7 +697,7 @@ bool LTMetal_Attach(int nWidth, int nHeight)
 void LTMetal_Shutdown()
 {
     g_Enc = nil; g_Cmd = nil; g_Drawable = nil;
-    g_Textures.clear();
+    g_Textures.clear(); g_TexScreen.clear(); g_ReflHandle[0] = g_ReflHandle[1] = 0;
     g_Arena = nil; g_ArenaUsed = g_ArenaCap = 0;
     g_DepthTex = nil; g_Sampler = nil; g_Depth = nil;
     g_Pipe = nil; g_Queue = nil; g_Device = nil; g_Layer = nil;
@@ -782,7 +813,7 @@ bool LTMetal_BeginOffscreen(int nWidth, int nHeight, float fR, float fG, float f
             g_Device = MTLCreateSystemDefaultDevice();
             if (!g_Device) { Fail("no Metal device"); g_bInit = true; return false; }
             if (!BuildPipeline()) { g_bInit = true; return false; }
-            g_Textures.clear();
+            g_Textures.clear(); g_TexScreen.clear(); g_ReflHandle[0] = g_ReflHandle[1] = 0;
             g_Textures.push_back(nil);
         }
         g_bInit = true;
@@ -917,7 +948,8 @@ void LTMetal_ClearDepth()
     rp.colorAttachments[0].texture = g_ColourTarget;
     rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-    rp.depthAttachment.texture = g_bSceneVP ? g_SceneDepth : g_DepthTex;
+    rp.depthAttachment.texture = g_bReflecting ? g_ReflDepth[g_nReflSlot]
+                               : (g_bSceneVP ? g_SceneDepth : g_DepthTex);
     rp.depthAttachment.loadAction = MTLLoadActionClear;
     rp.depthAttachment.storeAction = MTLStoreActionDontCare;
     rp.depthAttachment.clearDepth = 1.0;
@@ -932,6 +964,144 @@ void LTMetal_ClearDepth()
         [g_Enc setScissorRect:g_SceneScissor];
     }
     g_nEncMode = 0;
+}
+
+
+// ---- MIRRORS (HANDOVER 5de) -- see ltmetal.h ------------------------------ //
+
+bool LTMetal_BeginReflection(int nSlot, int nWidth, int nHeight)
+{
+    if (!g_Cmd || nSlot < 0 || nSlot >= kReflSlots || nWidth <= 0 || nHeight <= 0) return false;
+    @autoreleasepool
+    {
+        id<MTLTexture> tex = g_ReflTex[nSlot];
+        if (!tex || (int)[tex width] != nWidth || (int)[tex height] != nHeight)
+        {
+            MTLTextureDescriptor* d =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                   width:(NSUInteger)nWidth
+                                                                  height:(NSUInteger)nHeight
+                                                               mipmapped:NO];
+            [d setUsage:(MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead)];
+            [d setStorageMode:MTLStorageModePrivate];
+            tex = [g_Device newTextureWithDescriptor:d];
+            MTLTextureDescriptor* dd =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                                                   width:(NSUInteger)nWidth
+                                                                  height:(NSUInteger)nHeight
+                                                               mipmapped:NO];
+            [dd setUsage:MTLTextureUsageRenderTarget];
+            [dd setStorageMode:MTLStorageModePrivate];
+            g_ReflDepth[nSlot] = [g_Device newTextureWithDescriptor:dd];
+            if (!tex || !g_ReflDepth[nSlot]) { g_ReflTex[nSlot] = nil; return false; }
+            g_ReflTex[nSlot] = tex;
+            if (g_ReflHandle[nSlot] && g_ReflHandle[nSlot] < g_Textures.size())
+                g_Textures[g_ReflHandle[nSlot]] = tex;     // re-pointed when the size changes
+        }
+        // A stable handle per slot -- registered again whenever the texture
+        // table was emptied (attach, init), which also cleared the flags.
+        if (!g_ReflHandle[nSlot] || g_ReflHandle[nSlot] >= g_Textures.size()
+            || g_Textures[g_ReflHandle[nSlot]] != tex)
+        {
+            g_Textures.push_back(tex);
+            g_ReflHandle[nSlot] = (unsigned int)(g_Textures.size() - 1);
+        }
+        if (g_TexScreen.size() < g_Textures.size()) g_TexScreen.resize(g_Textures.size(), 0);
+        g_TexScreen[g_ReflHandle[nSlot]] = 1;
+
+        // ⚠️ THE MAIN PASS STEPS ASIDE, ONCE. Its encoder was begun but has
+        // drawn nothing yet (its clear is stored when it ends); the
+        // reflections are encoded after it on the SAME command buffer, so
+        // they finish before the pass that samples them -- Metal orders a
+        // render target written by one encoder before a later one reads it.
+        if (!g_bAfterMain)
+        {
+            g_bSavedSceneVP = g_bSceneVP;
+            g_SavedColour   = g_ColourTarget;
+            g_bAfterMain    = true;
+        }
+        if (g_Enc) { [g_Enc endEncoding]; g_Enc = nil; }
+
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        rp.colorAttachments[0].texture = tex;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(0.055, 0.067, 0.086, 1.0);
+        rp.depthAttachment.texture = g_ReflDepth[nSlot];
+        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+        rp.depthAttachment.clearDepth = 1.0;
+
+        // ⚠️ THE PLAIN PIPELINES: one sample, BGRA, no viewport offset -- the
+        // offscreen path's, which a reflection is.
+        g_Enc = [g_Cmd renderCommandEncoderWithDescriptor:rp];
+        [g_Enc setRenderPipelineState:g_Pipe];
+        [g_Enc setDepthStencilState:g_Depth];
+        [g_Enc setFragmentSamplerState:g_Sampler atIndex:0];
+        g_nEncMode = 0;
+        g_bSceneVP = false;
+        g_ColourTarget = tex;
+        g_bReflecting = true;
+        g_nReflSlot = nSlot;
+    }
+    return true;
+}
+
+
+void LTMetal_EndReflection()
+{
+    if (g_Enc) { [g_Enc endEncoding]; g_Enc = nil; }
+    g_bReflecting = false;
+}
+
+
+void LTMetal_ResumeAfterReflections()
+{
+    if (!g_bAfterMain || !g_Cmd) { g_bAfterMain = false; return; }
+    g_bAfterMain = false;
+    g_bSceneVP = g_bSavedSceneVP;
+    g_ColourTarget = g_SavedColour;
+    g_SavedColour = nil;
+
+    @autoreleasepool
+    {
+        // ⚠️ COLOUR LOADS, DEPTH CLEARS: the main pass's colour holds its
+        // clear (stored when it stepped aside), its depth nothing yet.
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+        if (g_bSceneVP && g_SceneMSAA)
+        {
+            rp.colorAttachments[0].texture = g_SceneMSAA;
+            rp.colorAttachments[0].resolveTexture = g_SceneTex;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStoreAndMultisampleResolve;
+        }
+        else
+        {
+            rp.colorAttachments[0].texture = g_ColourTarget;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        }
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.depthAttachment.texture = g_bSceneVP ? g_SceneDepth : g_DepthTex;
+        rp.depthAttachment.loadAction = MTLLoadActionClear;
+        rp.depthAttachment.storeAction = MTLStoreActionDontCare;
+        rp.depthAttachment.clearDepth = 1.0;
+
+        g_Enc = [g_Cmd renderCommandEncoderWithDescriptor:rp];
+        [g_Enc setRenderPipelineState:((g_bSceneVP && g_ScenePipes[0]) ? g_ScenePipes[0] : g_Pipe)];
+        [g_Enc setDepthStencilState:g_Depth];
+        [g_Enc setFragmentSamplerState:((g_bSceneVP && g_SceneSampler) ? g_SceneSampler : g_Sampler) atIndex:0];
+        if (g_bSceneVP)
+        {
+            [g_Enc setViewport:g_SceneViewport];
+            [g_Enc setScissorRect:g_SceneScissor];
+        }
+        g_nEncMode = 0;
+    }
+}
+
+
+unsigned int LTMetal_ReflectionTexture(int nSlot)
+{
+    return (nSlot >= 0 && nSlot < kReflSlots) ? g_ReflHandle[nSlot] : 0;
 }
 
 
@@ -974,7 +1144,7 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
     // above field for field.
     struct Uniforms { float mvp[16]; int alphaTest; float alphaRef; int blend;
                       float constAlpha; int affineColour; int a2c; float fogK[2];
-                      float fogColor[4]; float fogNear; float fogFar; int fogOn; int padD; } u;
+                      float fogColor[4]; float fogNear; float fogFar; int fogOn; int screen; } u;
     static_assert(sizeof(Uniforms) == 128, "Uniforms must match the MSL struct (128 bytes)");
 
     // ⚠️ TRANSPOSED ON THE WAY IN. This engine stores matrices ROW-major and
@@ -1013,7 +1183,8 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
     // Fog -- the current pass's (LTMetal_SetFog). Additive fogs toward black,
     // multiply toward white, as the software path does.
     u.fogOn = g_Fog.m_bOn ? 1 : 0;
-    u.fogNear = g_Fog.m_fNear; u.fogFar = g_Fog.m_fFar; u.padD = 0;
+    u.fogNear = g_Fog.m_fNear; u.fogFar = g_Fog.m_fFar;
+    u.screen = (nTexture < g_TexScreen.size() && g_TexScreen[nTexture]) ? 1 : 0;
     {
         const bool bAdd = bBlend && nBlendOp == 1, bMul = bBlend && nBlendOp == 2;
         for (int k = 0; k < 3; ++k)
@@ -1444,7 +1615,7 @@ namespace
             g_Device = MTLCreateSystemDefaultDevice();
             if (!g_Device) { Fail("no Metal device"); g_bInit = true; return false; }
             if (!BuildPipeline()) { g_bInit = true; return false; }
-            g_Textures.clear();
+            g_Textures.clear(); g_TexScreen.clear(); g_ReflHandle[0] = g_ReflHandle[1] = 0;
             g_Textures.push_back(nil);
         }
         g_bInit = true;
