@@ -28,6 +28,7 @@
 #include "mfcstub.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "iltclient.h"
@@ -715,13 +716,19 @@ void CLTGUIEditCtrl::SetText(char* lpszString)
     if (m_nBufferSize > 0 && nLen > m_nBufferSize - 1)
         nLen = m_nBufferSize - 1;
 
-    delete[] m_lpszString;
-    m_lpszString = new char[nLen + 1];
-    if (!m_lpszString)
+    // ⚠️ THE BUFFER STAYS THE SIZE THE CONTROL WAS CREATED WITH (HANDOVER
+    // 5da). Reallocating it to the text's length made it too short for what
+    // comes next: UpdateData's strncpy pads to the full size and HandleChar
+    // inserts up to it -- FolderSave::NameSaveGame does SetText then
+    // UpdateData(FALSE), a heap overrun every time the save-name field opened.
+    const int nAlloc = (m_nBufferSize > 0) ? m_nBufferSize : nLen + 1;
+    char* pNew = new char[nAlloc];
+    if (!pNew)
         return;
-
-    memcpy(m_lpszString, lpszString, (size_t)nLen);
-    m_lpszString[nLen] = '\0';
+    memcpy(pNew, lpszString, (size_t)nLen);
+    pNew[nLen] = '\0';
+    delete[] m_lpszString;
+    m_lpszString = pNew;
     m_nCursorPos = nLen;
 }
 
@@ -745,6 +752,36 @@ void CLTGUIEditCtrl::Render(HSURFACE hDestSurf)
     // The edit text is a plain char buffer, not an HSTRING.
     if (m_lpszString)
         m_pFont->Draw(m_lpszString, hDestSurf, pos.x + m_nTextOffset, pos.y, 0, col);
+
+    // The caret EnableCursor asked for, blinking at its toggle time while the
+    // field is selected (the folders Select it when they capture it). It was
+    // never drawn (HANDOVER 5da).
+    if (m_bCursorEnabled && IsSelected() && m_lpszString && m_pClientDE)
+    {
+        const float fPeriod = (m_fCursorTime > 0.01f) ? m_fCursorTime : 0.333f;
+        const bool bOn = ((int)(m_pClientDE->GetTime() / fPeriod) % 2) == 0;
+        if (bOn)
+        {
+            char szLeft[256];
+            int n = m_nCursorPos;
+            if (n < 0) n = 0;
+            if (n > (int)sizeof(szLeft) - 1) n = (int)sizeof(szLeft) - 1;
+            if (n > (int)strlen(m_lpszString)) n = (int)strlen(m_lpszString);
+            memcpy(szLeft, m_lpszString, (size_t)n);
+            szLeft[n] = '\0';
+            int x = pos.x + m_nTextOffset;
+            if (n > 0)
+            {
+                HSTRING hLeft = m_pClientDE->CreateString(szLeft);
+                if (hLeft)
+                {
+                    x += m_pFont->GetTextExtents(hLeft).x;
+                    m_pClientDE->FreeString(hLeft);
+                }
+            }
+            m_pFont->Draw((char*)"_", hDestSurf, x, pos.y, 0, m_hCursorColor);
+        }
+    }
 }
 
 // ----------------------------------------------------------------------- //
@@ -839,12 +876,28 @@ int CLTGUIEditCtrl::GetHeight()
     return m_pFont ? m_pFont->GetHeight() : 0;
 }
 
+// ⚠️ A DISABLED EDIT FIELD STILL TAKES INPUT (HANDOVER 5da). NOLF's folders
+// create their name fields `EnableCursor(); Enable(LTFALSE);` (FolderSave,
+// FolderHost, FolderPlayer) -- disabled so menu navigation skips them -- and
+// use them only through SetCapture. Refusing input when disabled (the port's
+// old rule) meant the save name could not be typed and Enter did nothing: no
+// save. The donor's edit control (NOLF2 LTGUIMgr) checks nothing.
+// LT_GUIOLDEDIT=1 = refuse when disabled (old, says so).
+static bool LTGUI_EditRefuses(const CLTGUICtrl* p)
+{
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_GUIOLDEDIT") != 0);
+        if (b) { printf("[GUI] LT_GUIOLDEDIT=1 -- a disabled edit field refuses typing and Enter (old)\n"); fflush(stdout); }
+        return b; }();
+    return s_bOld && !const_cast<CLTGUICtrl*>(p)->IsEnabled();
+}
+
 // Text entry: backspace and the arrow keys move/edit; everything else is left
 // for the container so navigation still works out of an edit box.
 LTBOOL CLTGUIEditCtrl::HandleKeyDown(int key, int rep)
 {
     (void)rep;
-    if (!IsEnabled() || !m_lpszString)
+    if (LTGUI_EditRefuses(this) || !m_lpszString)
         return LTFALSE;
 
     switch (key)
@@ -888,7 +941,7 @@ LTBOOL CLTGUIEditCtrl::HandleKeyDown(int key, int rep)
 
 LTBOOL CLTGUIEditCtrl::HandleChar(char c)
 {
-    if (!IsEnabled() || !m_lpszString || m_nBufferSize <= 0)
+    if (LTGUI_EditRefuses(this) || !m_lpszString || m_nBufferSize <= 0)
         return LTFALSE;
 
     // Control characters are not text; backspace etc. arrive via HandleKeyDown.
@@ -909,7 +962,7 @@ LTBOOL CLTGUIEditCtrl::HandleChar(char c)
 
 LTBOOL CLTGUIEditCtrl::OnEnter()
 {
-    if (!IsEnabled())
+    if (LTGUI_EditRefuses(this))
         return LTFALSE;
 
     UpdateData(LTTRUE);     // commit before notifying

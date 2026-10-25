@@ -383,6 +383,18 @@ struct LT3DTexture
     int                     m_MipH[kMaxMips];
     int                     m_nMips;
 
+    // ⚠️ THE SIZE WORLD TEXTURE COORDINATES ARE AUTHORED AGAINST IS NOT
+    // ALWAYS THE SIZE OF THE PIXELS. A DTX's UI mipmap offset (`m_Extra[4]`)
+    // is, in the donor's words, the "mipmap offset applied to texture coords
+    // (so a 512 could be treated like a 256 or 128 texture in the editor)".
+    // A world surface's P/Q give TEXELS of that editor size, so its UVs divide
+    // by `m_Width >> m_nUVShift`, not by m_Width. 303 shipped textures carry
+    // it (299 at 1, 4 at 2) -- every 256x256 painting among them, which drew
+    // a quarter of the picture before this (user report, HANDOVER 5dc).
+    // ⚠️ World surfaces only: a model's UVs are already 0..1 and a sprite is
+    // sized from its pixels.
+    int                     m_nUVShift;
+
     // ⚠️ A CONSTRUCTOR, not an aggregate. Every existing caller builds one of
     // these by assigning the four fields above and nothing else; leaving
     // m_nMips as stack garbage would make the sampler index a mip array full
@@ -392,7 +404,7 @@ struct LT3DTexture
         : m_pRGBA(0), m_Width(0), m_Height(0), m_bAlphaTest(false),
           m_fAlphaRef(0.5f), m_bFullyTransparent(false), m_bBlend(false),
           m_fConstAlpha(1.0f), m_bTexAlpha(true), m_nBlendOp(0),
-          m_nMips(0)
+          m_nMips(0), m_nUVShift(0)
     {
         for (int i = 0; i < kMaxMips; ++i)
         {

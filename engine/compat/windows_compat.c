@@ -818,9 +818,31 @@ HFILE OpenFile(const char* name, OFSTRUCT* rs, UINT style)
 {
     if (rs) { rs->cBytes = sizeof(OFSTRUCT); rs->nErrCode = 0; rs->szPathName[0] = '\0'; }
     // OF_EXIST is the only style NOLF uses: a pure existence test.
+    //
+    // ⚠️ DOS SEPARATORS (HANDOVER 5db). The game asks for "Save\\Slot01.sav";
+    // the ENGINE writes saves as Save/Slot01.sav, so the literal name was never
+    // found: the Load game folder listed nothing (no quick save, no level
+    // start, no slot) and Save never asked before overwriting. Some game files
+    // are written AND read under the literal backslash name ("Save\\Summary.sav"
+    // in the play dir), so the literal name is tried first, then with '/'.
+    // LT_OLDFILEEXIST=1 = the literal name only (old, says so).
     if (style & OF_EXIST) {
         struct stat st;
-        return (name && stat(name, &st) == 0) ? 0 : HFILE_ERROR;
+        static int s_nOld = -1;
+        if (s_nOld < 0) {
+            s_nOld = getenv("LT_OLDFILEEXIST") ? 1 : 0;
+            if (s_nOld) { printf("[COMPAT] LT_OLDFILEEXIST=1 -- OpenFile(OF_EXIST) tests the literal DOS path only (old)\n"); fflush(stdout); }
+        }
+        if (!name) return HFILE_ERROR;
+        if (stat(name, &st) == 0) return 0;
+        if (s_nOld) return HFILE_ERROR;
+        {
+            char buf[1024];
+            size_t n = strlen(name), i;
+            if (n >= sizeof(buf)) return HFILE_ERROR;
+            for (i = 0; i <= n; ++i) buf[i] = (name[i] == '\\') ? '/' : name[i];
+            return (stat(buf, &st) == 0) ? 0 : HFILE_ERROR;
+        }
     }
     LTCOMPAT_UNIMPLEMENTED();
     return HFILE_ERROR;

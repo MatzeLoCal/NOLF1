@@ -1633,6 +1633,35 @@ namespace
         }
     }
 
+    // ⚠️ AN ANIMATION PUT AT A TIME HAS ALREADY PLAYED UP TO IT (5dd). The
+    // cursor of tracker pId (the record itself for the main one) is moved to
+    // "now" WITHOUT firing what lies between -- the donor's trk_SetCurTime
+    // scans with bProcessKeys FALSE (animtracker.cpp:113), and a restore
+    // brings back the tracker's m_CurKey. Without it SendKeysFor saw a new
+    // start, reset the cursor to -1 and fired every key from the first frame:
+    // an AI restored mid-fire would shoot again. Same arithmetic as
+    // SendKeysFor.
+    void LTHost_KeysDeliveredToNow(SRec* p, const void* pId, int nAnim, float fStart, bool bLoop)
+    {
+        if (!p || nAnim < 0) return;
+        LTKeyCursor& c = g_KeyCursors[pId];
+        c.m_nAnim = nAnim; c.m_fStart = fStart; c.m_fUpToMs = -1.0f;
+        const CLTABCModel* pModel = LTScene_ModelForFile(p->m_sFilename.c_str());
+        if (!pModel || (size_t)nAnim >= pModel->GetAnims().size()) return;
+        const LTABCAnim& a = pModel->GetAnims()[(size_t)nAnim];
+        if (a.m_Keyframes.empty()) return;
+        const float fLen = (float)a.m_Keyframes.back().m_nTime;
+        float fMs = (g_fServerTime - fStart) * 1000.0f;
+        if (fMs < 0.0f) return;                         // still blending in
+        if (bLoop && fLen > 0.0f)            fMs = fmodf(fMs, fLen);
+        else if (fLen > 0.0f && fMs > fLen)  fMs = fLen;
+        c.m_fUpToMs = fMs;
+    }
+    void LTHost_KeysDeliveredToNow(SRec* p)
+    {
+        if (p) LTHost_KeysDeliveredToNow(p, (const void*)p, p->m_nAnim, p->m_fAnimStart, p->m_bAnimLooping);
+    }
+
     void LTHost_ServerModelKeys()
     {
         static const bool bOff = (getenv("LT_NOSERVERKEYS") != 0);
@@ -1884,6 +1913,17 @@ namespace
             const float fStart = g_fServerTime - curTime / 1000.0f;
             if (t->m_bMain) t->m_pRec->m_fAnimStart = fStart;
             else            t->m_fStart = fStart;
+            // ⚠️ Moving the time skips the keys in between, as the donor's
+            // trk_SetCurTime does (see LTHost_KeysDeliveredToNow). Body::Load
+            // calls this on a restored body. LT_OLDANIMTIMEKEYS=1 = the old
+            // way, every key from the first frame fires again (says so).
+            static const bool s_bOldKeys = []() {
+                const bool b = (getenv("LT_OLDANIMTIMEKEYS") != 0);
+                if (b) { printf("[ANIM] LT_OLDANIMTIMEKEYS=1 -- SetCurAnimTime replays the keys before the new time (old)\n"); fflush(stdout); }
+                return b; }();
+            if (!s_bOldKeys)
+                LTHost_KeysDeliveredToNow(t->m_pRec, t->m_bMain ? (const void*)t->m_pRec : (const void*)pTracker,
+                                          Anim(t), Start(t), Loop(t));
             return LT_OK;
         }
 
@@ -2562,7 +2602,13 @@ namespace
         // sm_SaveAttachments / sm_SaveInterlinks). Without them a loaded game
         // had no attachment at all: M04S01's window frame swung and its glass
         // pane (Door13, attached once, on the door's FIRST update) stayed put.
-        const unsigned int nVersion = 8;
+        // ⚠️ VERSION 9 (5dd) adds, per object after the activation, the MAIN
+        // ANIMATION: index, looping, and seconds into it -- the donor saves
+        // every model's trackers (game_serialize.cpp:508). The game keeps only
+        // the TIME: Body::Save writes GetCurAnimTime and Body::Load sets it
+        // back, trusting the engine with WHICH animation. Without it every
+        // body came back standing in its reference pose (user report).
+        const unsigned int nVersion = 9;
         fwrite(&nVersion, sizeof(nVersion), 1, pF);
         const long nCountAt = ftell(pF);
         unsigned int nSaved = 0;
@@ -2689,6 +2735,19 @@ namespace
             fwrite(&pRec->m_nInactive, 1, 1, pF);
             fwrite(&pRec->m_fDeactTime, sizeof(float), 1, pF);
             fwrite(&pRec->m_fDeactTimer, sizeof(float), 1, pF);
+            // ---- version 9 ------------------------------------------------ //
+            // ⚠️ ELAPSED, not the start: a level change's keep-alives keep the
+            // running clock, so an absolute start would mean nothing there.
+            // Negative while a blend-in is still running (see
+            // LTHost_AnimStartAfterBlend), and kept that way.
+            {
+                const int nAnim = pRec->m_nAnim;
+                const unsigned char bLoop = pRec->m_bAnimLooping ? 1 : 0;
+                const float fElapsed = g_fServerTime - pRec->m_fAnimStart;
+                fwrite(&nAnim, sizeof(nAnim), 1, pF);
+                fwrite(&bLoop, 1, 1, pF);
+                fwrite(&fElapsed, sizeof(fElapsed), 1, pF);
+            }
 
             fwrite(&nBytes, sizeof(nBytes), 1, pF);
             if (nBytes) fwrite(pMsg->Bytes(), 1, nBytes, pF);
@@ -2830,10 +2889,13 @@ namespace
         // ⚠️ VERSION 5 IS STILL READ (5cf): version 6 only appends the colour
         // to each record, so a version-5 save loads with every object white
         // and opaque -- what it got before the colour was kept at all.
-        if (nVersion < 5 || nVersion > 8)
+        // ⚠️ VERSION 8 IS STILL READ (5dd): version 9 only appends the
+        // animation to each record, so an older save loads as before -- its
+        // bodies stand until the game sets an animation.
+        if (nVersion < 5 || nVersion > 9)
         {
             fclose(pF);
-            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 7\n",
+            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 9\n",
                    sPath.c_str(), nVersion);
             fflush(stdout);
             return LT_ERROR;
@@ -2922,6 +2984,11 @@ namespace
             bool          bHasActivity;
             unsigned char nInactive;
             float         fDeactTime, fDeactTimer;
+            // ⚠️ VERSION 9: the main animation, looping, seconds into it.
+            bool          bHasAnim;
+            int           nAnim;
+            unsigned char nAnimLoop;
+            float         fAnimElapsed;
             std::vector<unsigned char> blob;
         };
 
@@ -2946,6 +3013,10 @@ namespace
             r.bHasActivity = false;
             r.nInactive = 0;
             r.fDeactTime = r.fDeactTimer = 0.0f;
+            r.bHasAnim = false;
+            r.nAnim = -1;
+            r.nAnimLoop = 0;
+            r.fAnimElapsed = 0.0f;
             if (fread(&nClass, sizeof(nClass), 1, pF) != 1) { bTruncated = true; break; }
             if (nClass >= sizeof(szClass))                  { bTruncated = true; break; }
             if (nClass && fread(szClass, 1, nClass, pF) != nClass) { bTruncated = true; break; }
@@ -2996,6 +3067,13 @@ namespace
                     if (fread(&r.fDeactTime, sizeof(float), 1, pF) != 1)        { bTruncated = true; break; }
                     if (fread(&r.fDeactTimer, sizeof(float), 1, pF) != 1)       { bTruncated = true; break; }
                     r.bHasActivity = true;
+                }
+                if (nVersion >= 9)
+                {
+                    if (fread(&r.nAnim, sizeof(r.nAnim), 1, pF) != 1)               { bTruncated = true; break; }
+                    if (fread(&r.nAnimLoop, 1, 1, pF) != 1)                         { bTruncated = true; break; }
+                    if (fread(&r.fAnimElapsed, sizeof(float), 1, pF) != 1)          { bTruncated = true; break; }
+                    r.bHasAnim = true;
                 }
             }
             if (fread(&nBytes, sizeof(nBytes), 1, pF) != 1) { bTruncated = true; break; }
@@ -3085,6 +3163,7 @@ namespace
         if (bLinkWorld) g_Objects.SetWorldMade(savedMade);
         unsigned int nLinked = 0;
         unsigned int nAsleep = 0;      // version 7: restored asleep (5cp)
+        unsigned int nAnimRestored = 0;    // version 9: an animation set back (5dd)
 
         // ---- PHASE 2: find or create every object, in file order ---------- //
         //
@@ -3257,6 +3336,25 @@ namespace
                 return b; }();
             if (r.bHasColor && !s_bNoColor)
                 for (int k = 0; k < 4; ++k) pTarget->m_Color[k] = r.color[k];
+
+            // Version 9 (5dd): the main animation, before the object loads --
+            // Body::Load then sets its saved time on it (SetCurAnimTime), as it
+            // does in LT2. The key cursor is put at "now", as the donor saves
+            // the tracker's m_CurKey: keys already played before the save must
+            // not play again (a shot, a footstep, a death cry).
+            // LT_NORESTOREANIM=1 = the animation is not restored (says so).
+            static const bool s_bNoAnim = []() {
+                const bool b = (getenv("LT_NORESTOREANIM") != 0);
+                if (b) { printf("[SERVER] LT_NORESTOREANIM=1 -- restored models get no saved animation (old)\n"); fflush(stdout); }
+                return b; }();
+            if (r.bHasAnim && !s_bNoAnim)
+            {
+                pTarget->m_nAnim        = r.nAnim;
+                pTarget->m_bAnimLooping = (r.nAnimLoop != 0);
+                pTarget->m_fAnimStart   = g_fServerTime - r.fAnimElapsed;
+                LTHost_KeysDeliveredToNow(pTarget);
+                if (r.nAnim >= 0) ++nAnimRestored;
+            }
 
             // Version 7: when it falls asleep, and whether it IS asleep.
             // ⚠️ ASLEEP BEFORE THE LOAD, for the reason the activation above
@@ -3444,6 +3542,11 @@ namespace
         if (nAsleep)
         {
             printf("[SERVER] RestoreObjects: %u object(s) restored asleep\n", nAsleep);
+            fflush(stdout);
+        }
+        if (nAnimRestored)
+        {
+            printf("[SERVER] RestoreObjects: %u model(s) given their saved animation back\n", nAnimRestored);
             fflush(stdout);
         }
 

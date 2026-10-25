@@ -960,6 +960,20 @@ const LT3DTexture* CLTWorldScene::GetTexture(const std::string& sName, bool bBle
         pC->m_nSurfaceType     = dtx.GetUserFlags();
         pC->m_bValid = pC->m_Tex.m_Width > 0 && pC->m_Tex.m_Height > 0;
 
+        // ⚠️ The editor size the level's texture coordinates were authored
+        // against -- see LT3DTexture::m_nUVShift. Clamped so neither axis
+        // shrinks below one texel. LT_OLDUVSCALE=1 divides by the pixel size
+        // again, as before (says so).
+        {
+            static const bool s_bOldUV = []() {
+                const bool b = (getenv("LT_OLDUVSCALE") != 0);
+                if (b) { printf("[LT3D] LT_OLDUVSCALE=1 -- world UVs ignore the DTX UI mipmap offset\n"); fflush(stdout); }
+                return b; }();
+            int nShift = s_bOldUV ? 0 : (int)dtx.GetUIMipmapOffset();
+            while (nShift > 0 && ((pC->m_Tex.m_Width >> nShift) < 1 || (pC->m_Tex.m_Height >> nShift) < 1)) --nShift;
+            pC->m_Tex.m_nUVShift = nShift;
+        }
+
         // ---- the mip chain, which the DTX already carries ---------------- //
         //
         // ⚠️ Not generated -- SHIPPED, built by the game's own tools, so there
@@ -2146,8 +2160,12 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                 // without flipping U would mirror the text too, which tests
                 // nothing -- the whole point is a readable, oppositely-handed
                 // world to compare against the original.
-                tri[v].m_U = (MirrorWorld() ? u : -u) / (float)pTex->m_Width;
-                tri[v].m_V = vv / (float)pTex->m_Height;
+                //
+                // ⚠️ Divided by the EDITOR size, which is the pixel size
+                // shifted by the DTX's UI mipmap offset (LT3DTexture::
+                // m_nUVShift) -- a 256x256 painting authored as 128x128.
+                tri[v].m_U = (MirrorWorld() ? u : -u) / (float)(pTex->m_Width  >> pTex->m_nUVShift);
+                tri[v].m_V = vv / (float)(pTex->m_Height >> pTex->m_nUVShift);
 
                 // Lighting comes from the FILE: each polygon vertex carries an
                 // RGB triple with 128 as neutral. These are baked vertex
