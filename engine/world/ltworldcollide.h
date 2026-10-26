@@ -54,10 +54,27 @@ public:
     void            SetDynamic(const std::vector<float>& tris);
     unsigned int    DynamicTriangles() const { return (unsigned int)(m_Dyn.size() / 9); }
 
+    // ...and WHOSE each one is (5dp): one owner handle per dynamic triangle,
+    // in the same order -- the door's server record. A world touch on a door
+    // then names the door, not the world. Optional: walk mode never sets it.
+    // And its polygon (5dq): LTWorldPolyId of the door's own face, so a touch
+    // reports the door's material as the donor does (MakeHPoly).
+    void            SetDynamicOwners(const std::vector<void*>& owners,
+                                     const std::vector<unsigned int>& polys)
+                    { m_DynOwner = owners; m_DynPoly = polys; }
+
     // ⚠️ THE DOOR TRIANGLES RAYS SEE, when that is not all of them (DEVIATIONS
     // E-008: rays pass through the power lines). Contact and ground tests keep
     // SetDynamic's list. Never set (walk mode) = the same list.
     void            SetDynamicRay(const std::vector<float>& tris) { m_DynRay = tris; m_bDynRay = true; }
+
+    // ⚠️ A STATIC BRUSH OBJECT THAT IS GONE (5ds). The grid is built once,
+    // but a destructible world model (M08S04's vent louvres, shot away) is
+    // removed at run time; its triangles stayed, an invisible wall. The server
+    // switches a model off when its object is no longer live and solid, and
+    // every static test skips its triangles. nModel is the world-model index
+    // LTWorldPolyId encodes.
+    void            SetModelOff(unsigned int nModel, bool bOff);
 
     // Names of the models to leave OUT of the static grid.
     void            SetExcluded(const std::vector<std::string>& names) { m_Excluded = names; }
@@ -74,6 +91,22 @@ public:
     // the camera jitter permanently between falling and landing.
     void            MoveSphere(float* pPos3, const float* pDelta3,
                                float fRadius, bool* pbGround) const;
+
+    // ...and WHAT IT HIT (5do): every push-out's normal in order (the first
+    // kMaxNormals), and the LAST surface's polygon -- LTWorldPolyId, 0 for a
+    // door triangle -- and contact point, as the donor's collision info keeps
+    // "the last poly hit". The server turns these into a world touch.
+    struct Contacts
+    {
+        enum { kMaxNormals = 16 };
+        int             m_nHits = 0;
+        float           m_Normals[kMaxNormals][3];
+        float           m_Point[3] = { 0, 0, 0 };
+        unsigned int    m_nPoly = 0;
+        void*           m_pOwner = nullptr;     // the last surface's door, or null
+    };
+    void            MoveSphere(float* pPos3, const float* pDelta3,
+                               float fRadius, bool* pbGround, Contacts* pContacts) const;
 
     // ⚠️ THE RAY, and it is what "use the door" and "shoot the guard" are made
     // of. `IntersectSegment` is how the game asks what is in front of the
@@ -110,11 +143,22 @@ private:
                             float* pNormal3, float* pDepth) const;
 
     bool            ContactAny(const float* pC3, float fRadius, const float* pTris,
-                               int nTris, float* pNormal3, float* pDepth) const;
+                               int nTris, float* pNormal3, float* pDepth,
+                               int* pTri = 0) const;
 
     std::vector<float>              m_Tris;     // 9 floats per triangle
     std::vector<unsigned int>       m_TriPoly;  // LTWorldPolyId, one per triangle
+    std::vector<unsigned char>      m_ModelOff; // per world model: switched off (5ds)
+    unsigned int                    m_nModelsOff = 0;
+    bool            TriOff(size_t nTri) const
+    {
+        if (!m_nModelsOff || nTri >= m_TriPoly.size()) return false;
+        const unsigned int m = (m_TriPoly[nTri] >> 20) - 1u;
+        return m < m_ModelOff.size() && m_ModelOff[m] != 0;
+    }
     std::vector<float>              m_Dyn;      // doors, in world space, now
+    std::vector<void*>              m_DynOwner; // one per m_Dyn triangle, or empty
+    std::vector<unsigned int>       m_DynPoly;  // the same, its LTWorldPolyId
     std::vector<float>              m_DynRay;   // the ones rays test, if m_bDynRay
     bool                            m_bDynRay = false;
     std::vector<std::string>        m_Excluded;

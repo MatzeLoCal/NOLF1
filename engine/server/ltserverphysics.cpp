@@ -104,7 +104,8 @@ bool LTServerPhys_MoveTo(void* hObj, const float* pWantPos3, bool* pbGround)
 
     float pos[3] = { start[0], start[1], start[2] };
     bool  bGround = false;
-    LTGetWorldCollide()->MoveSphere(pos, delta, fR, &bGround);
+    CLTWorldCollide::Contacts contacts;
+    LTGetWorldCollide()->MoveSphere(pos, delta, fR, &bGround, &contacts);
 
     // ⚠️ THE STAIR LIFT, and it is the difference between a level you can walk
     // through and one where every doorway sill stops you. If the flat part of
@@ -121,11 +122,13 @@ bool LTServerPhys_MoveTo(void* hObj, const float* pWantPos3, bool* pbGround)
         {
             float flat[3] = { delta[0], 0.0f, delta[2] };
             bool  bG2 = false;
-            LTGetWorldCollide()->MoveSphere(lifted, flat, fR, &bG2);
+            CLTWorldCollide::Contacts c2;
+            LTGetWorldCollide()->MoveSphere(lifted, flat, fR, &bG2, &c2);
 
             const float fGot2 = fabsf(lifted[0] - start[0]) + fabsf(lifted[2] - start[2]);
             if (fGot2 > fFlatGot)
             {
+                contacts = c2;          // the path taken is the one that touched
                 float drop[3] = { 0.0f, -(g_fStairHeight + 1.0f), 0.0f };
                 LTGetWorldCollide()->MoveSphere(lifted, drop, fR, &bG2);
                 for (int k = 0; k < 3; ++k) pos[k] = lifted[k];
@@ -138,6 +141,58 @@ bool LTServerPhys_MoveTo(void* hObj, const float* pWantPos3, bool* pbGround)
     for (int k = 0; k < 3; ++k) p->m_Pos[k] = pos[k];
     p->m_bOnGround = bGround;
     if (pbGround) *pbGround = bGround;
+
+    // ⚠️ THE WORLD TOUCH (5do) -- the donor's CollideAgainstWorld
+    // (moveobject.cpp) and collision response (collision.cpp). Without it a
+    // projectile SLID along the wall it met and was never told: a crossbow
+    // bolt fired at a wall lived on (no sticking), grenades could not bounce.
+    // For each surface the sphere was pushed out of, in order: if the object
+    // moves INTO it, the stopping velocity is -n(v.n) and the force that
+    // times IMPULSE_TIME_CONSTANT (0.01) and the mass; the velocity offset
+    // gets the extra -n x 0.05 (EXTRA_PENETRATION_ADD, "so friction will still
+    // be applied"). A touch-notify object is told if the force reaches its
+    // ignore limit (default 1000; projectiles set 0), with the LAST surface's
+    // plane and polygon; then the offset is added to its velocity -- the
+    // engine's half of every bounce the game computes. FLAG_GOTHRUWORLD
+    // objects do not collide in the donor and are not touched here.
+    // LT_NOWORLDTOUCH=1 = the old slide with nothing told (says so).
+    static const bool s_bNoTouch = []() {
+        const bool b = (getenv("LT_NOWORLDTOUCH") != 0);
+        if (b) { printf("[PHYS] LT_NOWORLDTOUCH=1 -- moving objects slide along the world and are never told (old)\n"); fflush(stdout); }
+        return b; }();
+    if (contacts.m_nHits > 0 && !s_bNoTouch && !(p->m_Flags & FLAG_GOTHRUWORLD))
+    {
+        const int nN = contacts.m_nHits < CLTWorldCollide::Contacts::kMaxNormals
+                     ? contacts.m_nHits : (int)CLTWorldCollide::Contacts::kMaxNormals;
+        float off[3] = { 0, 0, 0 }, force[3] = { 0, 0, 0 };
+        const float fMass = p->m_fMass > 0.0f ? p->m_fMass : 0.0f;
+        for (int i = 0; i < nN; ++i)
+        {
+            const float* n = contacts.m_Normals[i];
+            const float vd = (p->m_Vel[0] + off[0]) * n[0] + (p->m_Vel[1] + off[1]) * n[1]
+                           + (p->m_Vel[2] + off[2]) * n[2];
+            if (vd >= 0.0f) continue;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float add = -n[k] * vd;
+                force[k] += add * 0.01f * fMass;
+                off[k]   += add - n[k] * 0.05f;
+            }
+        }
+        const float fForce2 = force[0]*force[0] + force[1]*force[1] + force[2]*force[2];
+        const float fLimit = p->m_fForceIgnoreLimit;
+        if ((p->m_Flags & FLAG_TOUCH_NOTIFY) && fForce2 >= fLimit * fLimit)
+        {
+            const float* nL = contacts.m_Normals[nN - 1];
+            const float fDist = nL[0]*contacts.m_Point[0] + nL[1]*contacts.m_Point[1] + nL[2]*contacts.m_Point[2];
+            LTServerHost_WorldTouch(hObj, contacts.m_pOwner, nL, fDist, contacts.m_nPoly, off, sqrtf(fForce2));
+        }
+        // The game may have removed it, moved it or set its velocity; the
+        // offset still applies on top, as the donor applies it after.
+        SRec* pAfter = CLTServerObjects::FromHandle(hObj);
+        if (pAfter && LTServerHost_IsLive(hObj))
+            for (int k = 0; k < 3; ++k) pAfter->m_Vel[k] += off[k];
+    }
 
     const bool bMoved = (pos[0] != start[0] || pos[1] != start[1] || pos[2] != start[2]);
     if (bMoved) ++g_nMoved; else ++g_nBlocked;

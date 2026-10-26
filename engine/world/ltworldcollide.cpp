@@ -88,10 +88,21 @@ CLTWorldCollide::CLTWorldCollide()
 }
 
 
+void CLTWorldCollide::SetModelOff(unsigned int nModel, bool bOff)
+{
+    if (nModel >= m_ModelOff.size()) m_ModelOff.resize(nModel + 1, 0);
+    if ((m_ModelOff[nModel] != 0) == bOff) return;
+    m_ModelOff[nModel] = bOff ? 1 : 0;
+    if (bOff) ++m_nModelsOff; else --m_nModelsOff;
+}
+
+
 void CLTWorldCollide::Build(const CLTWorld& world)
 {
     m_Tris.clear();
     m_TriPoly.clear();
+    m_ModelOff.clear();
+    m_nModelsOff = 0;
     m_Cells.clear();
     m_bBuilt = false;
 
@@ -285,12 +296,14 @@ bool CLTWorldCollide::Contact(const float* pC3, float fRadius, int nTri,
 void CLTWorldCollide::SetDynamic(const std::vector<float>& tris)
 {
     m_Dyn = tris;
+    m_DynOwner.clear();         // owners belong to one list; set them after
+    m_DynPoly.clear();
 }
 
 
 // Deepest contact against a flat triangle list, used for the dynamic set.
 bool CLTWorldCollide::ContactAny(const float* pC3, float fRadius, const float* pTris,
-                                 int nTris, float* pNormal3, float* pDepth) const
+                                 int nTris, float* pNormal3, float* pDepth, int* pTri) const
 {
     bool  bAny = false;
     float fDeep = 0.0f;
@@ -322,7 +335,7 @@ bool CLTWorldCollide::ContactAny(const float* pC3, float fRadius, const float* p
 
         float depth = fRadius - len;
         if (depth > fDeep)
-        { fDeep = depth; memcpy(pNormal3, n, sizeof(float)*3); bAny = true; }
+        { fDeep = depth; memcpy(pNormal3, n, sizeof(float)*3); bAny = true; if (pTri) *pTri = i; }
     }
 
     *pDepth = fDeep;
@@ -342,7 +355,7 @@ bool CLTWorldCollide::Overlaps(const float* pPos3, float fRadius) const
 
     float n[3], depth;
     for (size_t i = 0; i < cand.size(); ++i)
-        if (Contact(pPos3, fRadius, cand[i], n, &depth)) return true;
+        if (!TriOff(cand[i]) && Contact(pPos3, fRadius, cand[i], n, &depth)) return true;
 
     if (!m_Dyn.empty()
         && ContactAny(pPos3, fRadius, &m_Dyn[0], (int)(m_Dyn.size()/9), n, &depth))
@@ -353,6 +366,12 @@ bool CLTWorldCollide::Overlaps(const float* pPos3, float fRadius) const
 
 void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
                                  float fRadius, bool* pbGround) const
+{
+    MoveSphere(pPos3, pDelta3, fRadius, pbGround, 0);
+}
+
+void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
+                                 float fRadius, bool* pbGround, Contacts* pContacts) const
 {
     if (pbGround) *pbGround = false;
 
@@ -403,13 +422,15 @@ void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
         Gather(mn, mx, cand);
 
         int   nDeepest = -1;
+        bool  bDeepDoor = false;
+        int   nDoorTri = -1;
         float fDeepest = 0.0f;
         float nBest[3] = { 0, 1, 0 };
 
         for (size_t i = 0; i < cand.size(); ++i)
         {
             float n[3], depth;
-            if (!Contact(pos, fRadius, cand[i], n, &depth)) continue;
+            if (TriOff(cand[i]) || !Contact(pos, fRadius, cand[i], n, &depth)) continue;
             if (depth > fDeepest)
             {
                 fDeepest = depth; nDeepest = cand[i];
@@ -423,12 +444,26 @@ void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
         if (!m_Dyn.empty())
         {
             float n[3], depth;
-            if (ContactAny(pos, fRadius, &m_Dyn[0], (int)(m_Dyn.size()/9), n, &depth)
+            int nTri = -1;
+            if (ContactAny(pos, fRadius, &m_Dyn[0], (int)(m_Dyn.size()/9), n, &depth, &nTri)
                 && depth > fDeepest)
-            { fDeepest = depth; nDeepest = 0; memcpy(nBest, n, sizeof(nBest)); }
+            { fDeepest = depth; nDeepest = 0; bDeepDoor = true; nDoorTri = nTri; memcpy(nBest, n, sizeof(nBest)); }
         }
 
         if (nDeepest < 0) break;
+
+        if (pContacts)
+        {
+            if (pContacts->m_nHits < Contacts::kMaxNormals)
+                memcpy(pContacts->m_Normals[pContacts->m_nHits], nBest, sizeof(nBest));
+            ++pContacts->m_nHits;
+            for (int k = 0; k < 3; ++k) pContacts->m_Point[k] = pos[k] - nBest[k] * (fRadius - fDeepest);
+            pContacts->m_nPoly = (!bDeepDoor && nDeepest < (int)m_TriPoly.size()) ? m_TriPoly[nDeepest] : 0u;
+            pContacts->m_pOwner = (bDeepDoor && nDoorTri >= 0 && nDoorTri < (int)m_DynOwner.size())
+                                ? m_DynOwner[nDoorTri] : nullptr;
+            if (bDeepDoor && nDoorTri >= 0 && nDoorTri < (int)m_DynPoly.size())
+                pContacts->m_nPoly = m_DynPoly[nDoorTri];
+        }
 
         // Push out just past touching. The epsilon keeps the next frame's test
         // from finding the same contact at depth ~0 forever.
@@ -464,7 +499,7 @@ void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
         for (size_t i = 0; i < cand.size(); ++i)
         {
             float n[3], depth;
-            if (!Contact(pos, fRadius + fSkin, cand[i], n, &depth)) continue;
+            if (TriOff(cand[i]) || !Contact(pos, fRadius + fSkin, cand[i], n, &depth)) continue;
             if (n[1] > 0.7f) { *pbGround = true; break; }
         }
 
@@ -593,6 +628,7 @@ bool CLTWorldCollide::RaySegment(const float* pFrom3, const float* pTo3,
     const size_t nTris = m_Tris.size() / 9;
     for (size_t i = 0; i < nTris; ++i)
     {
+        if (TriOff(i)) continue;
         const float* v = &m_Tris[i * 9];
         float t, n[3];
         if (SegTri(pFrom3, d, fBest, v, v+3, v+6, &t, n) && t < fBest)

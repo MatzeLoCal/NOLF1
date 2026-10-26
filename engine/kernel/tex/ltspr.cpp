@@ -14,6 +14,8 @@
 #include "ltfilemgr.h"
 #include "ltfilestream.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -45,6 +47,8 @@ bool CLTSprite::Load(const void* pData, unsigned int nSize)
     m_bLoaded = false;
     m_Frames.clear();
     m_nFPS = 0;
+    m_bTransparent = m_bTranslucent = false;
+    m_nColourKey = 0;
     m_sError.clear();
 
     if (!pData) return Fail("no data");
@@ -57,12 +61,21 @@ bool CLTSprite::Load(const void* pData, unsigned int nSize)
     const unsigned int nFrames = U32(p + 0);
     m_nFPS                     = U32(p + 4);
 
-    // ⚠️ Bytes 8..19 are zero in every shipped file. Refusing on them is how a
-    // wrongly-sized header would be caught rather than silently mis-read: if
-    // this format ever carries something there, this is the line that says so
-    // instead of the frame list quietly starting in the wrong place.
-    for (int k = 8; k < 20; ++k)
-        if (p[k] != 0) return Fail("bytes 8..19 are not zero -- header is not what this reader expects");
+    // ⚠️ Bytes 8..19 are the donor's bTransparent, bTranslucent and colourKey
+    // (see the header), and four shipped sprites -- every smoke particle
+    // texture -- set the first two. They used to be refused here, which is why
+    // smoke and steam drew nothing (5dh). A wrongly-sized header is still
+    // caught: the exact-length check at the end is what proves the layout.
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_OLDSPRHEADER") != 0);
+        if (b) { printf("[LTSPR] LT_OLDSPRHEADER=1 -- a sprite with non-zero header flags is refused (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOld)
+        for (int k = 8; k < 20; ++k)
+            if (p[k] != 0) return Fail("bytes 8..19 are not zero -- header is not what this reader expects");
+    m_bTransparent = U32(p + 8) != 0;
+    m_bTranslucent = U32(p + 12) != 0;
+    m_nColourKey   = U32(p + 16);
 
     // A frame count that cannot fit is refused before any allocation.
     if (nFrames > nSize) return Fail("frame count exceeds the file size");

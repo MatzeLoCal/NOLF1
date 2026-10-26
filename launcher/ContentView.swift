@@ -12,6 +12,8 @@ struct ContentView: View {
     @AppStorage("mission") private var mission = 1
     @AppStorage("level") private var level = "M01S01"
     @AppStorage("trace") private var trace = false
+    @AppStorage("bubbles") private var bubbles = true
+    @AppStorage("bounce") private var bounce = true
 
     @StateObject private var runner = GameRunner()
     @State private var install: GameInstall?
@@ -21,7 +23,7 @@ struct ContentView: View {
     @State private var confirmReset = false
     @State private var message: String?
 
-    private static let sizes: [(Int, Int)] = [(1024, 768), (1280, 720), (1280, 960), (1440, 900),
+    private static let sizes: [(Int, Int)] = [(1024, 768), (1280, 720), (1440, 900),
                                               (1600, 900), (1920, 1080), (2560, 1440)]
 
     private var mode: LaunchOptions.Mode { LaunchOptions.Mode(rawValue: modeRaw) ?? .play }
@@ -33,7 +35,11 @@ struct ContentView: View {
             Divider()
             playRow
             displayRow
-            DisclosureGroup("Advanced", isExpanded: $showAdvanced) { advanced.padding(.top, 8) }
+            // Full width, flush left: a DisclosureGroup centres content narrower
+            // than itself, so short captions pulled the whole block to the middle.
+            DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                advanced.padding(.top, 8).frame(maxWidth: .infinity, alignment: .leading)
+            }
             Spacer(minLength: 0)
             footer
         }
@@ -151,6 +157,18 @@ struct ContentView: View {
                 .frame(maxWidth: 420)
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Bubbles in aquariums", isOn: $bubbles)
+                Text("Off: as in the original at today's frame rates — no bubbles at all.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Sparks bounce off floors", isOn: $bounce)
+                Text("Sparks and blood drops. Off: as in the original — they fall through.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+
             Toggle("Write a detailed log (for bug reports)", isOn: $trace)
 
             HStack {
@@ -203,7 +221,7 @@ struct ContentView: View {
         guard let gi = install, gi.usable else { return }
         var o = LaunchOptions()
         o.mode = mode; o.width = width; o.height = height; o.software = software
-        o.mission = mission; o.level = level; o.trace = trace
+        o.mission = mission; o.level = level; o.trace = trace; o.bubbles = bubbles; o.bounce = bounce
         message = nil
         runner.start(gi, o)
     }

@@ -425,6 +425,9 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                 if (pDyn->GetSprite(i, sp))
                     GetSpriteTexture(sp.m_Draw.m_sSprite, sp.m_Draw.m_fAlpha, sp.m_Draw.m_nBlendOp);
             }
+        // ...and every alpha step of every particle texture (5dh), for the
+        // same reason again: a particle fades through them frame by frame.
+        PreloadParticleTextures(pDyn);
     }
     pt.Mark(CPassTimer::kPre);
 
@@ -1411,6 +1414,19 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             batch.Flush(m_MetalTex);
         }
     }
+    // ---- pass 5c: particle systems -- see the software pass (5dh) ----- //
+    if (pDyn)
+    {
+        const std::vector<unsigned int> order = LTParticleSystemsBackToFront(pDyn, false, pEye3);
+        for (size_t i = 0; i < order.size(); ++i)
+        {
+            LTDynamicParticles ps;
+            if (!pDyn->GetParticleSystem(order[i], ps)) continue;
+            batch.SetMVP(MVP);
+            DrawParticles(dummy, MVP, ps, camR, camU, camF, pEye3, st, &batch);
+            batch.Flush(m_MetalTex);
+        }
+    }
     batch.SetOrdered(false);
     pt.Mark(CPassTimer::kSprites);
 
@@ -1472,6 +1488,19 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             batch.SetMVP(MVPC);
             DrawSpriteQuad(dummy, MVPC, sp.m_Draw, sp.m_Pos, camR, camU, camF, pEye3, st, &batch);
             batch.Flush(m_MetalTex);
+        }
+        // ...and the REALLYCLOSE particle systems (5dh).
+        {
+            const std::vector<unsigned int> order = LTParticleSystemsBackToFront(pDyn, true, pEye3);
+            for (size_t i = 0; i < order.size(); ++i)
+            {
+                LTDynamicParticles ps;
+                if (!pDyn->GetParticleSystem(order[i], ps)) continue;
+                if (!bCleared) { batch.Flush(m_MetalTex); LTMetal_ClearDepth(); bCleared = true; }
+                batch.SetMVP(MVPC);
+                DrawParticles(dummy, MVPC, ps, camR, camU, camF, pEye3, st, &batch);
+                batch.Flush(m_MetalTex);
+            }
         }
         batch.SetOrdered(false);
         m_nLastMetalDynamic = (unsigned)st.m_nDynamic;

@@ -508,6 +508,22 @@ static LTBOOL LTHost_ClientIntersectSegment(IntersectQuery* pQuery,
         if (b) { printf("[CLIENT] LT_CLIENTRAYWORLD=1 -- client rays report every hit as the world\n"); fflush(stdout); }
         return b; }();
 
+    // ⚠️ THE QUERY FLAGS GO THROUGH ON THIS SIDE TOO (5di). The server's
+    // IntersectSegment has passed them since 5bb; this copy cast every ray
+    // with objects ON and non-solid objects HIT, whatever the game asked.
+    // The belt buckle (Zipcord) is how it showed: its fire ray asks for
+    // IGNORE_NONSOLID and stopped on M06S01's `Trigger2`, an invisible volume
+    // in front of the hook's window, so HandleGadgetImpact got a trigger and
+    // the cord never started -- while the targeting ray, whose own filter
+    // drops non-solid objects, lit the brackets on the hook.
+    // LT_OLDCLIENTRAYFLAGS=1 = the old rule (says so).
+    static const bool s_bOldFlags = []() {
+        const bool b = getenv("LT_OLDCLIENTRAYFLAGS") != 0;
+        if (b) { printf("[CLIENT] LT_OLDCLIENTRAYFLAGS=1 -- client rays ignore INTERSECT_OBJECTS/IGNORE_NONSOLID (old)\n"); fflush(stdout); }
+        return b; }();
+    const bool bObjects   = s_bOldFlags || (pQuery->m_Flags & INTERSECT_OBJECTS) != 0;
+    const bool bNonSolid  = !s_bOldFlags && (pQuery->m_Flags & IGNORE_NONSOLID) != 0;
+
     float pt[3], nrm[3];
     void* hHit = 0;
     unsigned int nPolyId = 0;
@@ -521,7 +537,7 @@ static LTBOOL LTHost_ClientIntersectSegment(IntersectQuery* pQuery,
                                   pQuery->m_pUserData,
                                   (bool (*)(unsigned int, void*))pQuery->m_PolyFilterFn,
                                   pt, nrm, &hHit,
-                                  true, false, &nPolyId))
+                                  bObjects, bNonSolid, &nPolyId))
             return LTFALSE;
     }
     else
@@ -535,7 +551,7 @@ static LTBOOL LTHost_ClientIntersectSegment(IntersectQuery* pQuery,
             hHit = 0; nPolyId = 0; hClientHit = 0;
             if (!LTServerPhys_RayTestFiltered(from, to, &LTHost_ClientRayObjFilter, &ctx,
                                       pQuery->m_PolyFilterFn ? &LTHost_ClientRayPolyFilter : 0,
-                                      pt, nrm, &hHit, true, false, &nPolyId))
+                                      pt, nrm, &hHit, bObjects, bNonSolid, &nPolyId))
                 return LTFALSE;
             if (!hHit) { bDone = true; break; }         // the world itself
 
@@ -1245,6 +1261,18 @@ public:
     LTFLOAT GetTime() override      { return LTGetClock()->GetTime(); }
     LTFLOAT GetFrameTime() override { return LTGetClock()->GetFrameTime(); }
 
+    // ⚠️ A VIRTUAL, unlike the rest of the particle API (iltclient.h:883),
+    // so it is overridden here and the scene does the work (5dh).
+    LTParticle* AddParticle(HLOCALOBJ hObj, LTVector* pPos, LTVector* pVelocity,
+                            LTVector* pColor, float lifeTime) override
+    {
+        LTIMPL("ILTClient::AddParticle");
+        const float pos[3] = { pPos ? pPos->x : 0.0f, pPos ? pPos->y : 0.0f, pPos ? pPos->z : 0.0f };
+        const float vel[3] = { pVelocity ? pVelocity->x : 0.0f, pVelocity ? pVelocity->y : 0.0f, pVelocity ? pVelocity->z : 0.0f };
+        const float col[3] = { pColor ? pColor->x : 255.0f, pColor ? pColor->y : 255.0f, pColor ? pColor->z : 255.0f };
+        return (LTParticle*)LTScene_AddParticle(hObj, pos, vel, col, lifeTime);
+    }
+
     // ⚠️ THE GAME'S OWN VOICE ON THE CLIENT SIDE -- see the server's CPrint
     // for why a stub here was expensive. `CSPrint` is a wrapper around this
     // and it is all over the client shell, including the interface state
@@ -1823,6 +1851,31 @@ private:
 // The ids are SFXMsgIds.h's. The default list is the set that has been run
 // headless on M01S01 and T01S01 without a fault; everything else is still
 // dropped and still counted, which is where it was yesterday.
+// ⚠️ THE RATE OF A PLACED ParticleSystem, from its effect message, read in
+// the game's own order (ParticleSystem.cpp InitialUpdate / ParticleSystemFX.cpp
+// Init): the id byte, five vectors (two colours, dims, two velocities), then
+// flags, BurstWait, BurstWaitMin, BurstWaitMax -- and ParticlesPerSecond.
+// Read from a COPY: the game reads the original. DEVIATIONS E-009 (5dj);
+// LT_NOPSRATE=1 = 0 always, the game's own count.
+static float LTHost_ParticleSystemRate(const CLTMessage* pMsg)
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOPSRATE") != 0);
+        if (b) { printf("[PART] LT_NOPSRATE=1 -- placed ParticleSystems emit floor(rate x frame time): none at 60 fps (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOff || !pMsg || !pMsg->Size()) return 0.0f;
+    CLTMessage c;
+    c.PutRaw(pMsg->Bytes(), pMsg->Size());
+    c.ResetPos();
+    c.TakeByte();
+    float v[3];
+    for (int k = 0; k < 5; ++k) c.TakeVector(v);
+    for (int k = 0; k < 4; ++k) c.TakeFloat();
+    const float fRate = c.TakeFloat();
+    return (c.Overran() || !(fRate > 0.0f) || fRate > 5000.0f) ? 0.0f : fRate;
+}
+
+
 static bool LTHost_SFXAllowed(unsigned int nId)
 {
     static bool  bInit = false;
@@ -1871,6 +1924,22 @@ static bool LTHost_SFXAllowed(unsigned int nId)
             // now (ltscene.cpp SC_*PolyGrid*, 2026-10-14); LT_NOPOLYGRID=1
             // gates it again.
             if (LTPolyGridEnabled()) allow.insert(1);
+
+            // ⚠️ THE PARTICLE SYSTEMS THE LEVELS PLACE (5dh) -- each turned on
+            // alone, headless, at its own placement, once particle systems
+            // existed (LT_NOPARTICLES=1 gates all three again):
+            //   30 SFX_FIRE_ID           146 Fire objects; M01S04's burning
+            //                            barrel drew flames and its smoke column
+            //    3 SFX_PARTICLESYSTEM_ID  33 placements, all bubbles; the game
+            //                            adds floor(rate x frame time) a frame,
+            //                            so at 60 fps a 20-50/s system adds
+            //                            NONE -- its own arithmetic, not ours
+            //   29 SFX_SPRINKLES_ID      M06S03's plankton and foliage; needed
+            //                            Common()->CreateMessage and
+            //                            SetObjectSFXMessage (ltserverhost.cpp)
+            // Every other particle effect is instant or made by the client and
+            // never passed through this gate.
+            if (LTParticlesEnabled()) { allow.insert(30); allow.insert(3); allow.insert(29); }
         }
     }
 
@@ -2003,8 +2072,13 @@ static bool LTHost_DeliverToClient(CLTMessage* pMsg)
                        hClient == LTSession_GetClientObject() ? " = the client object" : "");
                 fflush(stdout);
             }
+            // A placed ParticleSystem (SFX_PARTICLESYSTEM_ID): its rate goes
+            // to the system the game creates during this call (E-009, 5dj).
+            const float fRate = (pMsg->SFXId() == 3) ? LTHost_ParticleSystemRate(pMsg) : 0.0f;
+            LTScene_SetPendingParticleRate(fRate);
             g_pHostClientShell->SpecialEffectNotify((HLOCALOBJ)hClient,
                                                     (HMESSAGEREAD)pMsg);
+            LTScene_SetPendingParticleRate(0.0f);
             return true;
         }
 
@@ -3919,6 +3993,12 @@ int main(int argc, char** argv)
                 {
                     LTHost_UpdateFog();
                     pShell->Update();
+
+                    // ⚠️ THE PARTICLES MOVE AFTER THE SHELL'S UPDATE, where the
+                    // donor's UpdateObjects runs (clientmgr.cpp:906): the FX
+                    // added and re-aged them in Update, the engine now moves
+                    // and ages them by the frame's time (5dh).
+                    LTScene_UpdateParticles(LTGetClock()->GetFrameTime());
 
                     // ⚠️ AND PostUpdate, WHICH THE ENGINE NEVER CALLED. The
                     // donor runs it after every Update (clientshell.cpp:450,

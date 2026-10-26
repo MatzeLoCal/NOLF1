@@ -498,6 +498,29 @@ std::vector<unsigned int> LTTranslucentDynamics(const ILTWorldDynamicObjects* pD
 }
 
 
+// The particle systems of one kind -- really-close or not -- FAR TO NEAR by
+// their first particle, as indices for GetParticleSystem (5dh). One list for
+// both renderers.
+std::vector<unsigned int> LTParticleSystemsBackToFront(const ILTWorldDynamicObjects* pDyn,
+                                                       bool bReallyClose, const float* pEye3)
+{
+    std::vector<std::pair<float, unsigned int> > v;
+    if (pDyn && LTParticlesEnabled())
+        for (unsigned int i = 0; i < pDyn->ParticleSystemCount(); ++i)
+        {
+            LTDynamicParticles ps;
+            if (!pDyn->GetParticleSystem(i, ps) || ps.m_bReallyClose != bReallyClose || !ps.m_nParts) continue;
+            const float* p = ps.m_pParts[0].m_Pos;
+            const float dx = p[0]-pEye3[0], dy = p[1]-pEye3[1], dz = p[2]-pEye3[2];
+            v.push_back(std::make_pair(-(dx*dx + dy*dy + dz*dz), i));
+        }
+    std::sort(v.begin(), v.end());
+    std::vector<unsigned int> out;
+    for (size_t k = 0; k < v.size(); ++k) out.push_back(v[k].second);
+    return out;
+}
+
+
 std::vector<unsigned int> LTPolyGridsBackToFront(const ILTWorldDynamicObjects* pDyn,
                                                  const float* pEye3)
 {
@@ -516,6 +539,16 @@ std::vector<unsigned int> LTPolyGridsBackToFront(const ILTWorldDynamicObjects* p
     std::vector<unsigned int> out;
     for (size_t k = 0; k < v.size(); ++k) out.push_back(v[k].second);
     return out;
+}
+
+
+bool LTParticlesEnabled()
+{
+    static const bool b = []() {
+        const bool bOff = (getenv("LT_NOPARTICLES") != 0);
+        if (bOff) { printf("[LT3D] LT_NOPARTICLES=1 -- no particle systems: OT_PARTICLESYSTEM refused (old)\n"); fflush(stdout); }
+        return !bOff; }();
+    return b;
 }
 
 
@@ -1332,6 +1365,94 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
 // sets one).
 //
 // ----------------------------------------------------------------------- //
+
+float CLTWorldScene::ParticleAlphaStep(float fAlpha)
+{
+    if (!(fAlpha > 0.0f)) return 0.0f;
+    if (fAlpha >= 1.0f) return 1.0f;
+    const int n = (int)(fAlpha * (float)kParticleAlphaSteps + 0.5f);
+    return (float)n / (float)kParticleAlphaSteps;
+}
+
+
+void CLTWorldScene::PreloadParticleTextures(const ILTWorldDynamicObjects* pDyn)
+{
+    if (!pDyn) return;
+    for (unsigned int i = 0; i < pDyn->ParticleSystemCount(); ++i)
+    {
+        LTDynamicParticles ps;
+        if (!pDyn->GetParticleSystem(i, ps)) continue;
+        for (int k = 1; k <= kParticleAlphaSteps; ++k)
+            GetSpriteTexture(ps.m_sTexture, (float)k / (float)kParticleAlphaSteps, ps.m_nBlendOp);
+    }
+}
+
+
+// ⚠️ THE DONOR'S drawparticles.cpp, in this renderer's terms. Positions arrive
+// in world space (LTSceneViewObjects did the system's frame). The square's
+// half-extent along the camera's right and up is 2 x m_Size -- "multiplied by
+// 2 to compensate for old code" -- and m_Size is what the game made it: the
+// system's radius, which CBaseParticleSystemFX divides by the SCREEN WIDTH
+// before handing it over, times the FX's own scale over the particle's life.
+// Colour: the particle's (0-255) times the object's; alpha: the particle's
+// times the object's. No light, no fog (the FX create with FLAG_FOGDISABLE).
+void CLTWorldScene::DrawParticles(const LT3DTarget& t, const float* pMVP,
+                                  const LTDynamicParticles& ps,
+                                  const float* pRight3, const float* pUp3,
+                                  const float* pFwd3, const float* pEye3,
+                                  Stats& st, ILTWorldGeomSink* pSink)
+{
+    const float kNearZ = 4.0f;
+    static const int kIdx[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
+    const float kU[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+    const float kV[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    for (unsigned int i = 0; i < ps.m_nParts; ++i)
+    {
+        const LTDynamicParticle& q = ps.m_pParts[i];
+        const float a = ParticleAlphaStep(q.m_fAlpha * ps.m_fAlpha);
+        if (a <= 0.0f || !(q.m_fSize > 0.0f)) continue;
+        float fZ = 0.0f;
+        for (int k = 0; k < 3; ++k) fZ += (q.m_Pos[k] - pEye3[k]) * pFwd3[k];
+        if (fZ < kNearZ) continue;
+        const LT3DTexture* pTex = GetSpriteTexture(ps.m_sTexture, a, ps.m_nBlendOp);
+        if (!pTex || pTex->m_Width <= 0 || pTex->m_Height <= 0) return;
+
+        const float h = 2.0f * q.m_fSize;
+        float W[4][3];
+        for (int k = 0; k < 3; ++k)
+        {
+            const float R = pRight3[k] * h, U = pUp3[k] * h;
+            W[0][k] = q.m_Pos[k] + U - R;
+            W[1][k] = q.m_Pos[k] + U + R;
+            W[2][k] = q.m_Pos[k] - U + R;
+            W[3][k] = q.m_Pos[k] - U - R;
+        }
+        LT3DVert v[4];
+        for (int c = 0; c < 4; ++c)
+        {
+            LT3D::TransformPoint(pMVP, W[c], v[c].m_Clip);
+            v[c].m_U = kU[c];
+            v[c].m_V = kV[c];
+            v[c].m_R = q.m_RGB[0] * (1.0f / 255.0f) * ps.m_Colour[0];
+            v[c].m_G = q.m_RGB[1] * (1.0f / 255.0f) * ps.m_Colour[1];
+            v[c].m_B = q.m_RGB[2] * (1.0f / 255.0f) * ps.m_Colour[2];
+        }
+        for (int f = 0; f < 2; ++f)
+        {
+            LT3DVert tri[3];
+            float    mpos[3][3];
+            for (int k = 0; k < 3; ++k)
+            {
+                tri[k] = v[kIdx[f][k]];
+                for (int r = 0; r < 3; ++r) mpos[k][r] = W[kIdx[f][k]][r];
+            }
+            ++st.m_nObjTris;
+            if (pSink) { pSink->Tri(pTex, mpos, tri); continue; }
+            st.m_nPixels += LT3D::DrawTriangle(t, pTex, tri[0], tri[1], tri[2], false);
+        }
+    }
+}
+
 
 const LT3DTexture* CLTWorldScene::GetWhiteTexture(float fAlpha, int nBlendOp)
 {
@@ -4100,6 +4221,32 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         }
     }
 
+    // ---- pass 5c: PARTICLE SYSTEMS (5dh) -- smoke, steam, sparks ------- //
+    // With the run-time sprites and by their rule; REALLYCLOSE ones in pass 6.
+    if (pDyn)
+    {
+        const std::vector<unsigned int> order = LTParticleSystemsBackToFront(pDyn, false, pEye3);
+        const int nPix0 = st.m_nPixels;
+        unsigned int nParts = 0;
+        for (size_t i = 0; i < order.size(); ++i)
+        {
+            LTDynamicParticles ps;
+            if (!pDyn->GetParticleSystem(order[i], ps)) continue;
+            DrawParticles(t, MVP, ps, camR, camU, camF, pEye3, st, 0);
+            nParts += ps.m_nParts;
+            ++st.m_nObjects;
+        }
+        // LT_PARTTRACE=1 -- what this pass drew, every 120th frame.
+        static const bool s_bTrace = (getenv("LT_PARTTRACE") != 0);
+        static int s_n = 0;
+        if (s_bTrace && !m_bReflecting && (s_n++ % 120) == 0)
+        {
+            printf("[PART] drawn: %zu system(s) of %u, %u particle(s), %d pixel(s)\n", order.size(),
+                   pDyn->ParticleSystemCount(), nParts, st.m_nPixels - nPix0);
+            fflush(stdout);
+        }
+    }
+
     // Depth was cleared between the sky and the world, so anything still at
     // zero is a pixel the world never covered -- which is where the sky shows.
     for (int i = 0; i < nWidth * nHeight; ++i)
@@ -4164,6 +4311,19 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             if (!bCleared) { LT3D::ClearDepth(t); bCleared = true; }
             DrawSpriteQuad(t, MVPC, sp.m_Draw, sp.m_Pos, camR, camU, camF, pEye3, st, 0);
             ++st.m_nObjects;
+        }
+        // ...and the REALLYCLOSE particle systems -- the smoke off the
+        // view weapon's muzzle (5dh).
+        {
+            const std::vector<unsigned int> order = LTParticleSystemsBackToFront(pDyn, true, pEye3);
+            for (size_t i = 0; i < order.size(); ++i)
+            {
+                LTDynamicParticles ps;
+                if (!pDyn->GetParticleSystem(order[i], ps)) continue;
+                if (!bCleared) { LT3D::ClearDepth(t); bCleared = true; }
+                DrawParticles(t, MVPC, ps, camR, camU, camF, pEye3, st, 0);
+                ++st.m_nObjects;
+            }
         }
     }
 

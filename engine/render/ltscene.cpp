@@ -32,6 +32,7 @@
 #include "ltreplicate.h"
 
 #include <set>
+#include <stddef.h>
 
 #include "iltclient.h"
 
@@ -76,6 +77,10 @@ static bool TraceOn()
 
 // Game-spawned models drawn by RenderCamera. See LTScene_DumpModelCensus.
 static unsigned int g_nDynamicDrawn = 0;
+
+// See LTScene_SetPendingParticleRate (5dj).
+static float g_fPendingParticleRate = 0.0f;
+void LTScene_SetPendingParticleRate(float fRate) { g_fPendingParticleRate = fRate > 0.0f ? fRate : 0.0f; }
 
 // Wall time spent inside RenderCamera -- the whole in-game 3D view, software.
 static double       g_fRenderCameraMs    = 0.0;
@@ -130,6 +135,11 @@ void CLTScene::Term()
     }
     m_Skins.clear();
 
+    // After the objects: a particle system points at its sprite (5dm).
+    for (std::map<std::string, CLTSprite*>::iterator i = m_Sprites.begin();
+         i != m_Sprites.end(); ++i) delete i->second;    // a null is a failed load
+    m_Sprites.clear();
+
     m_Depth.clear();
 }
 
@@ -182,29 +192,32 @@ const CLTABCModel* CLTScene::LoadModel(const std::string& sName)
     return pModel;
 }
 
+const CLTSprite* CLTScene::LoadSprite(const std::string& sSpr)
+{
+    std::map<std::string, CLTSprite*>::iterator it = m_Sprites.find(sSpr);
+    if (it != m_Sprites.end()) return it->second;
+    CLTSprite* pS = new CLTSprite;
+    if (!pS->LoadThroughFileMgr(m_pFileMgr, sSpr.c_str()) || pS->GetNumFrames() == 0)
+    {
+        fprintf(stderr, "[LT3D] sprite FAILED %s\n", sSpr.c_str());
+        delete pS; pS = 0;
+    }
+    m_Sprites[sSpr] = pS;
+    return pS;
+}
+
+
 const LT3DTexture* CLTScene::SpriteTexture(const std::string& sSpr, float fSeconds,
                                            float fAlpha, int nBlendOp)
 {
     // A .spr names DTX frames; a plain .dtx is its own single frame.
     std::string sDtx = sSpr;
     {
-        static std::map<std::string, CLTSprite*> s_Spr;
         std::string lower = sSpr;
         for (size_t i = 0; i < lower.size(); ++i) lower[i] = (char)tolower((unsigned char)lower[i]);
         if (lower.size() < 4 || lower.compare(lower.size() - 4, 4, ".dtx") != 0)
         {
-            std::map<std::string, CLTSprite*>::iterator it = s_Spr.find(sSpr);
-            CLTSprite* pS = (it != s_Spr.end()) ? it->second : 0;
-            if (it == s_Spr.end())
-            {
-                pS = new CLTSprite;
-                if (!pS->LoadThroughFileMgr(m_pFileMgr, sSpr.c_str()) || pS->GetNumFrames() == 0)
-                {
-                    fprintf(stderr, "[LT3D] sprite FAILED %s\n", sSpr.c_str());
-                    delete pS; pS = 0;
-                }
-                s_Spr[sSpr] = pS;
-            }
+            const CLTSprite* pS = LoadSprite(sSpr);
             if (!pS) return 0;
             sDtx = pS->GetFrame(pS->FrameAt(fSeconds));
         }
@@ -358,10 +371,15 @@ LTSceneObject* CLTScene::CreateObject(const LTSceneCreateInfo& info)
     // draw loop already skips anything that is not a model with a model.
     // ⚠️ OT_POLYGRID TOO (2026-10-14): the water surfaces. Its heightmap is
     // made by SetupPolyGrid, and it draws in the game view's translucent pass.
+    // ⚠️ OT_PARTICLESYSTEM TOO (2026-10-25, HANDOVER 5dh): smoke, steam,
+    // sparks, trails. Refused, CBaseParticleSystemFX::SetupSystem stopped at
+    // `if (!m_hObject)` -- not one particle call in a whole M05S01 run with 14
+    // Steam objects updating. LT_NOPARTICLES=1 refuses it again.
     if (info.m_nType != OT_MODEL && info.m_nType != OT_CAMERA &&
         info.m_nType != OT_NORMAL && info.m_nType != OT_SPRITE &&
         info.m_nType != OT_CONTAINER &&
-        !(info.m_nType == OT_POLYGRID && LTPolyGridEnabled()))
+        !(info.m_nType == OT_POLYGRID && LTPolyGridEnabled()) &&
+        !(info.m_nType == OT_PARTICLESYSTEM && LTParticlesEnabled()))
         return 0;
 
     LTSceneObject* p = new LTSceneObject;
@@ -390,6 +408,23 @@ LTSceneObject* CLTScene::CreateObject(const LTSceneCreateInfo& info)
     p->m_ClientFlags = 0;
     p->m_fKeysUpToMs = -1.0f;
     p->m_bInGameView = false;
+    if (info.m_nType == OT_PARTICLESYSTEM)
+    {
+        p->m_pPartSys.reset(new LTSceneParticleSystem);
+        // The ParticleSystem effect being delivered creates exactly one
+        // system, inside the delivery: that one gets the rate (5dj).
+        if (g_fPendingParticleRate > 0.0f)
+        {
+            p->m_pPartSys->m_fRate = g_fPendingParticleRate;
+            g_fPendingParticleRate = 0.0f;
+            if (getenv("LT_PARTTRACE"))
+            {
+                printf("[PART] system %p is a placed ParticleSystem at %.1f/s -- the dropped fraction is added back\n",
+                       (void*)p, p->m_pPartSys->m_fRate);
+                fflush(stdout);
+            }
+        }
+    }
 
     if (info.m_nType == OT_MODEL)
     {
@@ -2569,6 +2604,336 @@ static void SC_GetObjectColor(HLOCALOBJ hObj, float* r, float* g, float* b, floa
     if (a) *a = c[3];
 }
 
+// ---- Particle systems (iltclient.h:864, HANDOVER 5dh) ------------------- //
+//
+// ⚠️ All of it was the generated stubs, and the object type was refused, so
+// no smoke, steam, spark or trail ever existed. The semantics are the donor's
+// (client/src/particlesystem.*, clientde_impl.cpp ci_*Particle*): a particle
+// starts at alpha 1 with the system's radius as its size, dies when its life
+// runs out (unless PS_NEVERDIE), moves by its velocity and falls by the
+// system's gravity each frame (unless PS_DUMB).
+
+static_assert(sizeof(LTVector) == 3 * sizeof(float), "LTVector is three floats");
+static_assert(offsetof(LTSceneParticle, m_Velocity) == offsetof(LTParticle, m_Velocity), "LTParticle layout");
+static_assert(offsetof(LTSceneParticle, m_Color)    == offsetof(LTParticle, m_Color),    "LTParticle layout");
+static_assert(offsetof(LTSceneParticle, m_Alpha)    == offsetof(LTParticle, m_Alpha),    "LTParticle layout");
+static_assert(offsetof(LTSceneParticle, m_Size)     == offsetof(LTParticle, m_Size),     "LTParticle layout");
+static_assert(offsetof(LTSceneParticle, m_pNext)    == offsetof(LTParticle, m_pNext),    "LTParticle layout");
+
+static LTSceneParticleSystem* SC_PartSys(HLOCALOBJ hObj)
+{
+    LTSceneObject* p = Obj(hObj);
+    return (p && p->m_nType == OT_PARTICLESYSTEM) ? p->m_pPartSys.get() : 0;
+}
+
+static LTSceneParticle* SC_NewParticle(LTSceneParticleSystem* ps, const float* pPos,
+                                       const float* pVel, const float* pColor, float fLife)
+{
+    LTSceneParticle* q = new LTSceneParticle;
+    for (int k = 0; k < 3; ++k)
+    {
+        q->m_Pos[k]      = pPos   ? pPos[k]   : 0.0f;
+        q->m_Velocity[k] = pVel   ? pVel[k]   : 0.0f;
+        q->m_Color[k]    = pColor ? pColor[k] : 255.0f;
+    }
+    q->m_Alpha = 1.0f;
+    q->m_Size  = ps->m_fRadius;
+    q->m_fLifetime = q->m_fTotalLifetime = fLife;
+    // At the end of the list, as the donor's ps_AddParticle.
+    q->m_pPrev = ps->m_Head.m_pPrev;
+    q->m_pNext = &ps->m_Head;
+    ps->m_Head.m_pPrev->m_pNext = q;
+    ps->m_Head.m_pPrev = q;
+    ++ps->m_nCount;
+    return q;
+}
+
+static void SC_FreeParticle(LTSceneParticleSystem* ps, LTSceneParticle* q)
+{
+    if (!ps || !q || q == &ps->m_Head) return;
+    q->m_pPrev->m_pNext = q->m_pNext;
+    q->m_pNext->m_pPrev = q->m_pPrev;
+    if (ps->m_nCount) --ps->m_nCount;
+    delete q;
+}
+
+// The texture a system draws with NOW: an animated sprite's current frame
+// by the donor's integer rule (sprite.cpp spr_UpdateTracker: ms per frame =
+// 1000 / fps, the loop that many ms per frame long), else its own name (5dm).
+static std::string SC_ParticleTexture(const LTSceneParticleSystem* ps)
+{
+    const CLTSprite* pS = ps->m_pSprite;
+    if (!pS) return ps->m_sTexture;
+    const unsigned int nFrames = pS->GetNumFrames();
+    const unsigned int nMsPerFrame = 1000u / pS->GetFPS();
+    if (!nFrames || !nMsPerFrame) return ps->m_sTexture;
+    const unsigned int nFrame = ((unsigned int)ps->m_fSprMs / nMsPerFrame) % nFrames;
+    return pS->GetFrame(nFrame);
+}
+
+static LTRESULT SC_SetupParticleSystem(HLOCALOBJ hObj, char* pTextureName, float gravityAccel,
+                                       uint32 flags, float particleRadius)
+{
+    LTIMPL("ILTClient::SetupParticleSystem");
+    LTSceneParticleSystem* ps = SC_PartSys(hObj);
+    if (!ps) return LT_ERROR;
+    ps->m_sTexture = pTextureName ? pTextureName : "";
+    ps->m_fGravity = gravityAccel;
+    ps->m_nFlags   = flags;
+    ps->m_fRadius  = particleRadius;
+    // ⚠️ AN ANIMATED .spr (5dm): the donor's ps_SetTexture loads the sprite
+    // and starts a SpriteTracker at 0 (spr_InitTracker: play, loop). Only a
+    // sprite with more than one frame needs the clock; LT_NOSPRANIM=1 = the
+    // old still (frame 0, says so).
+    ps->m_pSprite = 0;
+    ps->m_fSprMs  = 0.0f;
+    if (ps->m_sTexture.size() > 4 && strcasecmp(ps->m_sTexture.c_str() + ps->m_sTexture.size() - 4, ".spr") == 0)
+    {
+        static const bool s_bStill = []() {
+            const bool b = (getenv("LT_NOSPRANIM") != 0);
+            if (b) { printf("[PART] LT_NOSPRANIM=1 -- particle sprites show frame 0 only (old)\n"); fflush(stdout); }
+            return b; }();
+        const CLTSprite* pS = s_bStill ? 0 : g_Scene.LoadSprite(ps->m_sTexture);
+        if (pS && pS->GetNumFrames() > 1 && pS->GetFPS() > 0) ps->m_pSprite = pS;
+    }
+    if (getenv("LT_PARTTRACE"))
+    {
+        printf("[PART] system %p '%s' gravity %.0f flags 0x%x radius %.3f\n", (void*)hObj,
+               ps->m_sTexture.c_str(), gravityAccel, (unsigned)flags, particleRadius);
+        fflush(stdout);
+    }
+    return LT_OK;
+}
+
+// The software renderer's single colour (iltclient.h): this renderer draws
+// every particle in its own colour, so there is nothing to keep.
+static LTRESULT SC_SetSoftwarePSColor(HLOCALOBJ hObj, float, float, float)
+{
+    LTIMPL("ILTClient::SetSoftwarePSColor");
+    return SC_PartSys(hObj) ? LT_OK : LT_ERROR;
+}
+
+static float SC_Rand01() { return (float)rand() / (float)RAND_MAX; }
+
+static void SC_AddParticles(HLOCALOBJ hObj, uint32 nParticles,
+                            LTVector* pMinOffset, LTVector* pMaxOffset,
+                            LTVector* pMinVelocity, LTVector* pMaxVelocity,
+                            LTVector* pMinColor, LTVector* pMaxColor,
+                            float minLifetime, float maxLifetime)
+{
+    LTIMPL("ILTClient::AddParticles");
+    LTSceneParticleSystem* ps = SC_PartSys(hObj);
+    if (!ps || !pMinOffset || !pMaxOffset || !pMinVelocity || !pMaxVelocity
+        || !pMinColor || !pMaxColor) return;
+
+    // ⚠️ DEVIATIONS E-009 (5dj): THE BUBBLES. A placed ParticleSystem asks for
+    // floor(rate x dt) particles per update (ParticleSystemFX.cpp:237), dt
+    // being one frame. Every shipped one asks for 20-50/s, so at 60 fps that
+    // is floor(0.33..0.83) = 0, every frame, forever: no bubbles. The call
+    // still arrives with the whole spawn description -- only the count is
+    // lost. So the fraction the game dropped is carried here and added back:
+    // over time the system emits its authored rate. dt is measured exactly as
+    // the game measures it (between its own AddParticles calls, clamped to
+    // 0.0666 s), and only the truncation is restored -- at most one particle
+    // per call -- so the game's own cap still holds. The rate comes from the
+    // effect message (skeleton_host.cpp); LT_NOPSRATE=1 = the game's count.
+    uint32 nAdd = nParticles;
+    if (ps->m_fRate > 0.0f)
+    {
+        const double fNow = LTGetClock()->GetTime();
+        if (ps->m_fLastAdd >= 0.0)
+        {
+            float fDt = (float)(fNow - ps->m_fLastAdd);
+            if (fDt > 0.0666f) fDt = 0.0666f;
+            float fLost = ps->m_fRate * fDt - (float)nParticles;
+            if (fLost > 1.0f) fLost = 1.0f;
+            if (fLost > 0.0f) ps->m_fRateCarry += fLost;
+            const uint32 nExtra = (uint32)ps->m_fRateCarry;
+            ps->m_fRateCarry -= (float)nExtra;
+            nAdd += nExtra;
+        }
+        ps->m_fLastAdd = fNow;
+    }
+
+    // The donor's ps_AddParticles, rand() and all: six draws per particle,
+    // the colour reusing three of them.
+    for (uint32 i = 0; i < nAdd; ++i)
+    {
+        float t[6];
+        for (int k = 0; k < 6; ++k) t[k] = SC_Rand01();
+        const float off[3] = { pMinOffset->x + (pMaxOffset->x - pMinOffset->x) * t[0],
+                               pMinOffset->y + (pMaxOffset->y - pMinOffset->y) * t[1],
+                               pMinOffset->z + (pMaxOffset->z - pMinOffset->z) * t[2] };
+        const float vel[3] = { pMinVelocity->x + (pMaxVelocity->x - pMinVelocity->x) * t[3],
+                               pMinVelocity->y + (pMaxVelocity->y - pMinVelocity->y) * t[4],
+                               pMinVelocity->z + (pMaxVelocity->z - pMinVelocity->z) * t[5] };
+        const float col[3] = { pMinColor->x + (pMaxColor->x - pMinColor->x) * t[0],
+                               pMinColor->y + (pMaxColor->y - pMinColor->y) * t[5],
+                               pMinColor->z + (pMaxColor->z - pMinColor->z) * t[3] };
+        SC_NewParticle(ps, off, vel, col, minLifetime + (maxLifetime - minLifetime) * t[3]);
+    }
+}
+
+static LTBOOL SC_GetParticles(HLOCALOBJ hObj, LTParticle** pHead, LTParticle** pTail)
+{
+    LTIMPL("ILTClient::GetParticles");
+    LTSceneParticleSystem* ps = SC_PartSys(hObj);
+    // Written on every path: the game walks whatever it is given.
+    if (pHead) *pHead = ps ? (LTParticle*)ps->m_Head.m_pNext : 0;
+    if (pTail) *pTail = ps ? (LTParticle*)&ps->m_Head : 0;
+    return ps ? LTTRUE : LTFALSE;
+}
+
+static void SC_GetParticlePos(HLOCALOBJ, LTParticle* pParticle, LTVector* pPos)
+{
+    LTIMPL("ILTClient::GetParticlePos");
+    if (!pPos) return;
+    const LTSceneParticle* q = (const LTSceneParticle*)pParticle;
+    if (q) pPos->Init(q->m_Pos[0], q->m_Pos[1], q->m_Pos[2]); else pPos->Init(0, 0, 0);
+}
+
+static void SC_SetParticlePos(HLOCALOBJ, LTParticle* pParticle, LTVector* pPos)
+{
+    LTIMPL("ILTClient::SetParticlePos");
+    LTSceneParticle* q = (LTSceneParticle*)pParticle;
+    if (q && pPos) { q->m_Pos[0] = pPos->x; q->m_Pos[1] = pPos->y; q->m_Pos[2] = pPos->z; }
+}
+
+static LTRESULT SC_GetParticleLifetime(HLOCALOBJ, LTParticle* pParticle, LTFLOAT& fLifetime)
+{
+    LTIMPL("ILTClient::GetParticleLifetime");
+    const LTSceneParticle* q = (const LTSceneParticle*)pParticle;
+    fLifetime = q ? q->m_fLifetime : 0.0f;
+    return q ? LT_OK : LT_ERROR;
+}
+
+static LTRESULT SC_GetParticleTotalLifetime(HLOCALOBJ, LTParticle* pParticle, LTFLOAT& fTotalLifetime)
+{
+    LTIMPL("ILTClient::GetParticleTotalLifetime");
+    const LTSceneParticle* q = (const LTSceneParticle*)pParticle;
+    fTotalLifetime = q ? q->m_fTotalLifetime : 0.0f;
+    return q ? LT_OK : LT_ERROR;
+}
+
+static void SC_RemoveParticle(HLOCALOBJ hSystem, LTParticle* pParticle)
+{
+    LTIMPL("ILTClient::RemoveParticle");
+    SC_FreeParticle(SC_PartSys(hSystem), (LTSceneParticle*)pParticle);
+}
+
+// An optimisation of the donor's bounding box; this scene keeps none.
+static LTRESULT SC_OptimizeParticles(HLOCALOBJ hSystem)
+{
+    LTIMPL("ILTClient::OptimizeParticles");
+    return SC_PartSys(hSystem) ? LT_OK : LT_ERROR;
+}
+
+void* LTScene_AddParticle(void* hObj, const float* pPos, const float* pVel,
+                          const float* pColor, float fLifetime)
+{
+    LTSceneParticleSystem* ps = SC_PartSys((HLOCALOBJ)hObj);
+    if (!ps) return 0;
+    return (void*)(LTParticle*)SC_NewParticle(ps, pPos, pVel, pColor, fLifetime);
+}
+
+// The donor's ps_UpdateParticles, less PS_BOUNCE's floor probe (a particle
+// bounces off nothing here yet) -- see HANDOVER 5dh.
+void LTScene_UpdateParticles(float fDt)
+{
+    if (!(fDt > 0.0f)) return;
+    const std::vector<LTSceneObject*>& v = g_Scene.Objects();
+    // LT_PARTTRACE=1 -- also every 120th frame: each system holding particles,
+    // how many, where its first one is (world) and whether it is visible.
+    static const bool s_bTrace = (getenv("LT_PARTTRACE") != 0);
+    static int s_nFrame = 0;
+    if (s_bTrace && (s_nFrame++ % 120) == 0)
+        for (size_t i = 0; i < v.size(); ++i)
+        {
+            const LTSceneParticleSystem* ps = v[i] ? v[i]->m_pPartSys.get() : 0;
+            if (!ps || !ps->m_nCount) continue;
+            const LTSceneParticle* q = ps->m_Head.m_pNext;
+            printf("[PART] %p '%s' %u particle(s), first at (%.0f %.0f %.0f)+(%.0f %.0f %.0f) size %.1f a %.2f%s\n",
+                   (void*)v[i], ps->m_sTexture.c_str(), ps->m_nCount, v[i]->m_Pos[0], v[i]->m_Pos[1], v[i]->m_Pos[2],
+                   q->m_Pos[0], q->m_Pos[1], q->m_Pos[2], q->m_Size, q->m_Alpha,
+                   (v[i]->m_Flags & FLAG_VISIBLE) ? "" : " HIDDEN");
+            fflush(stdout);
+        }
+    // ⚠️ DEVIATIONS E-010 (5dk): every FALLING system (gravity below 0 --
+    // sparks, blood) bounces as if it had asked for PS_BOUNCE. No shipped
+    // effect asks for it (all 33 ParticleSystem placements have ParticleFlags
+    // 0, SmokeFX's dwSystemFlags is never set), so in the original sparks
+    // fell straight through the floor. The user asked for the bounce.
+    // LT_NOFLOORBOUNCE=1 = the original: only PS_BOUNCE systems (none).
+    static const bool s_bBounceAll = []() {
+        const bool bOff = (getenv("LT_NOFLOORBOUNCE") != 0);
+        if (bOff) { printf("[PART] LT_NOFLOORBOUNCE=1 -- falling particles go through the floor (old)\n"); fflush(stdout); }
+        return !bOff; }();
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        LTSceneParticleSystem* ps = v[i] ? v[i]->m_pPartSys.get() : 0;
+        if (!ps) continue;
+        // The sprite clock runs for every system, dumb or not -- the donor
+        // advances the tracker before it looks at the flags (clientmgr.cpp).
+        if (ps->m_pSprite)
+        {
+            const unsigned int nMsPerFrame = 1000u / ps->m_pSprite->GetFPS();
+            const float fLen = (float)(nMsPerFrame * ps->m_pSprite->GetNumFrames());
+            ps->m_fSprMs += fDt * 1000.0f;
+            if (fLen > 0.0f) ps->m_fSprMs = fmodf(ps->m_fSprMs, fLen);
+        }
+        if (ps->m_nFlags & PS_DUMB) continue;
+        const float g = ps->m_fGravity * fDt;
+        const bool bNeverDie = (ps->m_nFlags & PS_NEVERDIE) != 0;
+        LTSceneParticle* q = ps->m_Head.m_pNext;
+        while (q != &ps->m_Head)
+        {
+            LTSceneParticle* n = q->m_pNext;
+            if (!bNeverDie)
+            {
+                q->m_fLifetime -= fDt;
+                if (q->m_fLifetime < 0.0f) { SC_FreeParticle(ps, q); q = n; continue; }
+            }
+            for (int k = 0; k < 3; ++k) q->m_Pos[k] += q->m_Velocity[k] * fDt;
+            q->m_Velocity[1] += g;
+            q = n;
+        }
+
+        // ⚠️ PS_BOUNCE, the donor's rule (particlesystem.cpp ps_UpdateParticles):
+        // ONE ray, 400 units straight down from the system's position, against
+        // the world only, finds the floor. A FALLING particle below it is put
+        // on it and sent back up at half its speed. Positions are relative to
+        // the system and the donor ignores the system's rotation; so does this.
+        // A system with no floor within 400 units does not bounce at all.
+        const bool bBounce = (ps->m_nFlags & PS_BOUNCE) || (s_bBounceAll && ps->m_fGravity < 0.0f);
+        if (bBounce && ps->m_nCount && LTWorldCollide_Ready())
+        {
+            const float* b = v[i]->m_Pos;
+            const float to[3] = { b[0], b[1] - 400.0f, b[2] };
+            float pt[3], nrm[3], t = 0.0f;
+            if (LTGetWorldCollide()->RaySegment(b, to, pt, nrm, &t))
+            {
+                const float fFloor = pt[1] - b[1];
+                unsigned int nLifted = 0;
+                for (LTSceneParticle* r = ps->m_Head.m_pNext; r != &ps->m_Head; r = r->m_pNext)
+                    if (r->m_Velocity[1] < 0.0f && r->m_Pos[1] < fFloor)
+                    {
+                        r->m_Pos[1] = fFloor;
+                        r->m_Velocity[1] = -r->m_Velocity[1] * 0.5f;
+                        ++nLifted;
+                    }
+                // LT_PARTTRACE: a system's FIRST bounce, once.
+                if (nLifted && s_bTrace && !ps->m_bBounceSaid)
+                {
+                    ps->m_bBounceSaid = true;
+                    printf("[PART] %p '%s' bounces: floor %.1f below the system (world y %.1f), %u particle(s) put back on it\n",
+                           (void*)v[i], ps->m_sTexture.c_str(), -fFloor, pt[1], nLifted);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
+}
+
 // ---- PolyGrids (iltclient.h:935) ----------------------------------------- //
 //
 // ⚠️ All seven were stubs, which is why SFX_POLYGRID_ID had to stay gated:
@@ -2955,6 +3320,7 @@ public:
         m_Client.clear();
         m_Sprites.clear();
         m_PolyGrids.clear();
+        m_PartSys.clear();
         LT3D::FromQuatPos(pCam->m_Quat, pCam->m_Pos, m_Cam);
         static const bool s_bOff = []() {
             const bool b = (getenv("LT_NOCLIENTMODELS") != 0);
@@ -2976,6 +3342,17 @@ public:
                 else         p->m_Flags &= ~FLAG_WASDRAWN;
                 continue;
             }
+            // Particle systems (5dh): FLAG_WASDRAWN as for a PolyGrid -- the
+            // game's FX read it -- and drawn with the translucent sprites.
+            if (p->m_nType == OT_PARTICLESYSTEM)
+            {
+                const bool bDraw = (p->m_Flags & (FLAG_VISIBLE | FLAG_PORTALVISIBLE)) && p->m_pPartSys
+                                && p->m_pPartSys->m_nCount > 0 && !p->m_pPartSys->m_sTexture.empty();
+                if (bDraw && (p->m_Flags & FLAG_VISIBLE)) p->m_Flags |= FLAG_WASDRAWN;
+                else                                      p->m_Flags &= ~FLAG_WASDRAWN;
+                if (bDraw) m_PartSys.push_back(p);
+                continue;
+            }
             // ⚠️ AND FLAG_PORTALVISIBLE (5df): hidden here, drawn in a mirror
             // -- the player's first-person-hidden attachments. Get() decides
             // per pass; only what the MAIN view shows is "in the game view".
@@ -2991,6 +3368,58 @@ public:
 
     std::vector<LTSceneObject*>     m_Sprites;
     std::vector<LTSceneObject*>     m_PolyGrids;
+    std::vector<LTSceneObject*>     m_PartSys;
+    mutable std::vector<LTDynamicParticle> m_PartScratch;
+
+    unsigned int ParticleSystemCount() const override { return (unsigned)m_PartSys.size(); }
+
+    // ⚠️ WORLD SPACE OUT, LOCAL SPACE IN: particle positions are relative to
+    // the system's position, rotation and scale (iltclient.h), so each is put
+    // through that frame here -- and a REALLYCLOSE system's frame is in CAMERA
+    // space, composed with the camera as the view weapon's is. The scratch is
+    // valid until the next call: the renderer draws one system at a time.
+    bool GetParticleSystem(unsigned int i, LTDynamicParticles& out) const override
+    {
+        if (i >= m_PartSys.size()) return false;
+        const LTSceneObject* p = m_PartSys[i];
+        const LTSceneParticleSystem* ps = p->m_pPartSys.get();
+        if (!ps) return false;
+        if (LTWorldPortalPass())
+        {
+            if (p->m_Flags2 & FLAG2_PORTALINVISIBLE) return false;
+        }
+        else if (!(p->m_Flags & FLAG_VISIBLE)) return false;
+
+        out.m_sTexture = SC_ParticleTexture(ps);
+        for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k];
+        out.m_fAlpha   = p->m_Color[3];
+        out.m_nBlendOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
+        out.m_bReallyClose = (p->m_Flags & FLAG_REALLYCLOSE) != 0;
+
+        float L[16], W[16];
+        LT3D::FromQuatPos(p->m_Quat, p->m_Pos, L);
+        if (out.m_bReallyClose) LT3D::Multiply(m_Cam, L, W);
+        else                    memcpy(W, L, sizeof(W));
+        const float sx = p->m_Scale[0] > 0.0f ? p->m_Scale[0] : 1.0f;
+        const float sy = p->m_Scale[1] > 0.0f ? p->m_Scale[1] : 1.0f;
+        const float sz = p->m_Scale[2] > 0.0f ? p->m_Scale[2] : 1.0f;
+
+        m_PartScratch.resize(ps->m_nCount);
+        unsigned int n = 0;
+        for (const LTSceneParticle* q = ps->m_Head.m_pNext; q != &ps->m_Head && n < m_PartScratch.size(); q = q->m_pNext)
+        {
+            LTDynamicParticle& d = m_PartScratch[n++];
+            const float l[3] = { q->m_Pos[0] * sx, q->m_Pos[1] * sy, q->m_Pos[2] * sz };
+            for (int r = 0; r < 3; ++r)
+                d.m_Pos[r] = W[r*4+0]*l[0] + W[r*4+1]*l[1] + W[r*4+2]*l[2] + W[r*4+3];
+            d.m_fSize = q->m_Size;
+            for (int k = 0; k < 3; ++k) d.m_RGB[k] = q->m_Color[k];
+            d.m_fAlpha = q->m_Alpha;
+        }
+        out.m_pParts = m_PartScratch.empty() ? 0 : &m_PartScratch[0];
+        out.m_nParts = n;
+        return n > 0;
+    }
 
     unsigned int PolyGridCount() const override { return (unsigned)m_PolyGrids.size(); }
 
@@ -3492,6 +3921,17 @@ void LTScene_Wire(ILTClient* p)
     p->SetObjectScale          = SC_SetObjectScale;
     p->SetObjectColor          = SC_SetObjectColor;
     p->GetObjectColor          = SC_GetObjectColor;
+
+    p->SetupParticleSystem     = SC_SetupParticleSystem;
+    p->SetSoftwarePSColor      = SC_SetSoftwarePSColor;
+    p->AddParticles            = SC_AddParticles;
+    p->GetParticles            = SC_GetParticles;
+    p->GetParticlePos          = SC_GetParticlePos;
+    p->SetParticlePos          = SC_SetParticlePos;
+    p->GetParticleLifetime     = SC_GetParticleLifetime;
+    p->GetParticleTotalLifetime = SC_GetParticleTotalLifetime;
+    p->RemoveParticle          = SC_RemoveParticle;
+    p->OptimizeParticles       = SC_OptimizeParticles;
 
     p->SetupPolyGrid           = SC_SetupPolyGrid;
     p->SetPolyGridTexture      = SC_SetPolyGridTexture;

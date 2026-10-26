@@ -145,7 +145,10 @@ BaseClass* CLTServerObjects::Create(ClassDef* pClass, ObjectCreateStruct* pStruc
     for (int k = 0; k < 3; ++k) { pRec->m_Vel[k] = 0.0f; pRec->m_Accel[k] = 0.0f; }
     pRec->m_fMass = 1.0f;
     pRec->m_fFriction = 0.0f;
-    pRec->m_fForceIgnoreLimit = 0.0f;
+    // The donor's default (objectmgr.cpp: "don't tell them unless they change
+    // this"): a world touch is sent only to objects that lowered it --
+    // projectiles, debris and destructibles set 0 or MINIMUM_FORCE (5do).
+    pRec->m_fForceIgnoreLimit = 1000.0f;
     pRec->m_bOnGround = false;
 
     // ⚠️ -1, NOT 0. "No animation chosen" and "animation zero" are different

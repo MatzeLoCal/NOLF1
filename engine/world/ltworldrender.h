@@ -349,6 +349,10 @@ public:
     // PolyGrids (water surfaces), if the source has any. Default: none.
     virtual unsigned int PolyGridCount() const { return 0; }
     virtual bool         GetPolyGrid(unsigned int /*i*/, struct LTDynamicPolyGrid& /*out*/) const { return false; }
+
+    // The game's PARTICLE SYSTEMS (5dh) -- smoke, steam, sparks, trails.
+    virtual unsigned int ParticleSystemCount() const { return 0; }
+    virtual bool         GetParticleSystem(unsigned int /*i*/, struct LTDynamicParticles& /*out*/) const { return false; }
 };
 
 // ⚠️ ONE POLYGRID AS THE RENDERER SEES IT -- see LTScenePolyGrid
@@ -369,6 +373,33 @@ struct LTDynamicPolyGrid
     int                 m_nBlendOp = 0;     // 0 over, 1 additive, 2 multiply
 };
 
+// ⚠️ ONE PARTICLE SYSTEM, IN WORLD SPACE, as the renderer draws it (5dh). Each
+// particle is a camera-facing square of half-size 2 x m_fSize -- the donor's
+// drawparticles.cpp rule ("multiplied by 2 to compensate for old code") -- of
+// the system's texture, tinted by the particle's colour times the object's,
+// with the particle's alpha times the object's.
+struct LTDynamicParticle
+{
+    float               m_Pos[3];           // world space
+    float               m_fSize;
+    float               m_RGB[3];           // 0..255, as the game sets it
+    float               m_fAlpha;           // 0..1
+};
+struct LTDynamicParticles
+{
+    std::string         m_sTexture;         // .dtx or .spr (frame 0)
+    float               m_Colour[3];        // SetObjectColor r g b, 0..1
+    float               m_fAlpha = 1.0f;    // SetObjectColor a
+    int                 m_nBlendOp = 0;     // 0 over, 1 additive, 2 multiply
+    bool                m_bReallyClose = false;
+    const LTDynamicParticle* m_pParts = 0;
+    unsigned int        m_nParts = 0;
+};
+
+// Are particle systems made and drawn? LT_NOPARTICLES=1 refuses
+// OT_PARTICLESYSTEM, as before 5dh (says so).
+bool LTParticlesEnabled();
+
 // Are PolyGrids made and drawn? LT_NOPOLYGRID=1 refuses OT_POLYGRID and keeps
 // SFX_POLYGRID_ID gated, as before (announces itself).
 bool LTPolyGridEnabled();
@@ -384,6 +415,10 @@ std::vector<unsigned int> LTTranslucentDynamics(const ILTWorldDynamicObjects* pD
 // with the translucent models, after them. Empty when LTPolyGridEnabled() is off.
 std::vector<unsigned int> LTPolyGridsBackToFront(const ILTWorldDynamicObjects* pDyn,
                                                  const float* pEye3);
+
+// The particle systems (5dh), far to near, really-close or not.
+std::vector<unsigned int> LTParticleSystemsBackToFront(const ILTWorldDynamicObjects* pDyn,
+                                                       bool bReallyClose, const float* pEye3);
 
 
 class ILTWorldModelXform
@@ -780,6 +815,21 @@ private:
                                        const float* pRight3, const float* pUp3,
                                        const float* pFwd3, const float* pEye3,
                                        Stats& st, ILTWorldGeomSink* pSink);
+
+    // Draws one particle system (5dh): each particle a camera-facing square,
+    // half-size 2 x its size, through the sprite path. Its alpha goes in
+    // kParticleAlphaSteps steps, because a blended texture entry carries ONE
+    // alpha (GetSpriteTexture) -- a bounded set of entries, which the Metal
+    // backend creates ahead of the upload so none lacks a GPU handle.
+    enum { kParticleAlphaSteps = 32 };
+    static float        ParticleAlphaStep(float fAlpha);
+    void                DrawParticles(const LT3DTarget& t, const float* pMVP,
+                                      const LTDynamicParticles& ps,
+                                      const float* pRight3, const float* pUp3,
+                                      const float* pFwd3, const float* pEye3,
+                                      Stats& st, ILTWorldGeomSink* pSink);
+    // Every alpha step's entry of every particle texture in pDyn (Metal).
+    void                PreloadParticleTextures(const ILTWorldDynamicObjects* pDyn);
 
     // Draws one PolyGrid (water surface) as its (W-1)(H-1)*2 triangles, the
     // same way: software raster, or pSink for Metal.

@@ -79,6 +79,15 @@ bool            LTServerHost_PlacePlayer(const float* pPos3);
 // Touch notification: how many pairs overlapped and how many messages that
 // produced. Zero pairs means nothing in the level can be interacted with.
 void            LTServerHost_DumpTouchCensus();
+// The WORLD touch (5do): tells hObj it touched the world -- MID_TOUCHNOTIFY
+// with the world as the other object, GetLastCollision answering the plane,
+// polygon (0 = none) and stopping velocity. Called by the server mover.
+// hDoor (5dp): the door it touched instead of the world, or 0; a door that
+// asks for touches is told too, as the donor tells both sides.
+void            LTServerHost_WorldTouch(void* hObj, void* hDoor, const float* pNormal3, float fPlaneDist,
+                                        unsigned int nPoly, const float* pStopVel3, float fForce);
+// True while hObj is a live object (not removed, not yet freed).
+bool            LTServerHost_IsLive(void* hObj);
 
 // How many stubs the last driven step reached. The census is the deliverable
 // here, not the running.

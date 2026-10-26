@@ -48,6 +48,7 @@
 
 #include <map>
 #include <memory>
+#include <string.h>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct LTSceneGpuItem
     float               m_RGB[3];       // sprite: colour
 };
 class CLTFileMgr;
+class CLTSprite;
 
 // What CreateObject was asked for. A plain struct so this file does not have
 // to agree with the SDK's ObjectCreateStruct layout -- the stub translates.
@@ -89,6 +91,60 @@ struct LTSceneCreateInfo
 };
 
 struct LTScenePolyGrid;     // below
+
+// ⚠️ A PARTICLE (HANDOVER 5dh). It BEGINS WITH iltclient.h's LTParticle,
+// field for field -- m_Velocity, m_Color (0-255), m_Alpha, m_Size, m_pNext --
+// because the game walks the list and writes those fields itself
+// (BaseParticleSystemFX.cpp: m_Size and m_Alpha over a particle's life). The
+// engine's own state follows. ltscene.cpp static_asserts the layout against
+// the SDK's struct. Positions are RELATIVE to the system's position and
+// rotation (iltclient.h).
+struct LTSceneParticle
+{
+    float               m_Velocity[3];
+    float               m_Color[3];
+    float               m_Alpha;
+    float               m_Size;
+    LTSceneParticle*    m_pNext;
+    // ---- the engine's ----
+    float               m_Pos[3];
+    float               m_fLifetime, m_fTotalLifetime;
+    LTSceneParticle*    m_pPrev;
+};
+
+// ⚠️ AN OT_PARTICLESYSTEM (ILTClient SetupParticleSystem ... iltclient.h:864):
+// smoke, steam, sparks, trails, the particle half of explosions. A circular
+// list around a SENTINEL: GetParticles hands out (first, sentinel) and the game
+// walks `while (p != tail)`. Defaults are iltclient.h's (gravity -500, radius
+// 300); the update is the donor's ps_UpdateParticles.
+struct LTSceneParticleSystem
+{
+    std::string         m_sTexture;
+    float               m_fGravity = -500.0f;
+    unsigned int        m_nFlags = 0;           // PS_BOUNCE, PS_NEVERDIE, PS_DUMB
+    float               m_fRadius = 300.0f;
+    LTSceneParticle     m_Head;                 // the sentinel
+    unsigned int        m_nCount = 0;
+    // A placed ParticleSystem's rate (DEVIATIONS E-009, 5dj): read from its
+    // effect message, so AddParticles can add back what the game's
+    // floor(rate x dt) dropped. 0 = not a placed ParticleSystem.
+    float               m_fRate = 0.0f;
+    float               m_fRateCarry = 0.0f;
+    double              m_fLastAdd = -1.0;
+    bool                m_bBounceSaid = false;  // LT_PARTTRACE: first bounce reported (5dk)
+    // An ANIMATED .spr texture (5dm): the sprite, and the system's own clock
+    // in ms -- the donor's SpriteTracker, one per system, started at setup.
+    const CLTSprite*    m_pSprite = nullptr;
+    float               m_fSprMs = 0.0f;
+    LTSceneParticleSystem() { memset(&m_Head, 0, sizeof(m_Head)); m_Head.m_pNext = m_Head.m_pPrev = &m_Head; }
+    ~LTSceneParticleSystem()
+    {
+        LTSceneParticle* p = m_Head.m_pNext;
+        while (p != &m_Head) { LTSceneParticle* n = p->m_pNext; delete p; p = n; }
+    }
+    LTSceneParticleSystem(const LTSceneParticleSystem&) = delete;
+    LTSceneParticleSystem& operator=(const LTSceneParticleSystem&) = delete;
+};
 
 struct LTSceneObject
 {
@@ -165,6 +221,9 @@ struct LTSceneObject
     // OT_POLYGRID only (SetupPolyGrid made it); null for everything else.
     std::unique_ptr<LTScenePolyGrid> m_pPolyGrid;
 
+    // OT_PARTICLESYSTEM only, made with the object (5dh); null otherwise.
+    std::unique_ptr<LTSceneParticleSystem> m_pPartSys;
+
     // ⚠️ HAS THIS CLIENT OBJECT HAD ITS ATTACHED EFFECT? LT2 delivers an
     // object's special-effect message once, when the object appears on the
     // client; a later StartSpecialEffectMessage only replaces the stored one.
@@ -215,6 +274,10 @@ public:
 
     void            Init(CLTFileMgr* pFileMgr);
     void            Term();
+
+    // A .spr, loaded once and kept for the scene's life; 0 if it cannot be
+    // read or has no frames (says so once on stderr).
+    const CLTSprite* LoadSprite(const std::string& sSpr);
 
     // Returns 0 if the type is one this scene cannot represent yet. ⚠️ It
     // returns 0 rather than a live handle for an unsupported type, so the game
@@ -314,6 +377,7 @@ private:
     const LT3DTexture*  SpriteTexture(const std::string& sSpr, float fSeconds,
                                       float fAlpha, int nBlendOp);
     std::map<std::string, LT3DTexture*> m_SpriteTex;
+    std::map<std::string, CLTSprite*>   m_Sprites;      // LoadSprite's cache
 
     CLTFileMgr*                             m_pFileMgr;
     std::vector<LTSceneObject*>             m_Objects;
@@ -350,6 +414,16 @@ void LTScene_Wire(ILTClient* p);
 //   ILTClient::SetObjectFlags    iltclient.h:816
 //   ILTCommon::GetObjectType     iltcommon.h:94
 int             LTScene_RemoveObject(void* hObj);
+// ILTClient::AddParticle is a VIRTUAL too (iltclient.h:883); the host's
+// override calls this. Returns the particle as the game's LTParticle*.
+void*           LTScene_AddParticle(void* hObj, const float* pPos, const float* pVel,
+                                    const float* pColor, float fLifetime);
+// Moves and ages every particle system by fDt seconds -- once per client
+// frame, after the shell's Update, where the donor's UpdateObjects runs (5dh).
+void            LTScene_UpdateParticles(float fDt);
+// The next OT_PARTICLESYSTEM created gets this rate (particles/second) -- set
+// around the delivery of a ParticleSystem effect, 0 clears (E-009, 5dj).
+void            LTScene_SetPendingParticleRate(float fRate);
 int             LTScene_SetObjectPos(void* hObj, float x, float y, float z);
 
 // ---- client physics state ---------------------------------------------- //

@@ -818,6 +818,58 @@ namespace
         g_Objects.BreakLink(pO, pL);
     }
 
+    // ⚠️ THE COLLISION A TOUCH NOTIFICATION IS ABOUT (5dn) -- the donor's
+    // g_pServerMgr->m_pCollisionInfo: set by the mover just before it sends
+    // MID_TOUCHNOTIFY, null otherwise, and ILTServer::GetLastCollision copies
+    // it out. GetLastCollision was a STUB that wrote nothing, and every game
+    // caller reads a bare local: the crossbow bolt (CSpear::HandleImpact)
+    // passed its m_hObject -- stack garbage -- to GetSurfaceType, which read
+    // the user flags of a pointer to nowhere. SIGSEGV on the first bolt that
+    // touched a character.
+    CollisionInfo g_TouchColl;
+    bool          g_bTouchColl = false;
+
+    // The contact of A touching B, from their boxes: B is the object, no
+    // polygon (the SDK: "otherwise it is equal to LTNULL"), the plane faces A
+    // through B's box point nearest A's centre, nothing to stop. The game reads
+    // the plane only for world hits, which this pass never makes.
+    void LTHost_SetTouchCollision(const float* aMin, const float* aMax,
+                                  const float* bMin, const float* bMax, void* hB)
+    {
+        float ca[3], q[3], n[3];
+        for (int k = 0; k < 3; ++k)
+        {
+            ca[k] = 0.5f * (aMin[k] + aMax[k]);
+            q[k] = ca[k] < bMin[k] ? bMin[k] : (ca[k] > bMax[k] ? bMax[k] : ca[k]);
+            n[k] = ca[k] - 0.5f * (bMin[k] + bMax[k]);
+        }
+        const float m = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        if (m > 0.0001f) { for (int k = 0; k < 3; ++k) n[k] /= m; }
+        else             { n[0] = 0.0f; n[1] = 1.0f; n[2] = 0.0f; }
+        memset(&g_TouchColl, 0, sizeof(g_TouchColl));
+        g_TouchColl.m_Plane.m_Normal.Init(n[0], n[1], n[2]);
+        g_TouchColl.m_Plane.m_Dist = n[0]*q[0] + n[1]*q[1] + n[2]*q[2];
+        g_TouchColl.m_hObject = (HOBJECT)hB;
+        g_bTouchColl = true;
+    }
+
+    // ⚠️ ZEROED WHEN THERE IS NO COLLISION, where the donor writes nothing:
+    // the callers read a bare local regardless, and a zero m_hObject / m_hPoly
+    // is what GetSurfaceType skips. LT_OLDLASTCOLLISION=1 = the stub (says so).
+    LTRESULT LTHost_GetLastCollision(CollisionInfo* pInfo)
+    {
+        static const bool s_bOld = []() {
+            const bool b = (getenv("LT_OLDLASTCOLLISION") != 0);
+            if (b) { printf("[TOUCH] LT_OLDLASTCOLLISION=1 -- GetLastCollision writes nothing (old: the crossbow crashed)\n"); fflush(stdout); }
+            return b; }();
+        if (s_bOld) return LT_ERROR;
+        LTIMPL("ILTServer::GetLastCollision");
+        if (!pInfo) return LT_INVALIDPARAMS;
+        if (!g_bTouchColl) { memset(pInfo, 0, sizeof(*pInfo)); return LT_ERROR; }
+        *pInfo = g_TouchColl;
+        return LT_OK;
+    }
+
     LPBASECLASS LTHost_HandleToObject(HOBJECT h)
     {
         SRec* p = CLTServerObjects::FromHandle(h);
@@ -857,10 +909,40 @@ namespace
         return f && p && strcasestr(p->m_sName.c_str(), f) != 0;
     }
 
+    // ⚠️ A POSITION THAT IS NOT A NUMBER IS REFUSED (5dl). NOLF's dodge roll
+    // reads ONE PAST the end of its distance table on the roll's last frame
+    // (AIMovement.cpp GetMovementData: index fTime*70+1 at fTime 1.0, weight
+    // 0). It is harmless while that float is a number, and in this build the
+    // float after s_afRollRight is 0xFFFFFFFF -- a NaN -- so 0 x NaN made the
+    // last step of every RIGHT roll NaN, the AI was teleported to NaN and
+    // vanished: unkillable, and M04S02's stage fight never ended (Goodman
+    // never came). The object stays where it was -- the roll's last step is
+    // a fraction of a unit. Every refusal is printed (it should never
+    // happen); LT_ALLOWNANPOS=1 = the old acceptance (says so).
+    bool LTHost_PosRefused(const SRec* p, const LTVector* pPos, const char* pWhat)
+    {
+        if (isfinite(pPos->x) && isfinite(pPos->y) && isfinite(pPos->z)) return false;
+        static const bool s_bAllow = []() {
+            const bool b = (getenv("LT_ALLOWNANPOS") != 0);
+            if (b) { printf("[POS] LT_ALLOWNANPOS=1 -- non-finite positions accepted (old)\n"); fflush(stdout); }
+            return b; }();
+        if (s_bAllow) return false;
+        static unsigned int s_n = 0;
+        if (s_n++ < 20)
+        {
+            printf("[POS] t=%.3f refused a non-finite %s for %s '%s' -- it stays at (%.1f %.1f %.1f)\n",
+                   g_fServerTime, pWhat, p->m_pClass ? p->m_pClass->m_ClassName : "?",
+                   p->m_sName.c_str(), p->m_Pos[0], p->m_Pos[1], p->m_Pos[2]);
+            fflush(stdout);
+        }
+        return true;
+    }
+
     void LTHost_SetObjectPos(HOBJECT h, LTVector* pPos)
     {
         SRec* p = CLTServerObjects::FromHandle(h);
         if (!p || !pPos) return;
+        if (LTHost_PosRefused(p, pPos, "SetObjectPos")) return;
         if (LTHost_PropTraced(p))
             printf("[PROP] %-12s pos (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)  dims (%.1f %.1f %.1f)\n",
                    p->m_sName.c_str(), p->m_Pos[0], p->m_Pos[1], p->m_Pos[2],
@@ -927,6 +1009,12 @@ namespace
     void     LTHost_GetObjectDims(HOBJECT h, LTVector* pDims);
     SRec*    LTHost_FindPlayerRecord();
 
+    // E-011 (5dq): while a bolt's touch on a door is delivered, THIS polygon's
+    // "Wood Door" (100, hardness 0.65) reads as "Wood" (30, 0.5) -- see
+    // LTServerHost_WorldTouch. 0 = no override.
+    unsigned int g_nBoltDoorPoly = 0;
+    const uint32 kSurfWoodDoor = 100, kSurfWood = 30;    // Attributes\Surface.txt
+
     // Shared by ILTServer, ILTCommon and the client: polygon -> surface type.
     LTRESULT LTHost_PolyTextureFlags(unsigned int nPolyId, uint32* pFlags)
     {
@@ -936,6 +1024,7 @@ namespace
         CLTWorldScene* pScene = LTGetWorldScene();
         if (!pScene || !pScene->PolySurfaceType(nPolyId, &n)) return LT_ERROR;
         *pFlags = n;
+        if (g_nBoltDoorPoly && nPolyId == g_nBoltDoorPoly && n == kSurfWoodDoor) *pFlags = kSurfWood;
         return LT_OK;
     }
 
@@ -1109,12 +1198,34 @@ namespace
     {
         SRec* p = CLTServerObjects::FromHandle(h);
         if (!p || !pPos) return LT_ERROR;
+        if (LTHost_PosRefused(p, pPos, "TeleportObject")) return LT_ERROR;
         const float to[3] = { pPos->x, pPos->y, pPos->z };
         if (getenv("LT_TELETRACE"))
             printf("[TELE] %s '%s' -> (%.1f %.1f %.1f)  dims (%.1f %.1f %.1f)\n",
                    p->m_pClass ? p->m_pClass->m_ClassName : "?",
                    p->m_sName.c_str(), to[0], to[1], to[2],
                    p->m_Dims[0], p->m_Dims[1], p->m_Dims[2]);
+        // LT_AIJUMPTRACE=1 -- an AI carried more than 30 units sideways by ONE
+        // teleport. NOLF's humans move by "cheap movement": every step is a
+        // TeleportObject with no collision, so a step that size is how one
+        // leaves through a wall (5dl). Prints the animation it is playing,
+        // its time and length -- a dodge roll's distance comes from those.
+        static const bool s_bJump = (getenv("LT_AIJUMPTRACE") != 0);
+        if (s_bJump && p->m_pClass && strncmp(p->m_pClass->m_ClassName, "AI_", 3) == 0)
+        {
+            const float dx = to[0] - p->m_Pos[0], dz = to[2] - p->m_Pos[2];
+            const float d = sqrtf(dx*dx + dz*dz);
+            if (!(d <= 30.0f))          // NaN too: the roll's bad step is one
+            {
+                printf("[AIJUMP] t=%.3f %s '%s' %.1f units: (%.1f %.1f %.1f) -> (%.1f %.1f %.1f)  anim %d at %.0f of %d ms%s\n",
+                       g_fServerTime, p->m_pClass->m_ClassName, p->m_sName.c_str(), d,
+                       p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], to[0], to[1], to[2], p->m_nAnim,
+                       (g_fServerTime - p->m_fAnimStart) * 1000.0f,
+                       LTScene_GetAnimLengthForFile(p->m_sFilename.c_str(), p->m_nAnim),
+                       p->m_bAnimLooping ? " looping" : "");
+                fflush(stdout);
+            }
+        }
         LTServerPhys_TeleportTo((void*)h, to);
         return LT_OK;
     }
@@ -1123,6 +1234,7 @@ namespace
     {
         SRec* p = CLTServerObjects::FromHandle(h);
         if (!p || !pPos) return LT_ERROR;
+        if (LTHost_PosRefused(p, pPos, "MoveObject")) return LT_ERROR;
         // LT_MOVETRACE=<name> -- every obsolete MoveObject on that object:
         // where it was, where it is asked to go. A door that never "arrives"
         // shows as a call every frame.
@@ -1300,6 +1412,16 @@ namespace
     {
     public:
         LTRESULT Parse(ConParse* pParse) override { return LTConParse_Common(pParse); }
+
+        // A data buffer -- the one StartHMessageWrite makes, so Release() frees
+        // it and EndMessage leaves it alone. Sprinkles fills one for
+        // SetObjectSFXMessage (5dh).
+        LTRESULT CreateMessage(ILTMessage*& pMsg) override
+        {
+            LTIMPL("ILTCommon::CreateMessage");
+            pMsg = LTMessage_StartData();
+            return pMsg ? LT_OK : LT_ERROR;
+        }
 
         // The ILTCommon spelling of the same thing -- see the ILTServer one.
         LTRESULT GetModelAnimUserDims(HOBJECT hObject, LTVector* pDims,
@@ -4699,6 +4821,25 @@ namespace
             return (HMESSAGEWRITE)LTMessage_StartSFX(pObject);
         }
 
+        // ⚠️ THE MODERN SPELLING OF StartSpecialEffectMessage, and one class
+        // uses it: Sprinkles (M06S03's plankton and drifting foliage) builds
+        // its effect in a Common()->CreateMessage buffer and hands it over
+        // here. The bytes become the object's effect exactly as an ended
+        // StartSpecialEffectMessage would -- captured for the object (a save
+        // and a later re-delivery carry it) and queued for the client. Both
+        // halves were stubs, so the effect never reached the client (5dh).
+        LTRESULT SetObjectSFXMessage(HOBJECT hObject, ILTMessage& msg) override
+        {
+            LTIMPL("ILTServer::SetObjectSFXMessage");
+            LPBASECLASS pObj = LTHost_HandleToObject(hObject);
+            const CLTMessage* pSrc = dynamic_cast<const CLTMessage*>(&msg);
+            if (!pObj || !pSrc) return LT_INVALIDPARAMS;
+            CLTMessage* p = LTMessage_StartSFX(pObj);
+            if (!p) return LT_ERROR;
+            if (pSrc->Size()) p->PutRaw(pSrc->Bytes(), pSrc->Size());
+            return LTMessage_End(p, MESSAGE_GUARANTEED);
+        }
+
         HMESSAGEWRITE StartInstantSpecialEffectMessage(LTVector* pPos) override
         {
             const float p[3] = { pPos ? pPos->x : 0.0f,
@@ -4830,6 +4971,7 @@ namespace
             GetPropRotationEuler = LTHost_GetPropRotationEuler;
 
             HandleToObject      = LTHost_HandleToObject;
+            GetLastCollision    = LTHost_GetLastCollision;
             CreateInterObjectLink = LTHost_CreateInterObjectLink;
             BreakInterObjectLink  = LTHost_BreakInterObjectLink;
             ObjectToHandle      = LTHost_ObjectToHandle;
@@ -6206,6 +6348,137 @@ namespace { unsigned int g_nTouchSent = 0, g_nTouchPairs = 0; }
 // SoundFX); notifying those pairs fires every trigger in the level the moment
 // it loads. A character and its OWN hit box is excluded for the same reason --
 // they overlap by construction, every frame, for every character.
+bool LTServerHost_IsLive(void* hObj)
+{
+    SRec* p = CLTServerObjects::FromHandle(hObj);
+    return p && g_Objects.IsLive(p);
+}
+
+void LTServerHost_WorldTouch(void* hObj, void* hDoor, const float* pNormal3, float fPlaneDist,
+                             unsigned int nPoly, const float* pStopVel3, float fForce)
+{
+    SRec* p = CLTServerObjects::FromHandle(hObj);
+    if (!p || !g_Objects.IsLive(p) || !p->m_pGame || !pNormal3 || !pStopVel3) return;
+    // ⚠️ A DOOR IS ITSELF, NOT THE WORLD (5dp). Its triangles are the
+    // collider's dynamic set, now with an owner each; the donor reports a
+    // world model it collided with as that object (collision.cpp,
+    // m_pWorldObj). No polygon: the game then takes the surface from the
+    // object (GetSurfaceType -> its user flags). LT_DOORASWORLD=1 = the old
+    // "the world" (says so).
+    static const bool s_bDoorAsWorld = []() {
+        const bool b = (getenv("LT_DOORASWORLD") != 0);
+        if (b) { printf("[PHYS] LT_DOORASWORLD=1 -- a door hit is reported as the world (old)\n"); fflush(stdout); }
+        return b; }();
+    SRec* pDoor = (hDoor && !s_bDoorAsWorld) ? CLTServerObjects::FromHandle(hDoor) : 0;
+    if (pDoor && !g_Objects.IsLive(pDoor)) pDoor = 0;
+    SRec* pW = pDoor ? pDoor : LTHost_WorldRecord();
+    // The door's own polygon (5dq), as the donor's MakeHPoly gives it: its
+    // texture's material, not the object's SurfaceOverride (most doors say
+    // "Unknown", hardness 0.65).
+    memset(&g_TouchColl, 0, sizeof(g_TouchColl));
+    g_TouchColl.m_Plane.m_Normal.Init(pNormal3[0], pNormal3[1], pNormal3[2]);
+    g_TouchColl.m_Plane.m_Dist = fPlaneDist;
+    g_TouchColl.m_hObject = (HOBJECT)pW;
+    g_TouchColl.m_hPoly   = (HPOLY)nPoly;
+    g_TouchColl.m_vStopVel.Init(pStopVel3[0], pStopVel3[1], pStopVel3[2]);
+    g_bTouchColl = true;
+    // LT_WORLDTOUCHTRACE=1 -- every world touch: who, which surface, how hard.
+    static const bool s_bTrace = (getenv("LT_WORLDTOUCHTRACE") != 0);
+    if (s_bTrace)
+    {
+        uint32 nSurf = 0;
+        if (nPoly) LTHost_PolyTextureFlags((HPOLY)nPoly, &nSurf);
+        printf("[WTOUCH] t=%.3f %s '%s' at (%.1f %.1f %.1f) -> %s%s%s: normal (%.2f %.2f %.2f) poly %u surface %u stop (%.1f %.1f %.1f) force %.1f\n",
+               g_fServerTime, p->m_pClass ? p->m_pClass->m_ClassName : "?", p->m_sName.c_str(),
+               p->m_Pos[0], p->m_Pos[1], p->m_Pos[2],
+               pDoor ? (pDoor->m_pClass ? pDoor->m_pClass->m_ClassName : "?") : "the world",
+               pDoor ? " " : "", pDoor ? pDoor->m_sName.c_str() : "",
+               pNormal3[0], pNormal3[1], pNormal3[2], nPoly, (unsigned)nSurf,
+               pStopVel3[0], pStopVel3[1], pStopVel3[2], fForce);
+        fflush(stdout);
+    }
+    // ⚠️ DEVIATIONS E-011 (5dq): A BOLT STICKS IN A DOOR. NOLF breaks a
+    // crossbow bolt or speargun spear (CSpear) on any movable non-character
+    // object -- "much easier to just break it" (ProjectileTypes.cpp) -- and
+    // sticks it only in the main world, by spawning an AmmoBox (the bolt you
+    // can pick up again) at the hit. The user asked for bolts in doors. So the
+    // spear is told it touched the WORLD (the stick branch), while
+    // GetLastCollision keeps naming the door: the stick-or-break hardness and
+    // the hit plane are the door's. The AmmoBox the game spawns in that touch
+    // is then attached to the door the way Door::AttachObject attaches (world
+    // offset, rotation child x parent^-1), so it swings with it. Each bolt
+    // gets its own attachment (the door's ATTACH message keeps only one).
+    // ⚠️ AND A WOODEN DOOR COUNTS AS WOOD for that one touch. The game sticks
+    // a bolt only in a surface of hardness <= 0.5, and its data makes "Wood
+    // Door" 0.65 (plain "Wood" 0.5) -- so with the door's true material every
+    // bolt still broke. Metal doors (0.75), glass and the rest keep the game's
+    // rule and break it.
+    // LT_NOBOLTSINDOORS=1 = the original: bolts break on doors (says so).
+    static const bool s_bBreakInDoors = []() {
+        const bool b = (getenv("LT_NOBOLTSINDOORS") != 0);
+        if (b) { printf("[PHYS] LT_NOBOLTSINDOORS=1 -- bolts break on doors (original)\n"); fflush(stdout); }
+        return b; }();
+    const bool bBoltInDoor = pDoor && !s_bBreakInDoors && p->m_pClass && p->m_pClass->m_ClassName
+                          && strcmp(p->m_pClass->m_ClassName, "CSpear") == 0;
+    std::set<SRec*> boxesBefore;
+    if (bBoltInDoor)
+        for (unsigned int i = 0; i < g_Objects.ObjectCount(); ++i)
+        {
+            SRec* r = g_Objects.RecordAt(i);
+            if (r && r->m_pClass && r->m_pClass->m_ClassName && strcmp(r->m_pClass->m_ClassName, "AmmoBox") == 0)
+                boxesBefore.insert(r);
+        }
+
+    if (bBoltInDoor) g_nBoltDoorPoly = nPoly;
+    p->m_pGame->EngineMessageFn(MID_TOUCHNOTIFY, (void*)(bBoltInDoor ? LTHost_WorldRecord() : pW), fForce);
+    g_nBoltDoorPoly = 0;
+    g_bTouchColl = false;
+    ++g_nTouchSent;
+
+    if (bBoltInDoor && g_Objects.IsLive(pDoor))
+        for (unsigned int i = 0; i < g_Objects.ObjectCount(); ++i)
+        {
+            SRec* r = g_Objects.RecordAt(i);
+            if (!r || !g_Objects.IsLive(r) || boxesBefore.count(r) || !r->m_pClass || !r->m_pClass->m_ClassName
+                || strcmp(r->m_pClass->m_ClassName, "AmmoBox") != 0) continue;
+            // Door::AttachObject's numbers: the offset in world axes, the
+            // rotation the child's relative to the parent's.
+            LTVector vOfs(r->m_Pos[0] - pDoor->m_Pos[0], r->m_Pos[1] - pDoor->m_Pos[1], r->m_Pos[2] - pDoor->m_Pos[2]);
+            const float* qc = r->m_Rot;
+            const float  qp[4] = { -pDoor->m_Rot[0], -pDoor->m_Rot[1], -pDoor->m_Rot[2], pDoor->m_Rot[3] };
+            LTRotation rOfs;
+            rOfs.m_Quat[0] = qc[3]*qp[0] + qc[0]*qp[3] + qc[1]*qp[2] - qc[2]*qp[1];
+            rOfs.m_Quat[1] = qc[3]*qp[1] - qc[0]*qp[2] + qc[1]*qp[3] + qc[2]*qp[0];
+            rOfs.m_Quat[2] = qc[3]*qp[2] + qc[0]*qp[1] - qc[1]*qp[0] + qc[2]*qp[3];
+            rOfs.m_Quat[3] = qc[3]*qp[3] - qc[0]*qp[0] - qc[1]*qp[1] - qc[2]*qp[2];
+            HATTACHMENT hA = 0;
+            const LTRESULT res = LTHost_CreateAttachment((HOBJECT)pDoor, (HOBJECT)r, 0, &vOfs, &rOfs, &hA);
+            if (s_bTrace)
+            {
+                printf("[WTOUCH] bolt stuck in %s '%s': %s '%s' attached at offset (%.1f %.1f %.1f)%s\n",
+                       pDoor->m_pClass ? pDoor->m_pClass->m_ClassName : "?", pDoor->m_sName.c_str(),
+                       r->m_pClass->m_ClassName, r->m_sName.c_str(), vOfs.x, vOfs.y, vOfs.z,
+                       res == LT_OK ? "" : " -- FAILED");
+                fflush(stdout);
+            }
+        }
+
+    // ...and the door, if it asks: the plane turned round, nothing to stop
+    // (doors are not moved by velocity), the force as the donor passes it.
+    if (pDoor && g_Objects.IsLive(pDoor) && pDoor->m_pGame && (pDoor->m_Flags & FLAG_TOUCH_NOTIFY)
+        && g_Objects.IsLive(p) && fForce * fForce >= pDoor->m_fForceIgnoreLimit * pDoor->m_fForceIgnoreLimit)
+    {
+        memset(&g_TouchColl, 0, sizeof(g_TouchColl));
+        g_TouchColl.m_Plane.m_Normal.Init(-pNormal3[0], -pNormal3[1], -pNormal3[2]);
+        g_TouchColl.m_Plane.m_Dist = -fPlaneDist;
+        g_TouchColl.m_hObject = (HOBJECT)p;
+        g_bTouchColl = true;
+        pDoor->m_pGame->EngineMessageFn(MID_TOUCHNOTIFY, (void*)p, -fForce);
+        g_bTouchColl = false;
+        ++g_nTouchSent;
+    }
+}
+
 void LTServerHost_TouchPass()
 {
     if (!g_bWorldRunning) return;
@@ -6268,7 +6541,9 @@ void LTServerHost_TouchPass()
             // Trigger.cpp:246) without checking anything.
             // The handle IS the record pointer here (CLTServerObjects::
             // FromHandle is a cast), so the record goes across as-is.
+            LTHost_SetTouchCollision(aMin, aMax, bMin, bMax, (void*)pB);
             pA->m_pGame->EngineMessageFn(MID_TOUCHNOTIFY, (void*)pB, 0.0f);
+            g_bTouchColl = false;
             ++g_nTouchSent;
 
             // ⚠️ AND BOTH WAYS WHEN BOTH ASKED. An AI walking into a trigger
@@ -6277,7 +6552,9 @@ void LTServerHost_TouchPass()
             if (!g_Objects.IsLive(pA)) break;          // a pickup removes itself
             if (pB->m_Flags & FLAG_TOUCH_NOTIFY)
             {
+                LTHost_SetTouchCollision(bMin, bMax, aMin, aMax, (void*)pA);
                 pB->m_pGame->EngineMessageFn(MID_TOUCHNOTIFY, (void*)pA, 0.0f);
+                g_bTouchColl = false;
                 ++g_nTouchSent;
             }
         }

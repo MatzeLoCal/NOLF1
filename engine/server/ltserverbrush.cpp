@@ -41,9 +41,17 @@ namespace
         float               m_RestPos[3];
         float               m_RestQuat[4];
         std::vector<float>  m_Tris;         // rest triangles, 9 floats each
+        std::vector<unsigned int> m_TriPoly;    // LTWorldPolyId per triangle (5dq)
     };
 
     std::vector<MovableBrush>  g_Brushes;
+
+    // ⚠️ THE SOLID STATIC BRUSH OBJECTS (5ds): in the static grid, and gone
+    // from it when their object is removed or stops being solid -- see
+    // CLTWorldCollide::SetModelOff. World-model index, record, and whether its
+    // triangles are on now.
+    struct StaticBrush { unsigned int m_nModel; SRec* m_pRec; bool m_bOn; };
+    std::vector<StaticBrush>   g_Static;
 
     // ⚠️ WHERE EACH BRUSH WAS LAST FRAME, so what stands on one can ride it.
     // See LTServerBrush_CarryPoint. Index-parallel to g_Brushes; a brush that
@@ -235,6 +243,7 @@ namespace
 void LTServerBrush_Reset()
 {
     g_Brushes.clear();
+    g_Static.clear();
     g_HitBrushes.clear();
     g_HitIndex.clear();
     g_BrushObjects.clear();
@@ -332,16 +341,35 @@ void LTServerBrush_Build(const CLTWorld& world)
         // solid -- you swim through Water and climb into a Ladder. Decided at
         // load: these classes never change it.
         if (getenv("LT_BRUSHTRACE"))
-            printf("[BRUSH] object %-28s %-22s flags 0x%08x%s%s\n", W.m_sName.c_str(),
+        {
+            // ...and where its geometry is (5dr): the object's Pos is only its
+            // build origin. From the ray record, which every brush object has.
+            float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
+            std::map<const void*, size_t>::const_iterator hi = g_HitIndex.find(p);
+            if (hi != g_HitIndex.end())
+            {
+                const std::vector<float>& T = g_HitBrushes[hi->second].m_Tris;
+                for (size_t t = 0; t + 2 < T.size(); t += 3)
+                    for (int k = 0; k < 3; ++k)
+                    { mn[k] = std::min(mn[k], T[t+k]); mx[k] = std::max(mx[k], T[t+k]); }
+            }
+            printf("[BRUSH] object %-28s %-22s flags 0x%08x%s%s box (%.0f %.0f %.0f)..(%.0f %.0f %.0f)\n", W.m_sName.c_str(),
                    p->m_pClass->m_ClassName, (unsigned)p->m_Flags,
                    (p->m_Flags & FLAG_VISIBLE) ? " VISIBLE" : "",
-                   (p->m_Flags & FLAG_SOLID) ? " SOLID" : "");
+                   (p->m_Flags & FLAG_SOLID) ? " SOLID" : "",
+                   mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
+        }
         if (!Movable(p) && !attached.count(Upper(W.m_sName)))
         {
             if (!(p->m_Flags & FLAG_SOLID) && !NoBrushFlags())
             {
                 excluded.push_back(W.m_sName);
                 ++nNonSolid;
+            }
+            else
+            {
+                StaticBrush sb = { (unsigned int)i, p, true };
+                g_Static.push_back(sb);
             }
             continue;
         }
@@ -375,6 +403,7 @@ void LTServerBrush_Build(const CLTWorld& world)
                     if (idx[v] >= W.m_Points.size()) bOK = false;
                 if (!bOK) continue;
 
+                b.m_TriPoly.push_back(LTWorldPolyId((unsigned)i, (unsigned)q));
                 for (int v = 0; v < 3; ++v)
                     for (int c = 0; c < 3; ++c)
                         b.m_Tris.push_back(W.m_Points[idx[v]].m_Pos[c]);
@@ -382,6 +411,17 @@ void LTServerBrush_Build(const CLTWorld& world)
         }
 
         if (b.m_Tris.empty()) continue;
+        // LT_BRUSHTRACE=1 -- where a movable brush's geometry really is: its
+        // object Pos is only the origin it was built around (5dr).
+        if (getenv("LT_BRUSHTRACE"))
+        {
+            float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f };
+            for (size_t t = 0; t + 2 < b.m_Tris.size(); t += 3)
+                for (int k = 0; k < 3; ++k)
+                { mn[k] = std::min(mn[k], b.m_Tris[t+k]); mx[k] = std::max(mx[k], b.m_Tris[t+k]); }
+            printf("[BRUSH] movable %-24s box (%.0f %.0f %.0f)..(%.0f %.0f %.0f), %zu triangle(s)\n",
+                   b.m_sName.c_str(), mn[0], mn[1], mn[2], mx[0], mx[1], mx[2], b.m_Tris.size() / 9);
+        }
         excluded.push_back(b.m_sName);
         {
             std::map<const void*, size_t>::iterator it = g_HitIndex.find(p);
@@ -492,9 +532,39 @@ bool LTServerBrush_RaysPassThrough(const char* pName)
 void LTServerBrush_Update()
 {
     LTServerBrush_UpdateVisibility();
+
+    // ⚠️ A STATIC BRUSH OBJECT THAT IS GONE STOPS BLOCKING (5ds). The static
+    // grid is built once; a destructible world model removed at run time --
+    // M08S04's vent louvres, TranslucentWorldModel28-33, "Machinery" debris,
+    // 5 hit points -- left its triangles behind, an invisible wall exactly
+    // where the player had just shot the way open. Its model is switched off
+    // in the grid when the object is no longer live and solid (and back on if
+    // it returns). LT_STATICBRUSHSTAY=1 = the old way (says so).
+    static const bool s_bStay = []() {
+        const bool b = (getenv("LT_STATICBRUSHSTAY") != 0);
+        if (b) { printf("[BRUSH] LT_STATICBRUSHSTAY=1 -- a removed static brush keeps its collision (old)\n"); fflush(stdout); }
+        return b; }();
+    if (!s_bStay && LTGetWorldCollide())
+        for (size_t k = 0; k < g_Static.size(); ++k)
+        {
+            StaticBrush& sb = g_Static[k];
+            const bool bOn = LTServerHost_IsLive((void*)sb.m_pRec) && (sb.m_pRec->m_Flags & FLAG_SOLID);
+            if (bOn == sb.m_bOn) continue;
+            sb.m_bOn = bOn;
+            LTGetWorldCollide()->SetModelOff(sb.m_nModel, !bOn);
+            if (getenv("LT_BRUSHTRACE"))
+            {
+                printf("[BRUSH] t=%.2f static model %u %s collision\n", LTServerHost_Time(), sb.m_nModel,
+                       bOn ? "back IN" : "taken OUT of");
+                fflush(stdout);
+            }
+        }
+
     if (g_Brushes.empty()) return;
 
     g_Dyn.clear();
+    std::vector<void*> dynOwner;    // one per g_Dyn triangle: whose door (5dp)
+    std::vector<unsigned int> dynPoly;  // ...and which of its polygons (5dq)
     std::vector<float> dynRay;      // the same, less what rays pass through (E-008)
     g_nMoved = 0;
     g_MovedNow.clear();
@@ -525,16 +595,41 @@ void LTServerBrush_Update()
         }
         g_PrevM[i].assign(M, M + 16);
 
-        // ⚠️ EVERY brush is handed over, moved or not. They were taken OUT of
-        // the static grid, so a door left out of this list is a doorway with
-        // no door in it -- the player would walk straight through a closed one.
-        const bool bRays = !LTServerBrush_RaysPassThrough(b.m_sName.c_str());
+        // ⚠️ EVERY SOLID brush is handed over, moved or not. They were taken
+        // OUT of the static grid, so a solid door left out of this list is a
+        // doorway with no door in it.
+        // ⚠️ AND ONLY A SOLID ONE BLOCKS (5dr). LithTech collides with an
+        // object only when the OBJECT is solid -- the rule the load already
+        // applies to static brushes -- and a door's solidity is decided at run
+        // time. Every door's triangles were handed over regardless, so a
+        // NON-SOLID one was a wall you could see through: M08S04's vent
+        // louvres (Door6, Door28, hatch1: RAYHIT, not SOLID) trapped the
+        // player in the vent the game means you to climb out of. Rays keep the
+        // server's rule, solid OR rayhit (you can still shoot the louvres); a
+        // removed object is neither. LT_NONSOLIDDOORSBLOCK=1 = the old way.
+        static const bool s_bOldSolid = []() {
+            const bool b = (getenv("LT_NONSOLIDDOORSBLOCK") != 0);
+            if (b) { printf("[BRUSH] LT_NONSOLIDDOORSBLOCK=1 -- non-solid doors block movement (old)\n"); fflush(stdout); }
+            return b; }();
+        const bool bLive    = LTServerHost_IsLive((void*)b.m_pRec);
+        const bool bCollide = s_bOldSolid || (bLive && (b.m_pRec->m_Flags & FLAG_SOLID));
+        const bool bRays = !LTServerBrush_RaysPassThrough(b.m_sName.c_str())
+                        && (s_bOldSolid || (bLive && (b.m_pRec->m_Flags & (FLAG_SOLID | FLAG_RAYHIT))));
         for (size_t t = 0; t + 2 < b.m_Tris.size(); t += 3)
         {
             const float v[3] = { b.m_Tris[t], b.m_Tris[t+1], b.m_Tris[t+2] };
             float o[4] = { v[0], v[1], v[2], 1.0f };
             if (bMoved) LT3D::TransformPoint(M, v, o);
-            g_Dyn.push_back(o[0]); g_Dyn.push_back(o[1]); g_Dyn.push_back(o[2]);
+            if (bCollide)
+            {
+                if (((t / 3) % 3) == 0)                                     // a triangle starts
+                {
+                    dynOwner.push_back((void*)b.m_pRec);
+                    const size_t nTri = t / 9;
+                    dynPoly.push_back(nTri < b.m_TriPoly.size() ? b.m_TriPoly[nTri] : 0u);
+                }
+                g_Dyn.push_back(o[0]); g_Dyn.push_back(o[1]); g_Dyn.push_back(o[2]);
+            }
             if (bRays) { dynRay.push_back(o[0]); dynRay.push_back(o[1]); dynRay.push_back(o[2]); }
         }
     }
@@ -542,6 +637,7 @@ void LTServerBrush_Update()
     if (LTGetWorldCollide())
     {
         LTGetWorldCollide()->SetDynamic(g_Dyn);
+        LTGetWorldCollide()->SetDynamicOwners(dynOwner, dynPoly);
         LTGetWorldCollide()->SetDynamicRay(dynRay);
     }
     g_bDynLive = true;

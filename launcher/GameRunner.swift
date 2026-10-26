@@ -49,6 +49,8 @@ struct LaunchOptions {
     var mission = 1                 // .mission: unlock up to this one
     var level = "M01S01"            // .viewer
     var trace = false
+    var bubbles = true              // placed bubble emitters at their authored rate (E-009)
+    var bounce = true               // falling particles bounce off floors (E-010)
 
     /// The game's environment. `headless` is for the self-test: no window,
     /// a fixed number of frames, a level loaded straight away.
@@ -72,6 +74,11 @@ struct LaunchOptions {
             env["LT_NOSERVER"] = "1"
             env["LT_WORLD"] = "WORLDS\\\(level.uppercased()).DAT"
         }
+        // Off = the original count: floor(rate x frame time), which is no
+        // bubbles at all at 60 fps (HANDOVER 5dj, DEVIATIONS E-009).
+        if !bubbles { env["LT_NOPSRATE"] = "1" }
+        // Off = the original: sparks and blood fall through the floor (5dk, E-010).
+        if !bounce { env["LT_NOFLOORBOUNCE"] = "1" }
         if trace {
             for k in ["LT_SHOTTRACE", "LT_DAMAGETRACE", "LT_LIFETRACE", "LT_CAMTRACE", "LT_ACTTRACE"] { env[k] = "1" }
             env["LT_TRIGTRACE"] = "2"
