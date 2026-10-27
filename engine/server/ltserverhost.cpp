@@ -2534,9 +2534,19 @@ namespace
     // (KeyFramer.cpp:639) -- so four keyframers were created, updated once
     // each, and stood still. Nothing logged, nothing crashed.
     //
-    // ⚠️ APPENDED, NOT PREPENDED, and the order is not cosmetic. A keyframer
-    // applies its per-object OFFSETS by position in this list, so a reversed
-    // list gives every object its neighbour's offset.
+    // ⚠️ PREPENDED, AS LITHTECH DOES (si_AddObjectToList: the new link
+    // becomes m_pFirstLink), and the order is not cosmetic (HANDOVER 5du).
+    // The game counts on it twice: KeyFramer::Load re-adds its saved objects
+    // "in reverse order since AddObjectToList always adds at the front of
+    // the list" (KeyFramer.cpp:2822), pairing them by position with the
+    // offsets it saved; and GameServerShell adds WorldProperties LAST so it
+    // is saved FIRST. This port appended, on the belief that a keyframer
+    // needs name order -- it does not: CreateKeyList computes each offset by
+    // walking the list itself. But after a LOAD every keyframed object got
+    // its neighbour's offset: M08S04's lift car took the roof hatch's and
+    // came to rest 120 up and 64 aside, its roof level with the upper floor.
+    // A save made BEFORE this fix still loads right (list and offsets are
+    // written in one order). LT_LISTAPPEND=1 = old (says so).
     //
     // ⚠️ THE LIST DOES NOT OWN THE OBJECTS -- RelinquishList frees the links
     // and nothing else. An object named by two keyframers is on two lists.
@@ -2544,11 +2554,21 @@ namespace
     {
         if (!pList || !hObj) return 0;
 
+        static const bool s_bAppend = []() {
+            const bool b = (getenv("LT_LISTAPPEND") != 0);
+            if (b) { printf("[SERVER] LT_LISTAPPEND=1 -- AddObjectToList appends (old; a loaded keyframer swaps offsets)\n"); fflush(stdout); }
+            return b; }();
+
         ObjectLink* pLink = new ObjectLink;
         pLink->m_hObject = hObj;
         pLink->m_pNext = 0;
 
-        if (!pList->m_pFirstLink)
+        if (!s_bAppend)
+        {
+            pLink->m_pNext = pList->m_pFirstLink;
+            pList->m_pFirstLink = pLink;
+        }
+        else if (!pList->m_pFirstLink)
         {
             pList->m_pFirstLink = pLink;
         }

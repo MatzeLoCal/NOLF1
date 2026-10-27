@@ -615,11 +615,17 @@ void LTServerBrush_Update()
         const bool bCollide = s_bOldSolid || (bLive && (b.m_pRec->m_Flags & FLAG_SOLID));
         const bool bRays = !LTServerBrush_RaysPassThrough(b.m_sName.c_str())
                         && (s_bOldSolid || (bLive && (b.m_pRec->m_Flags & (FLAG_SOLID | FLAG_RAYHIT))));
+        // LT_BRUSHTRACE: where a movable brush's geometry COMES TO REST, as a
+        // box -- its Pos is only the build origin (5dr, 5du).
+        static const bool s_bRestTrace = (getenv("LT_BRUSHTRACE") != 0);
+        float bmn[3] = { 1e30f, 1e30f, 1e30f }, bmx[3] = { -1e30f, -1e30f, -1e30f };
         for (size_t t = 0; t + 2 < b.m_Tris.size(); t += 3)
         {
             const float v[3] = { b.m_Tris[t], b.m_Tris[t+1], b.m_Tris[t+2] };
             float o[4] = { v[0], v[1], v[2], 1.0f };
             if (bMoved) LT3D::TransformPoint(M, v, o);
+            if (s_bRestTrace)
+                for (int k = 0; k < 3; ++k) { if (o[k] < bmn[k]) bmn[k] = o[k]; if (o[k] > bmx[k]) bmx[k] = o[k]; }
             if (bCollide)
             {
                 if (((t / 3) % 3) == 0)                                     // a triangle starts
@@ -631,6 +637,16 @@ void LTServerBrush_Update()
                 g_Dyn.push_back(o[0]); g_Dyn.push_back(o[1]); g_Dyn.push_back(o[2]);
             }
             if (bRays) { dynRay.push_back(o[0]); dynRay.push_back(o[1]); dynRay.push_back(o[2]); }
+        }
+        if (s_bRestTrace)
+        {
+            static std::vector<char> s_Moving;
+            if (s_Moving.size() != g_Brushes.size()) s_Moving.assign(g_Brushes.size(), 0);
+            const bool bNow = !g_MovedNow.empty() && g_MovedNow.back().m_nBrush == i;
+            if (s_Moving[i] && !bNow)
+                printf("[BRUSH] t=%.2f %s came to rest: box (%.0f %.0f %.0f)..(%.0f %.0f %.0f)\n",
+                       LTServerHost_Time(), b.m_sName.c_str(), bmn[0], bmn[1], bmn[2], bmx[0], bmx[1], bmx[2]);
+            s_Moving[i] = bNow ? 1 : 0;
         }
     }
 
