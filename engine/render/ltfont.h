@@ -115,6 +115,11 @@ public:
     // The decoded strip, so a caller can blit from it directly.
     const LT2DSurf& GetSheet() const { return m_Sheet; }
 
+    // LITHFONTCREATESTRUCT::bChromaKey, kept for CLTGUIFont::IsChromaKeyed --
+    // LithBitmapFont's m_bChromaKey (lithbitmapfont.h:60). Glyphs are keyed
+    // either way; this is what the GAME asks to choose how it blits text.
+    bool            m_bChromaKey = false;
+
 private:
 
     struct Glyph { int m_X; int m_W; };

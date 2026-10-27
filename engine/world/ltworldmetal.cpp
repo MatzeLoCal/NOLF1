@@ -1641,7 +1641,39 @@ bool LTWorldMetal_MenuObjects(int nOutW, int nOutH, const int* pRect4, bool bCle
                               const LTModelPose* pPoses)
 {
     if (!pRect4 || pRect4[2] <= 0 || pRect4[3] <= 0) return false;
-    if (!LTMetal_BeginScene(nOutW, nOutH, pRect4[0], pRect4[1], pRect4[2], pRect4[3], bClear))
+
+    // ⚠️ THE CAMERA'S RECTANGLE IS LARGER THAN THE WINDOW IN A ZOOMED MENU
+    // (HANDOVER 5dt). The game's interface camera covers its whole screen
+    // (say 1440x900) and puts every menu object at depth x (width / 640)
+    // (BaseFolder::CreateScaleFX, InterfaceMgr's background), so the 3D lands
+    // in the middle 640x480 -- the box the compositor zooms. Mapped through
+    // that zoom the camera's rectangle overhangs the output on every side,
+    // and LTMetal_BeginScene clamps a viewport to the target: the whole
+    // projection was SQUEEZED into the window, the 3D drawn at its 640x480
+    // size in the middle of a zoomed 2D. Now the viewport is the visible
+    // part and every matrix carries the difference (clip-space scale and
+    // offset), so what overhangs stays outside. LT_MENUSQUEEZE=1 = old.
+    int C[4] = { pRect4[0], pRect4[1], pRect4[2], pRect4[3] };
+    float A[16];
+    LT3D::Identity(A);
+    static const bool s_bSqueeze = []() {
+        const bool b = getenv("LT_MENUSQUEEZE") != 0;
+        if (b) { printf("[COMP] LT_MENUSQUEEZE=1 -- the menu's 3D squeezed into the window (old)\n"); fflush(stdout); }
+        return b; }();
+    if (!s_bSqueeze)
+    {
+        if (C[0] < 0) { C[2] += C[0]; C[0] = 0; }
+        if (C[1] < 0) { C[3] += C[1]; C[1] = 0; }
+        if (C[0] + C[2] > nOutW) C[2] = nOutW - C[0];
+        if (C[1] + C[3] > nOutH) C[3] = nOutH - C[1];
+        if (C[2] <= 0 || C[3] <= 0) return false;
+        // Metal NDC: x right, y up; pixel y = top + (1 - ndc) / 2 * height.
+        A[0]  = (float)pRect4[2] / (float)C[2];
+        A[3]  = (2.0f * (float)(pRect4[0] - C[0]) + (float)pRect4[2]) / (float)C[2] - 1.0f;
+        A[5]  = (float)pRect4[3] / (float)C[3];
+        A[7]  = 1.0f - (2.0f * (float)(pRect4[1] - C[1]) + (float)pRect4[3]) / (float)C[3];
+    }
+    if (!LTMetal_BeginScene(nOutW, nOutH, C[0], C[1], C[2], C[3], bClear))
         return false;
 
     // Pixel buffer + cut-out flag -> Metal texture, for the session.
@@ -1680,6 +1712,7 @@ bool LTWorldMetal_MenuObjects(int nOutW, int nOutH, const int* pRect4, bool bCle
         const LTSceneGpuItem& it = pItems[i];
         float MVPm[16];
         ToMetalClip(it.m_MVP, MVPm);
+        LT3D::Multiply(A, MVPm, MVPm);
         if (it.m_nKind == 1)
         {
             upload(it.m_pTex);
@@ -1711,9 +1744,14 @@ bool LTWorldMetal_MenuObjects(int nOutW, int nOutH, const int* pRect4, bool bCle
         for (int k = 0; k < it.m_nSkins; ++k) upload(&it.m_pSkins[k]);
         const LTModelPose* pPose = (it.m_nPose >= 0 && pPoses) ? &pPoses[it.m_nPose] : 0;
         batch.SetMVP(MVPm);
+        // FLAG_NOLIGHT: the object's colour is the light (ltscene.cpp, 5dt).
+        LTModelDraw::LTModelLighting unlit;
+        memset(&unlit, 0, sizeof(unlit));
+        for (int k = 0; k < 3; ++k) unlit.m_Ambient[k] = it.m_RGB[k];
         LTModelDraw::Draw(dummy, *it.m_pModel, it.m_MVP, it.m_Normal,
                           it.m_nSkins ? it.m_pSkins : 0, it.m_nSkins,
-                          0, false, pPose, &batch, false);
+                          0, false, pPose, &batch, false, it.m_bUnlit ? &unlit : 0,
+                          it.m_nMirrorModel);
         batch.Flush(handles);
     }
     LTMetal_EndScene();

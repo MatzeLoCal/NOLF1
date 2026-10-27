@@ -31,6 +31,7 @@
 #include "ltstub.h"
 #include "ltreplicate.h"
 
+#include <algorithm>
 #include <set>
 #include <stddef.h>
 
@@ -897,7 +898,7 @@ bool CLTScene::GetSocketTransform(const LTSceneObject* pObj, int nSocket,
         if (b) { printf("[SOCKET] LT_OLDSOCKETS=1 -- game-view sockets read MIRRORED, no origin offset\n"); fflush(stdout); }
         return b; }();
     const bool bGame = pObj->m_bInGameView && !s_bOldSockets;
-    const bool bMirror = bGame ? (getenv("LT_DYNMIRROR") != 0) : LTModelDraw::MirrorX();
+    const bool bMirror = bGame ? (getenv("LT_DYNMIRROR") != 0) : LTScene_MenuModelMirror();
     if (bMirror)
     {
         M[1] = -M[1];  M[2]  = -M[2];   M[3] = -M[3];   // row 0
@@ -951,6 +952,75 @@ bool CLTScene::GetSocketTransform(const LTSceneObject* pObj, int nSocket,
 // ----------------------------------------------------------------------- //
 // RenderObjects
 // ----------------------------------------------------------------------- //
+
+// ⚠️ THE MENU DRAWS ITS MODELS UNMIRRORED (HANDOVER 5dt), and the Windows
+// game's own main menu says so three times over (user's screenshots,
+// 2026-10-27): the panel's top edge RISES to the right, the two light-blue
+// stripes run down the LEFT of the screen, and Cate holds the P38 in the hand
+// on the viewer's LEFT with the other on her hip. Mirroring each model about
+// its own X put all three the other way round -- the stripe models sit 84
+// units left of their origin, so they crossed the screen -- while the scene
+// mirror (LTWorldMirror) keeps everything else where it was. This is the menu
+// only; the game view's rule (5as) is its own. LT_MENUMODELMIRROR=1 = old.
+bool LTScene_MenuModelMirror()
+{
+    static const bool b = []() {
+        const bool bOld = (getenv("LT_MENUMODELMIRROR") != 0);
+        if (bOld) { printf("[LT3D] LT_MENUMODELMIRROR=1 -- menu models mirrored in X (old)\n"); fflush(stdout); }
+        return bOld && LTModelDraw::MirrorX(); }();
+    return b;
+}
+
+// LTObject::IsTranslucent (de_objects.h:190) for RenderObjects' order: every
+// sprite is (drawsprite.cpp queues them all on the translucent list), and a
+// model whose alpha BYTE is below 255 -- 0.999 is 254, which is how the menu's
+// BoxF asks for the pass -- or which is additive.
+static bool MenuTranslucent(const LTSceneObject* p)
+{
+    if (p->m_nType == OT_SPRITE) return true;
+    if (p->m_nType != OT_MODEL) return false;
+    if (p->m_Flags2 & FLAG2_ADDITIVE) return true;
+    return (int)(p->m_Color[3] * 255.0f) < 255;
+}
+
+// The object's skins as a translucent model draws them, for this call: the
+// object's alpha as the constant, its blend op, and the texel alpha joining
+// only where it varies -- ltworldrender's prop rule (a constant channel is
+// not folded in: the light-beam skins are 100% zero). Additive ignores the
+// channel, as the sprites do. Kept until the next call, which the GPU hook
+// runs before.
+const LT3DTexture* CLTScene::BlendedSkins(const LTSceneObject* p)
+{
+    if (p->m_Skins.empty()) return 0;
+    const float a = p->m_Color[3] < 0.0f ? 0.0f : (p->m_Color[3] > 1.0f ? 1.0f : p->m_Color[3]);
+    const int nOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
+    const LT3DTexture* pFirst = 0;
+    for (size_t k = 0; k < p->m_Skins.size(); ++k)
+    {
+        LT3DTexture t = p->m_Skins[k];
+        t.m_bBlend      = true;
+        t.m_fConstAlpha = a;
+        t.m_nBlendOp    = nOp;
+        t.m_bTexAlpha   = false;
+        if (nOp != 1 && t.m_pRGBA && t.m_Width > 0 && t.m_Height > 0)
+        {
+            std::map<const unsigned char*, bool>::iterator it = m_AlphaVaries.find(t.m_pRGBA);
+            if (it == m_AlphaVaries.end())
+            {
+                const size_t nBytes = (size_t)t.m_Width * t.m_Height * 4;
+                bool bVaries = false;
+                for (size_t q = 7; q < nBytes; q += 4)
+                    if (t.m_pRGBA[q] != t.m_pRGBA[3]) { bVaries = true; break; }
+                it = m_AlphaVaries.insert(std::make_pair(t.m_pRGBA, bVaries)).first;
+            }
+            t.m_bTexAlpha = it->second;
+        }
+        m_BlendSkins.push_back(t);
+        if (!pFirst) pFirst = &m_BlendSkins.back();
+    }
+    return pFirst;
+}
+
 
 int CLTScene::RenderObjects(LTSceneObject* pCamera,
                             LTSceneObject* const* ppObjects, int nObjects,
@@ -1017,6 +1087,29 @@ int CLTScene::RenderObjects(LTSceneObject* pCamera,
                   : (float)vw / (float)vh;
     LT3D::Perspective(pCamera->m_fFovY, fAspect, 1.0f, 10000.0f, P);
 
+    // ⚠️ THE INTERFACE IS LAID OUT FOR 640x480, AND ITS DEPTH IS SCALED BY THE
+    // WIDTH ALONE (HANDOVER 5dt). The game puts every menu object at depth x
+    // (screen width / 640) -- CBaseFolder::CreateScaleFX, CreateCharFX,
+    // InterfaceMgr's background -- which keeps its pixel size exactly that of
+    // 640x480 across, but down only on a 4:3 screen: the projection's vertical
+    // grows with the height, so at 1440x900 every menu object came out 0.83
+    // as tall, the panel shorter than its text and the help bar above its
+    // line. The game's own 2D stays a 640x480 box at any size, so the
+    // vertical is scaled by (W/640)/(H/480) to match it -- 1 at every 4:3
+    // size, the only sizes the Windows game offered. A full-screen camera
+    // only. LT_MENUSQUASH=1 = old (says so).
+    {
+        static const bool s_bSquash = []() {
+            const bool b = (getenv("LT_MENUSQUASH") != 0);
+            if (b) { printf("[LT3D] LT_MENUSQUASH=1 -- menu 3D vertical not matched to the 640x480 layout (old)\n"); fflush(stdout); }
+            return b; }();
+        if (!s_bSquash && vw == dest.m_Width && vh == dest.m_Height && vh > 0)
+        {
+            const float f = ((float)vw * 480.0f) / ((float)vh * 640.0f);
+            for (int k = 4; k < 8; ++k) P[k] *= f;
+        }
+    }
+
     // ⚠️ THE SAME SCENE MIRROR THE WORLD USES, from the same decision. NOLF's
     // data is left-handed against this renderer's basis, so the image is
     // flipped; the world renderer has done this since 2026-09-09 and the MENU
@@ -1042,9 +1135,44 @@ int CLTScene::RenderObjects(LTSceneObject* pCamera,
     int nPixels = 0;
     int nDrawn = 0;
 
-    for (int i = 0; i < nObjects; ++i)
+    // ⚠️ THE DONOR'S ORDER, NOT THE LIST'S (HANDOVER 5dt). d3d_FlushObjectQueues
+    // (drawobjects.cpp) draws the SOLID models first, then everything
+    // translucent -- every sprite, and a model whose alpha byte is below 255
+    // or which is FLAG2_ADDITIVE (LTObject::IsTranslucent, de_objects.h:190)
+    // -- back to front by squared distance, blended, writing no depth
+    // (d3d_SetTranslucentObjectStates). Drawn in the game's list order, the
+    // main menu's background sprite (mainmenu1.spr, blended, no depth) went
+    // down BEFORE the pinwheel behind it, and the pinwheel painted over the
+    // whole right half instead of showing only through the logo's letters;
+    // and the additive flower and stripes were opaque dark green.
+    // LT_MENULISTORDER=1 = the list order, models never blended (says so).
+    static const bool s_bListOrder = []() {
+        const bool b = (getenv("LT_MENULISTORDER") != 0);
+        if (b) { printf("[LT3D] LT_MENULISTORDER=1 -- menu objects in list order, models opaque (old)\n"); fflush(stdout); }
+        return b; }();
+    std::vector<int> order;
+    order.reserve(nObjects > 0 ? nObjects : 0);
     {
-        LTSceneObject* pObj = ppObjects[i];
+        std::vector<std::pair<float, int> > trans;
+        for (int i = 0; i < nObjects; ++i)
+        {
+            const LTSceneObject* p = ppObjects[i];
+            if (!p) continue;
+            const bool bTrans = !s_bListOrder && MenuTranslucent(p);
+            if (!bTrans) { order.push_back(i); continue; }
+            float d2 = 0.0f;
+            for (int k = 0; k < 3; ++k) { const float d = p->m_Pos[k] - pCamera->m_Pos[k]; d2 += d * d; }
+            trans.push_back(std::make_pair(d2, i));
+        }
+        std::stable_sort(trans.begin(), trans.end(),
+            [](const std::pair<float, int>& a, const std::pair<float, int>& b) { return a.first > b.first; });
+        for (size_t k = 0; k < trans.size(); ++k) order.push_back(trans[k].second);
+    }
+    m_BlendSkins.clear();
+
+    for (size_t oi = 0; oi < order.size(); ++oi)
+    {
+        LTSceneObject* pObj = ppObjects[order[oi]];
         if (!pObj) continue;
 
         // ⚠️ A SPRITE: a camera-facing quad, the game view's geometry term
@@ -1137,14 +1265,38 @@ int CLTScene::RenderObjects(LTSceneObject* pCamera,
                 pPose = &pose;
         }
 
+        // A translucent model draws with blended copies of its skins (above).
+        const LT3DTexture* pSkins = pObj->m_Skins.empty() ? 0 : &pObj->m_Skins[0];
+        if (pSkins && !s_bListOrder && MenuTranslucent(pObj)) pSkins = BlendedSkins(pObj);
+
+        // ⚠️ FLAG_NOLIGHT -- "Just use the object's color and global light
+        // scale" (ltbasedefs.h) -- and every menu model carries it: the ScaleFX
+        // panels, bars and flower, Cate and her attachments. They were lit by
+        // the model drawer's fixed key light, which took the olive panel from
+        // the layout's <185, 205, 95> to about two thirds of it (HANDOVER 5dt).
+        // The object's colour is the whole light. LT_MENULIT=1 = the key
+        // light, as before (says so).
+        static const bool s_bLit = []() {
+            const bool b = (getenv("LT_MENULIT") != 0);
+            if (b) { printf("[LT3D] LT_MENULIT=1 -- FLAG_NOLIGHT menu models lit by the key light (old)\n"); fflush(stdout); }
+            return b; }();
+        const bool bUnlit = !s_bLit && (pObj->m_Flags & FLAG_NOLIGHT) != 0;
+        LTModelDraw::LTModelLighting unlit;
+        memset(&unlit, 0, sizeof(unlit));
+        for (int k = 0; k < 3; ++k)
+            unlit.m_Ambient[k] = pObj->m_Color[k] < 0.0f ? 0.0f : (pObj->m_Color[k] > 1.0f ? 1.0f : pObj->m_Color[k]);
+
         if (pCollect)
         {
             LTSceneGpuItem it;
             memset(&it, 0, sizeof(it));
             it.m_nKind = 0;
             it.m_pModel = pObj->m_pModel;
-            it.m_pSkins = pObj->m_Skins.empty() ? 0 : &pObj->m_Skins[0];
+            it.m_pSkins = pSkins;
             it.m_nSkins = (int)pObj->m_Skins.size();
+            it.m_bUnlit = bUnlit;
+            for (int k = 0; k < 3; ++k) it.m_RGB[k] = unlit.m_Ambient[k];
+            it.m_nMirrorModel = LTScene_MenuModelMirror() ? 1 : 0;
             it.m_nPose = -1;
             if (pPose && pPoses) { pPoses->push_back(*pPose); it.m_nPose = (int)pPoses->size() - 1; }
             for (int k = 0; k < 16; ++k) { it.m_MVP[k] = MVP[k]; it.m_Normal[k] = NM[k]; }
@@ -1172,8 +1324,8 @@ int CLTScene::RenderObjects(LTSceneObject* pCamera,
         // ⚠️ Do not "unify" these without re-checking BOTH pictures.
         LTModelDrawStats st = LTModelDraw::Draw(
             target, *pObj->m_pModel, MVP, NM,
-            pObj->m_Skins.empty() ? 0 : &pObj->m_Skins[0],
-            (int)pObj->m_Skins.size(), 0, false, pPose, 0, false);
+            pSkins, (int)pObj->m_Skins.size(), 0, false, pPose, 0, false,
+            bUnlit ? &unlit : 0, LTScene_MenuModelMirror() ? 1 : 0);
 
         nPixels += st.m_nPixels;
         ++nDrawn;

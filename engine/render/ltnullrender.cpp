@@ -900,6 +900,23 @@ static LTRESULT NR_FlipScreen(uint32 /*flags*/)
     if (LTWindow_Wanted() && !g_bHostPresents)
         LTGetNullRender()->PresentToWindow();
 
+    // LT_DUMP_FLIP=<base> -- every FlipScreen the GAME calls is written as
+    // <base>_flipNNNN.ppm (the composite under the compositor). The loading
+    // screen draws and flips INSIDE one long frame (LoadingScreen.cpp:484),
+    // so the per-frame dumps never see it (5dt).
+    if (!g_bHostPresents)
+    {
+        static const char* s_pBase = getenv("LT_DUMP_FLIP");
+        static int s_n = 0;
+        if (s_pBase && s_pBase[0])
+        {
+            char szPath[512];
+            snprintf(szPath, sizeof(szPath), "%s_flip%04d.ppm", s_pBase, s_n++);
+            LTGetNullRender()->DumpScreenPPM(szPath);
+            fprintf(stderr, "[DUMP] FlipScreen -> %s\n", szPath);
+        }
+    }
+
     return LT_OK;
 }
 

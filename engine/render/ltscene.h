@@ -46,6 +46,7 @@
 #include "lt2d.h"
 #include "lt3d.h"
 
+#include <deque>
 #include <map>
 #include <memory>
 #include <string.h>
@@ -71,7 +72,9 @@ struct LTSceneGpuItem
     float               m_Normal[16];
     const LT3DTexture*  m_pTex;         // sprite: its texture
     float               m_Corner[4][3]; // sprite: world-space corners
-    float               m_RGB[3];       // sprite: colour
+    float               m_RGB[3];       // sprite: colour; unlit model: its light
+    bool                m_bUnlit;       // model: FLAG_NOLIGHT, m_RGB is the light (5dt)
+    int                 m_nMirrorModel; // model: LTModelDraw's nMirrorModel (5dt)
 };
 class CLTFileMgr;
 class CLTSprite;
@@ -379,6 +382,12 @@ private:
     std::map<std::string, LT3DTexture*> m_SpriteTex;
     std::map<std::string, CLTSprite*>   m_Sprites;      // LoadSprite's cache
 
+    // A translucent model's skins, blended, for one RenderObjects call (5dt).
+    // A deque: the GPU items point into it, and push_back must not move them.
+    const LT3DTexture*  BlendedSkins(const LTSceneObject* p);
+    std::deque<LT3DTexture>                 m_BlendSkins;
+    std::map<const unsigned char*, bool>    m_AlphaVaries;  // per skin's pixels
+
     CLTFileMgr*                             m_pFileMgr;
     std::vector<LTSceneObject*>             m_Objects;
     std::map<std::string, CLTABCModel*>     m_Models;
@@ -608,5 +617,9 @@ unsigned        LTScene_TakeModelKeys(LTModelKey* pOut, unsigned nMax);
 int             LTScene_FindSocket(void* hObj, const char* pName);
 int             LTScene_GetSocketTransform(void* hObj, int nSocket, int bWorldSpace,
                                            float* pPos3, float* pQuat4);
+
+// Whether the MENU (RenderObjects) mirrors a model's own X: no by default,
+// LT_MENUMODELMIRROR=1 = the old yes (5dt). Its sockets follow it.
+bool            LTScene_MenuModelMirror();
 
 #endif // __LT_SCENE_H__

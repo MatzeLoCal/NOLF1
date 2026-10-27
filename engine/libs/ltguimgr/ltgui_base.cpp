@@ -244,6 +244,7 @@ LTBOOL CLTGUIFont::Init(ILTClient* pClientDE, LITHFONTCREATESTRUCT* lfCS)
                              (unsigned int)lfCS->hTransColor, flags))
             {
                 Term();
+                pFont->m_bChromaKey = lfCS->bChromaKey ? true : false;
                 m_pClientDE   = pClientDE;
                 m_pLithFont   = (LithFont*)pFont;
                 m_nFontHeight = pFont->GetHeight();
@@ -292,9 +293,22 @@ int CLTGUIFont::GetHeight()
 
 LTBOOL CLTGUIFont::IsChromaKeyed()
 {
-    // Every bitmap font here is keyed -- that is how glyphs are separated at
-    // all. Only the system-font path (no bitmap) is not.
-    return m_pLithFont ? LTTRUE : LTFALSE;
+    // ⚠️ THE FONT'S OWN bChromaKey, as LithBitmapFont answers it
+    // (lithbitmapfont.h:43) -- NOT "is it a bitmap font" (HANDOVER 5dt).
+    // CInterfaceResMgr::SetupFont makes every menu font a BLENDED one (no
+    // key, black background); only the air and weapon-chooser fonts are
+    // keyed. CStaticTextCtrl asks this to choose how it draws: keyed, a green
+    // transparent blit of WHITE glyphs; blended, MASK for black text, ADD for
+    // white, MASK then ADD x colour otherwise. Answering "keyed" for every
+    // font drew the difficulty reminder, the briefing and every other static
+    // text in white where the game asks for black. LT_GUIALLKEYED=1 = old.
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_GUIALLKEYED") != 0);
+        if (b) { printf("[LTGUI] LT_GUIALLKEYED=1 -- every bitmap font reports chroma-keyed (old)\n"); fflush(stdout); }
+        return b; }();
+    if (!m_pLithFont) return LTFALSE;
+    if (s_bOld) return LTTRUE;
+    return GuiFont(m_pLithFont)->m_bChromaKey ? LTTRUE : LTFALSE;
 }
 
 LTBOOL CLTGUIFont::IsSystemFont()
