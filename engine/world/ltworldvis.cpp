@@ -207,6 +207,68 @@ void CLTWorldVis::SetViewLeaf(int nLeaf)
 }
 
 
+bool CLTWorldVis::ComputeView(int nLeaf, View& v) const
+{
+    if (nLeaf == v.m_nLeaf && v.m_nGen == m_nPortalGen) return false;
+    v.m_nLeaf = nLeaf;
+    v.m_nGen = m_nPortalGen;
+
+    v.m_bAll = !IsValid() || nLeaf < 0 || (size_t)nLeaf >= m_Leaves.size() || m_Leaves[(size_t)nLeaf].empty();
+    if (v.m_bAll) { v.m_State.clear(); return true; }
+
+    v.m_State.assign(m_Nodes.size(), 0);
+    const std::vector<List>& lists = m_Leaves[(size_t)nLeaf];
+    for (size_t i = 0; i < lists.size(); ++i)
+    {
+        if (i > 0)
+        {
+            const int p = lists[i].m_nPortal;
+            if (p < 0 || (size_t)p >= m_Portals.size() || !(m_Portals[(size_t)p].m_nFlags & 1)) continue;
+        }
+        Walk(lists[i].m_Bits, v.m_State, 0, 0);
+    }
+    return true;
+}
+
+
+bool CLTWorldVis::BoxVisibleIn(const View& v, const float* mn, const float* mx) const
+{
+    if (v.m_bAll || v.m_State.size() != m_Nodes.size()) return true;
+
+    float c[3], e[3];
+    for (int k = 0; k < 3; ++k) { c[k] = 0.5f * (mn[k] + mx[k]); e[k] = 0.5f * (mx[k] - mn[k]); if (e[k] < 0) e[k] = -e[k]; }
+
+    int stack[512];
+    int nTop = 0;
+    stack[nTop++] = m_nRoot;
+    while (nTop > 0)
+    {
+        const int node = stack[--nTop];
+        const unsigned char s = v.m_State[(size_t)node];
+        if (!(s & kVisited)) continue;
+        if (s & kLeafSeen) return true;
+
+        const Node& n = m_Nodes[(size_t)node];
+        const float d = n.m_Normal[0]*c[0] + n.m_Normal[1]*c[1] + n.m_Normal[2]*c[2] - n.m_Dist;
+        const float r = fabsf(n.m_Normal[0])*e[0] + fabsf(n.m_Normal[1])*e[1] + fabsf(n.m_Normal[2])*e[2];
+        if (nTop > 510) return true;
+        if (d + r > 0.0f && n.m_Sides[1] >= 0) stack[nTop++] = n.m_Sides[1];
+        if (d - r <= 0.0f && n.m_Sides[0] >= 0) stack[nTop++] = n.m_Sides[0];
+    }
+    return false;
+}
+
+
+unsigned int CLTWorldVis::LeafCountIn(const View& v) const
+{
+    if (v.m_bAll) return (unsigned int)m_Leaves.size();
+    unsigned int n = 0;
+    for (size_t i = 0; i < v.m_State.size(); ++i)
+        if (v.m_State[i] & kLeafSeen) ++n;
+    return n;
+}
+
+
 bool CLTWorldVis::BoxVisible(const float* mn, const float* mx) const
 {
     if (m_bAll) return true;

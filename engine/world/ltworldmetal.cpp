@@ -129,9 +129,13 @@ namespace
             if (!pTex) return;
             std::vector<LTMetalVert>& r = m_Runs[pTex];
             for (int i = 0; i < 3; ++i) { LTMetalVert v; ToMetalVert(pW[i], pV[i], v); r.push_back(v); }
+            m_RunPoly[pTex].push_back(m_nPoly);
             ++m_nTris;
         }
+        virtual void BeginPoly(size_t q) { m_nPoly = (unsigned int)q; }
         std::map<const LT3DTexture*, std::vector<LTMetalVert> > m_Runs;
+        std::map<const LT3DTexture*, std::vector<unsigned int> > m_RunPoly;   // per triangle (5ea)
+        unsigned int m_nPoly = 0;
         unsigned int m_nTris = 0;
     };
 
@@ -446,6 +450,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     if (s_bStatic && !m_Static.m_bValid)
     {
         if (m_Static.m_nBuffer) LTMetal_FreeBuffer(m_Static.m_nBuffer);
+        if (m_Static.m_nIndexBuf) LTMetal_FreeBuffer(m_Static.m_nIndexBuf);
         m_Static = StaticWorld();
         const std::vector<LTWorldModelHeader>& sm = m_World.GetModels();
         m_Static.m_Models.resize(sm.size());
@@ -473,6 +478,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                 r.m_pTex = it->first;
                 r.m_nFirst = (unsigned int)all.size();
                 r.m_nCount = (unsigned int)it->second.size();
+                r.m_TriPoly = rec.m_RunPoly[it->first];
                 all.insert(all.end(), it->second.begin(), it->second.end());
                 out.m_Runs.push_back(r);
             }
@@ -555,6 +561,12 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
              it != m_MirrorPseudo.end(); ++it)
             SyncMirrorPseudo(it->second);
     }
+
+    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- the software path's
+    // rule, after the reflection passes (which never cull).
+    UpdateVisCull(pEye3, pXform);
+    CLTVisCulledObjects visObjs(*this, pDyn);
+    if (pDyn && VisCulling()) pDyn = &visObjs;
 
     Stats st;
     st.m_nWorldTris = st.m_nObjTris = st.m_nPixels = st.m_nSkyPixels = st.m_nObjects = 0;
@@ -686,9 +698,44 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         // flushes them; a separate model draws its own runs with the nudged
         // matrix, a moving one with its own. Ties in the depth test go to the
         // first triangle drawn, so order is part of the picture.
-        std::map<const LT3DTexture*, std::vector<std::pair<unsigned int, unsigned int> > > pending;
-        auto drawRun = [&](const float* pM, const LT3DTexture* pTex, unsigned int nFirst, unsigned int nCount)
+        // ⚠️ THE VISIBLE TRIANGLES (5ea): while the view culls, every static
+        // run draws through an index list of its triangles the camera's leaf
+        // can see -- in their recorded order, so nothing else changes. Built
+        // when the leaf or a portal changed, not per frame.
+        const bool bIdx = VisCulling();
+        if (bIdx && m_Static.m_nIndexSerial != m_nVisSerial)
         {
+            std::vector<unsigned int> idx;
+            for (size_t i = 0; i < m_Static.m_Models.size(); ++i)
+            {
+                const std::vector<unsigned char>* pV = (i < m_PolyVis.size()) ? &m_PolyVis[i] : 0;
+                std::vector<StaticRun>& runs = m_Static.m_Models[i].m_Runs;
+                for (size_t r = 0; r < runs.size(); ++r)
+                {
+                    StaticRun& R = runs[r];
+                    R.m_nIdxFirst = (unsigned int)idx.size();
+                    const unsigned int nTri = R.m_nCount / 3;
+                    for (unsigned int k = 0; k < nTri; ++k)
+                    {
+                        const unsigned int q = (k < R.m_TriPoly.size()) ? R.m_TriPoly[k] : 0xFFFFFFFFu;
+                        if (pV && q < pV->size() && !(*pV)[q]) continue;
+                        const unsigned int v0 = R.m_nFirst + 3 * k;
+                        idx.push_back(v0); idx.push_back(v0 + 1); idx.push_back(v0 + 2);
+                    }
+                    R.m_nIdxCount = (unsigned int)idx.size() - R.m_nIdxFirst;
+                }
+            }
+            if (m_Static.m_nIndexBuf) LTMetal_FreeBuffer(m_Static.m_nIndexBuf);
+            m_Static.m_nIndexBuf = idx.empty() ? 0 : LTMetal_CreateIndexBuffer(&idx[0], (int)idx.size());
+            m_Static.m_nIndexSerial = m_nVisSerial;
+        }
+
+        // Pairs are (first, count): vertices, or indices while bIdx.
+        std::map<const LT3DTexture*, std::vector<std::pair<unsigned int, unsigned int> > > pending;
+        auto drawRun = [&](const float* pM, const LT3DTexture* pTex, unsigned int nFirst, unsigned int nCount,
+                           bool bIndexed)
+        {
+            if (bIndexed && (nCount == 0 || !m_Static.m_nIndexBuf)) return;
             // ⚠️ A MIRROR'S RUN (5de): its reflection when the plane has one
             // this frame (and we are not inside a reflection), else the
             // surface's real texture, exactly as before.
@@ -699,25 +746,26 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             if (pTex && pTex->m_pMirrorFallback
                 && (m_bReflecting || !MirrorActive(pTex->m_nMirrorPlane)))
                 pTex = pTex->m_pMirrorFallback;
+            const unsigned int nIB = bIndexed ? m_Static.m_nIndexBuf : 0;
             if (pTex && pTex->m_pMirrorFallback)
             {
                 const unsigned int hR = LTMetal_ReflectionTexture(pTex->m_nMirrorSlot);
-                if (hR) LTMetal_DrawTrisFrom(pM, hR, m_Static.m_nBuffer, (int)nFirst, (int)nCount,
-                                             false, 0.5f, false, 1.0f, true, 0);
+                if (hR) LTMetal_DrawTrisFromIndexed(pM, hR, m_Static.m_nBuffer, nIB, (int)nFirst, (int)nCount,
+                                                    false, 0.5f, false, 1.0f, true, 0);
                 return;
             }
             std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(pTex);
             if (!pTex || h == m_MetalTex.end() || h->second == 0) return;
-            LTMetal_DrawTrisFrom(pM, h->second, m_Static.m_nBuffer, (int)nFirst, (int)nCount,
-                                 pTex->m_bAlphaTest, pTex->m_fAlphaRef, pTex->m_bBlend,
-                                 pTex->m_fConstAlpha, pTex->m_bTexAlpha, pTex->m_nBlendOp);
+            LTMetal_DrawTrisFromIndexed(pM, h->second, m_Static.m_nBuffer, nIB, (int)nFirst, (int)nCount,
+                                        pTex->m_bAlphaTest, pTex->m_fAlphaRef, pTex->m_bBlend,
+                                        pTex->m_fConstAlpha, pTex->m_bTexAlpha, pTex->m_nBlendOp);
         };
         auto flushPending = [&]()
         {
             for (std::map<const LT3DTexture*, std::vector<std::pair<unsigned int, unsigned int> > >::iterator
                      it = pending.begin(); it != pending.end(); ++it)
                 for (size_t k = 0; k < it->second.size(); ++k)
-                    drawRun(MVP, it->first, it->second[k].first, it->second[k].second);
+                    drawRun(MVP, it->first, it->second[k].first, it->second[k].second, bIdx);
             pending.clear();
         };
         for (size_t i = 0; i < mdl.size() && i < m_Static.m_Models.size(); ++i)
@@ -735,23 +783,32 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             float Local[16], ModelMVP[16];
             if (pXform && pXform->GetModelTransform(M.m_sName, Local))
             {
+                // A moving model is seen or not by its box where it is now.
+                if (!ModelVisibleNow(M)) continue;
                 flushPending();
                 pt.Moved(1);
                 LT3D::Multiply(pVP, Local, ModelMVP);
                 for (size_t r = 0; r < sm.m_Runs.size(); ++r)
-                    drawRun(ModelMVP, sm.m_Runs[r].m_pTex, sm.m_Runs[r].m_nFirst, sm.m_Runs[r].m_nCount);
+                    drawRun(ModelMVP, sm.m_Runs[r].m_pTex, sm.m_Runs[r].m_nFirst, sm.m_Runs[r].m_nCount, false);
             }
             else if (!bMain)
             {
                 flushPending();
                 for (size_t r = 0; r < sm.m_Runs.size(); ++r)
-                    drawRun(MVPBias, sm.m_Runs[r].m_pTex, sm.m_Runs[r].m_nFirst, sm.m_Runs[r].m_nCount);
+                {
+                    const StaticRun& R = sm.m_Runs[r];
+                    if (bIdx) drawRun(MVPBias, R.m_pTex, R.m_nIdxFirst, R.m_nIdxCount, true);
+                    else      drawRun(MVPBias, R.m_pTex, R.m_nFirst, R.m_nCount, false);
+                }
             }
             else
             {
                 for (size_t r = 0; r < sm.m_Runs.size(); ++r)
-                    pending[sm.m_Runs[r].m_pTex].push_back(
-                        std::make_pair(sm.m_Runs[r].m_nFirst, sm.m_Runs[r].m_nCount));
+                {
+                    const StaticRun& R = sm.m_Runs[r];
+                    pending[R.m_pTex].push_back(bIdx ? std::make_pair(R.m_nIdxFirst, R.m_nIdxCount)
+                                                     : std::make_pair(R.m_nFirst, R.m_nCount));
+                }
             }
         }
         flushPending();
@@ -1063,6 +1120,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                     if (!bTranslucentPass) continue;
                     float spos[3];
                     if (!obj[i].GetPos(spos)) continue;
+                    if (!SphereVisibleNow(spos, 512.0f)) continue;      // 5ea
                     batch.SetMVP(MVP);
                     DrawSpriteQuad(dummy, MVP, sd, spos, camR, camU, camF,
                                    pEye3, st, &batch);
@@ -1100,6 +1158,16 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             float scale[3];
             ObjectScale(i, scale);
             const bool bScaled = (scale[0] != 1.0f || scale[1] != 1.0f || scale[2] != 1.0f);
+
+            // ...and only where the camera's leaf can see it -- the same
+            // test as the software pass (5ea).
+            if (VisCulling())
+            {
+                float r = ModelRadius(sModelName);
+                if (r <= 0.0f) r = 256.0f;
+                const float s = fmaxf(1.0f, fmaxf(fabsf(scale[0]), fmaxf(fabsf(scale[1]), fabsf(scale[2]))));
+                if (!SphereVisibleNow(pos, r * s)) continue;
+            }
 
             CachedModel* pM = GetModel(sModelName, sSkinName, bCK, fAlpha, nBlendOp);
             if (!pM) continue;

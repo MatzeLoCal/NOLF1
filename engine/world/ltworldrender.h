@@ -33,6 +33,7 @@
 #include <functional>
 
 #include "ltworld.h"
+#include "ltworldvis.h"
 #include "lt3d.h"
 #include "ltabc.h"
 #include "ltproptypes.h"
@@ -460,6 +461,9 @@ public:
     virtual void Tri(const LT3DTexture* pTex,
                      const float pWorld3x3[3][3],
                      const LT3DVert* pVerts3) = 0;
+    // The polygon the following triangles belong to (its index in the
+    // model) -- the static recorder keeps it for visibility (5ea).
+    virtual void BeginPoly(size_t /*q*/) {}
 };
 
 // ⚠️ LINEAR DEPTH FOG, as the level asks for it (HANDOVER 5bo). Filled by
@@ -956,15 +960,59 @@ private:
     // frame is what changes per frame: which models are drawn and with which
     // matrix. Built by the Metal backend (ltworldmetal.cpp) after a Begin;
     // Load only marks it stale, because this file links no Metal.
-    struct StaticRun   { const LT3DTexture* m_pTex; unsigned int m_nFirst, m_nCount; };
+    struct StaticRun
+    {
+        const LT3DTexture*          m_pTex;
+        unsigned int                m_nFirst, m_nCount;
+        std::vector<unsigned int>   m_TriPoly;          // each triangle's polygon (5ea)
+        unsigned int                m_nIdxFirst = 0, m_nIdxCount = 0;   // this view's (5ea)
+    };
     struct StaticModel { std::vector<StaticRun> m_Runs; unsigned int m_nTris = 0; };
     struct StaticWorld
     {
         bool                        m_bValid  = false;
         unsigned int                m_nBuffer = 0;      // LTMetal_CreateBuffer handle
         std::vector<StaticModel>    m_Models;           // indexed like GetModels()
+        // ⚠️ THE VISIBLE TRIANGLES AS INDICES (5ea), rebuilt only when the
+        // camera's leaf or a portal changes: same draws, same order, minus
+        // what the level's visibility says the camera cannot see.
+        unsigned int                m_nIndexBuf = 0;
+        unsigned int                m_nIndexSerial = 0;
     };
     StaticWorld                             m_Static;
+
+    // ---- VISIBILITY (HANDOVER 5ea) ---------------------------------------- //
+    //
+    // ⚠️ THE RENDERER DRAWS WHAT THE CAMERA'S LEAF CAN SEE, as LithTech does.
+    // Every level carries its visibility (VisBSP leaf lists, ltworldvis.h);
+    // only the server used it. Normally the depth test hides the rest anyway
+    // -- but a cinematic camera out in the void (M03S01's airliner) sits in a
+    // leaf that sees nothing of the level, and the whole building floated in
+    // the sky beside the plane. World polygons, moving world models (by their
+    // moved box) and objects (by their model's bounds) are culled; the sky,
+    // the view weapon and every reflection pass are not. Off when the camera
+    // is outside every leaf or its leaf has no list -- the engine's own
+    // fallback. LT_NOVISCULL=1 = old (says so).
+    void                UpdateVisCull(const float* pEye3, const ILTWorldModelXform* pXform);
+    bool                PolyVisible(const LTWorldModelHeader& M, size_t q) const;
+    bool                ModelVisibleNow(const LTWorldModelHeader& M) const;
+    bool                SphereVisibleNow(const float* pC3, float fRadius) const;
+    bool                BoxVisibleNow(const float* pMin3, const float* pMax3) const;
+    float               ModelRadius(const std::string& sModel);
+    bool                VisCulling() const { return m_bVisCull && !m_bReflecting && !m_bRecordingStatic; }
+    bool                ObjectCulling() const;     // VisCulling, and LT_VISCULLNOOBJ not set
+
+    bool                                    m_bVisCull = false;     // this frame's main view culls
+    unsigned int                            m_nVisSerial = 1;       // bumps when m_PolyVis changes
+    int                                     m_nVisLeaf = -2;        // for the trace
+    std::vector<std::vector<unsigned char> > m_PolyVis;             // per model, per polygon
+    std::vector<std::vector<float> >        m_PolyBox;              // per model, 6 floats per polygon
+    std::vector<std::vector<float> >        m_ModelBox;             // per model, its 6 floats
+    std::vector<unsigned char>              m_ModelMoving, m_ModelVis;  // per model, this frame
+    const void*                             m_pVisKey = 0;          // the models it was built for
+    size_t                                  m_nVisModels = 0;
+    std::map<std::string, float>            m_ModelRadius;
+    CLTWorldVis::View                       m_VisView;
 
     // ---- MIRRORS (HANDOVER 5de) ----------------------------------------- //
     //
@@ -1054,6 +1102,30 @@ private:
 
     bool                                    m_bLoaded;
     std::string                             m_sError;
+
+    friend class CLTVisCulledObjects;
+};
+
+// ⚠️ THE OBJECTS THE CAMERA'S LEAF CAN SEE (HANDOVER 5ea). Both renderers
+// hand their passes this instead of the game's list while the view culls, so
+// no draw loop -- there are a dozen -- can forget the test. A model is a
+// sphere of its bounds (CLTWorldScene::ModelRadius), a particle system the
+// box of its particles; the view weapon (REALLYCLOSE) is never culled.
+class CLTVisCulledObjects : public ILTWorldDynamicObjects
+{
+public:
+    CLTVisCulledObjects(CLTWorldScene& s, const ILTWorldDynamicObjects* p) : m_S(s), m_p(p) {}
+    unsigned int Count() const override               { return m_p->Count(); }
+    bool         Get(unsigned int i, LTDynamicModel& out) const override;
+    unsigned int SpriteCount() const override         { return m_p->SpriteCount(); }
+    bool         GetSprite(unsigned int i, LTDynamicSprite& out) const override;
+    unsigned int PolyGridCount() const override       { return m_p->PolyGridCount(); }
+    bool         GetPolyGrid(unsigned int i, LTDynamicPolyGrid& out) const override;
+    unsigned int ParticleSystemCount() const override { return m_p->ParticleSystemCount(); }
+    bool         GetParticleSystem(unsigned int i, LTDynamicParticles& out) const override;
+private:
+    CLTWorldScene&                  m_S;
+    const ILTWorldDynamicObjects*   m_p;
 };
 
 // ⚠️ LT_UVPROBE in the GAME: writes the last in-game frame's per-pixel probe

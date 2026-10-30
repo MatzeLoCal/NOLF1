@@ -1137,7 +1137,8 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
                        id<MTLBuffer> vb, size_t nOffset, int nVerts,
                        bool bAlphaTest, float fAlphaRef, bool bBlend,
                        float fConstAlpha, bool bTexAlpha, int nBlendOp,
-                       const SkinEncode* pSkin = 0)
+                       const SkinEncode* pSkin = 0,
+                       id<MTLBuffer> ib = nil, size_t nIdxOfs = 0)     // indexed: nVerts counts indices (5ea)
 {
     // ⚠️ MUST MATCH THE MSL STRUCT ABOVE FIELD FOR FIELD.
     // ⚠️ 128 bytes now (fog appended at 96), and it must match the MSL struct
@@ -1246,7 +1247,11 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
     [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
-    [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];
+    if (ib)
+        [g_Enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)nVerts
+                           indexType:MTLIndexTypeUInt32 indexBuffer:ib indexBufferOffset:nIdxOfs];
+    else
+        [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];
 
     g_nTris += (unsigned int)(nVerts / 3);
 }
@@ -1320,6 +1325,40 @@ void LTMetal_DrawTrisFrom(const float* pMVP, unsigned int nTexture,
     if (nBuffer == 0 || nBuffer >= g_Buffers.size() || !g_Buffers[nBuffer]) return;
     EncodeTris(pMVP, nTexture, g_Buffers[nBuffer], sizeof(LTMetalVert) * (size_t)nFirst,
                nVerts, bAlphaTest, fAlphaRef, bBlend, fConstAlpha, bTexAlpha, nBlendOp);
+}
+
+unsigned int LTMetal_CreateIndexBuffer(const unsigned int* pIdx, int nIdx)
+{
+    if (!g_Device || !pIdx || nIdx <= 0) return 0;
+    id<MTLBuffer> b = [g_Device newBufferWithBytes:pIdx
+                                            length:sizeof(unsigned int) * (size_t)nIdx
+                                           options:MTLResourceStorageModeShared];
+    if (!b) return 0;
+    for (size_t i = 1; i < g_Buffers.size(); ++i)
+        if (!g_Buffers[i]) { g_Buffers[i] = b; return (unsigned int)i; }
+    g_Buffers.push_back(b);
+    return (unsigned int)(g_Buffers.size() - 1);
+}
+
+void LTMetal_DrawTrisFromIndexed(const float* pMVP, unsigned int nTexture,
+                                 unsigned int nBuffer, unsigned int nIndexBuf,
+                                 int nFirst, int nCount,
+                                 bool bAlphaTest, float fAlphaRef, bool bBlend,
+                                 float fConstAlpha, bool bTexAlpha, int nBlendOp)
+{
+    if (nIndexBuf == 0)
+    {
+        LTMetal_DrawTrisFrom(pMVP, nTexture, nBuffer, nFirst, nCount, bAlphaTest, fAlphaRef,
+                             bBlend, fConstAlpha, bTexAlpha, nBlendOp);
+        return;
+    }
+    if (!g_Enc || nCount < 3 || !pMVP || nFirst < 0) return;
+    if (nTexture == 0 || nTexture >= g_Textures.size()) return;
+    if (nBuffer == 0 || nBuffer >= g_Buffers.size() || !g_Buffers[nBuffer]) return;
+    if (nIndexBuf >= g_Buffers.size() || !g_Buffers[nIndexBuf]) return;
+    EncodeTris(pMVP, nTexture, g_Buffers[nBuffer], 0, nCount, bAlphaTest, fAlphaRef,
+               bBlend, fConstAlpha, bTexAlpha, nBlendOp, 0,
+               g_Buffers[nIndexBuf], sizeof(unsigned int) * (size_t)nFirst);
 }
 
 

@@ -67,6 +67,22 @@ public:
     // The leaves the current view sees (for traces and tests).
     unsigned int        VisibleLeafCount() const;
 
+    // ⚠️ A VIEW OF ITS OWN (HANDOVER 5ea) -- the renderer's camera, which is
+    // not where the server's player is (a cinematic camera is often far out
+    // in the void). Same walk and same fallback as SetViewLeaf/BoxVisible,
+    // into the caller's state, so neither re-decodes the other's leaf.
+    struct View
+    {
+        int                         m_nLeaf = -2;
+        unsigned int                m_nGen = 0;
+        bool                        m_bAll = true;
+        std::vector<unsigned char>  m_State;
+    };
+    // Recomputed only when the leaf or a portal changed; true when it was.
+    bool                ComputeView(int nLeaf, View& v) const;
+    bool                BoxVisibleIn(const View& v, const float* pMin3, const float* pMax3) const;
+    unsigned int        LeafCountIn(const View& v) const;
+
     // The decoder's own check, for tests: walks every leaf's lists and counts
     // the ones that ran past their data or left a whole byte unread.
     void                SelfCheck(unsigned int* pnLists, unsigned int* pnBad,

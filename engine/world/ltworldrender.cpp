@@ -1786,6 +1786,7 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
     m_bLoaded = false;
     m_pSky = 0;
     m_Static.m_bValid = false;      // rebuilt by the Metal pass; it frees the old buffer
+    m_pVisKey = 0;                  // polygon boxes for visibility, rebuilt (5ea)
     m_sError.clear();
 
     if (!m_World.LoadThroughFileMgr(pFileMgr, pWorldName))
@@ -2617,6 +2618,8 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         const size_t q = pOrder ? (size_t)(*pOrder)[nAt] : nAt;
         const LTWorldPoly& po = M.m_Polys[q];
         if (po.m_Verts.size() < 3) continue;
+        if (!PolyVisible(M, q)) continue;           // the camera's leaf cannot see it (5ea)
+        if (pSink) pSink->BeginPoly(q);
 
         if (po.m_nSurface >= M.m_Surfaces.size()) continue;
 
@@ -3467,6 +3470,279 @@ bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
 }
 
 
+// ----------------------------------------------------------------------- //
+// VISIBILITY (HANDOVER 5ea) -- see ltworldrender.h.
+// ----------------------------------------------------------------------- //
+
+namespace
+{
+    bool VisCullOff()
+    {
+        static const bool b = []() {
+            const bool v = (getenv("LT_NOVISCULL") != 0);
+            if (v) { printf("[LT3D] LT_NOVISCULL=1 -- the whole level is drawn, whatever the camera's leaf sees (old)\n"); fflush(stdout); }
+            return v; }();
+        return b;
+    }
+    // LT_VISCULLTRACE=1 -- each change of the camera's leaf, and what it culls.
+    bool VisCullTrace() { static const bool b = (getenv("LT_VISCULLTRACE") != 0); return b; }
+
+    void GrowBox(float* b6, const float* p)
+    {
+        for (int k = 0; k < 3; ++k)
+        {
+            if (p[k] < b6[k])     b6[k]     = p[k];
+            if (p[k] > b6[k + 3]) b6[k + 3] = p[k];
+        }
+    }
+}
+
+void CLTWorldScene::UpdateVisCull(const float* pEye3, const ILTWorldModelXform* pXform)
+{
+    if (m_bReflecting) return;      // the main view's state stays; a reflection never culls
+    m_bVisCull = false;
+    if (!pEye3 || VisCullOff()) return;
+    const CLTWorldVis* pVis = LTGetWorldVis();
+    if (!pVis || !pVis->IsValid()) return;
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    if (mdl.empty()) return;
+
+    // Once per level: every polygon's box and every model's, from the points.
+    if (m_pVisKey != (const void*)&mdl[0] || m_nVisModels != mdl.size())
+    {
+        m_PolyBox.assign(mdl.size(), std::vector<float>());
+        m_ModelBox.assign(mdl.size(), std::vector<float>());
+        for (size_t i = 0; i < mdl.size(); ++i)
+        {
+            const LTWorldModelHeader& M = mdl[i];
+            if (!M.m_bBodyParsed) continue;
+            std::vector<float>& B = m_PolyBox[i];
+            B.resize(M.m_Polys.size() * 6);
+            float mb[6] = { 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f };
+            for (size_t q = 0; q < M.m_Polys.size(); ++q)
+            {
+                float* b = &B[q * 6];
+                b[0] = b[1] = b[2] = 1e30f; b[3] = b[4] = b[5] = -1e30f;
+                const LTWorldPoly& po = M.m_Polys[q];
+                for (size_t v = 0; v < po.m_Verts.size(); ++v)
+                    if (po.m_Verts[v].m_nPoint < M.m_Points.size())
+                        GrowBox(b, M.m_Points[po.m_Verts[v].m_nPoint].m_Pos);
+                if (b[0] > b[3]) { b[0] = b[1] = b[2] = -1e30f; b[3] = b[4] = b[5] = 1e30f; }  // no points: always seen
+                else
+                {
+                    // ⚠️ A POLYGON IS FLAT, AND WALLS ARE WHERE LEAVES MEET.
+                    // A box of zero thickness lying in a splitting plane goes
+                    // down the BACK side only (d - r <= 0), never into the room
+                    // it faces -- M01S01's alley walls vanished behind Cate.
+                    // A unit of thickness each way reaches both sides.
+                    for (int k = 0; k < 3; ++k) { b[k] -= 1.0f; b[k + 3] += 1.0f; }
+                    GrowBox(mb, b); GrowBox(mb, b + 3);
+                }
+            }
+            if (mb[0] <= mb[3]) m_ModelBox[i].assign(mb, mb + 6);
+        }
+        m_PolyVis.clear();
+        m_VisView = CLTWorldVis::View();
+        m_pVisKey = (const void*)&mdl[0];
+        m_nVisModels = mdl.size();
+    }
+
+    // ⚠️ THE VISIBILITY MUST BE THIS WORLD'S: the server builds it per level,
+    // and a frame drawn against another level's would cull at random.
+    {
+        size_t nLeaves = 0;
+        for (size_t i = 0; i < mdl.size(); ++i)
+            if (mdl[i].m_nLeafs && mdl[i].m_bBodyParsed && mdl[i].m_nRootNode >= 0 && !mdl[i].m_Nodes.empty())
+            { nLeaves = mdl[i].m_Leaves.size(); break; }
+        if (nLeaves != pVis->NumLeaves()) return;
+    }
+
+    const int nLeaf = pVis->LeafAt(pEye3);
+    const bool bNew = pVis->ComputeView(nLeaf, m_VisView);
+    if (VisCullTrace() && nLeaf != m_nVisLeaf)
+    {
+        printf("[VIS] camera at (%.0f %.0f %.0f): leaf %d -> %d, %u of %u leaves seen%s\n",
+               pEye3[0], pEye3[1], pEye3[2], m_nVisLeaf, nLeaf,
+               pVis->LeafCountIn(m_VisView), pVis->NumLeaves(),
+               m_VisView.m_bAll ? " (everything: outside every leaf, or no list)" : "");
+        fflush(stdout);
+    }
+    m_nVisLeaf = nLeaf;
+    if (m_VisView.m_bAll) return;
+    m_bVisCull = true;
+
+    if (bNew || m_PolyVis.size() != mdl.size())
+    {
+        m_PolyVis.assign(mdl.size(), std::vector<unsigned char>());
+        size_t nSeen = 0, nAll = 0;
+        for (size_t i = 0; i < mdl.size(); ++i)
+        {
+            const std::vector<float>& B = m_PolyBox[i];
+            std::vector<unsigned char>& V = m_PolyVis[i];
+            V.assign(B.size() / 6, 1);
+            if (&mdl[i] == m_pSky) continue;            // at infinity, never culled
+            nAll += V.size();
+            if (!m_ModelBox[i].empty() && !pVis->BoxVisibleIn(m_VisView, &m_ModelBox[i][0], &m_ModelBox[i][3]))
+            { std::fill(V.begin(), V.end(), (unsigned char)0); continue; }
+            for (size_t q = 0; q < V.size(); ++q)
+            {
+                V[q] = pVis->BoxVisibleIn(m_VisView, &B[q * 6], &B[q * 6 + 3]) ? 1 : 0;
+                nSeen += V[q];
+            }
+        }
+        ++m_nVisSerial;
+        if (VisCullTrace())
+        {
+            printf("[VIS] leaf %d: %zu of %zu world polygons in view\n", nLeaf, nSeen, nAll);
+            fflush(stdout);
+        }
+    }
+
+    // Moving world models, every frame, by their box where they are now.
+    m_ModelMoving.assign(mdl.size(), 0);
+    m_ModelVis.assign(mdl.size(), 1);
+    if (pXform)
+        for (size_t i = 0; i < mdl.size(); ++i)
+        {
+            float L[16];
+            if (&mdl[i] == m_pSky || m_ModelBox[i].empty()) continue;
+            if (!pXform->GetModelTransform(mdl[i].m_sName, L)) continue;
+            m_ModelMoving[i] = 1;
+            const float* mb = &m_ModelBox[i][0];
+            float wb[6] = { 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f };
+            for (int c = 0; c < 8; ++c)
+            {
+                const float p[3] = { mb[(c & 1) ? 3 : 0], mb[(c & 2) ? 4 : 1], mb[(c & 4) ? 5 : 2] };
+                float o[4];
+                LT3D::TransformPoint(L, p, o);
+                const float w = (o[3] != 0.0f) ? o[3] : 1.0f;
+                const float pw[3] = { o[0] / w, o[1] / w, o[2] / w };
+                GrowBox(wb, pw);
+            }
+            m_ModelVis[i] = pVis->BoxVisibleIn(m_VisView, wb, wb + 3) ? 1 : 0;
+        }
+}
+
+bool CLTWorldScene::PolyVisible(const LTWorldModelHeader& M, size_t q) const
+{
+    if (!VisCulling()) return true;
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    if (mdl.empty() || &M < &mdl[0] || &M >= &mdl[0] + mdl.size()) return true;
+    const size_t i = (size_t)(&M - &mdl[0]);
+    if (i < m_ModelMoving.size() && m_ModelMoving[i]) return m_ModelVis[i] != 0;
+    if (i >= m_PolyVis.size() || q >= m_PolyVis[i].size()) return true;
+    return m_PolyVis[i][q] != 0;
+}
+
+bool CLTWorldScene::ModelVisibleNow(const LTWorldModelHeader& M) const
+{
+    if (!VisCulling()) return true;
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    if (mdl.empty() || &M < &mdl[0] || &M >= &mdl[0] + mdl.size()) return true;
+    const size_t i = (size_t)(&M - &mdl[0]);
+    return i >= m_ModelVis.size() || m_ModelVis[i] != 0;
+}
+
+bool CLTWorldScene::BoxVisibleNow(const float* pMin3, const float* pMax3) const
+{
+    if (!ObjectCulling()) return true;
+    const CLTWorldVis* pVis = LTGetWorldVis();
+    return !pVis || pVis->BoxVisibleIn(m_VisView, pMin3, pMax3);
+}
+
+bool CLTWorldScene::SphereVisibleNow(const float* pC3, float fRadius) const
+{
+    if (!ObjectCulling()) return true;
+    const float mn[3] = { pC3[0] - fRadius, pC3[1] - fRadius, pC3[2] - fRadius };
+    const float mx[3] = { pC3[0] + fRadius, pC3[1] + fRadius, pC3[2] + fRadius };
+    return BoxVisibleNow(mn, mx);
+}
+
+// ⚠️ GENEROUS ON PURPOSE: the bind pose's farthest corner, half again for
+// the animation reaching past it, and a margin. Too big draws an object the
+// depth test then hides; too small makes one vanish. 0 for a model that does
+// not load -- the caller then uses its own fallback.
+float CLTWorldScene::ModelRadius(const std::string& sModel)
+{
+    std::map<std::string, float>::const_iterator it = m_ModelRadius.find(sModel);
+    if (it != m_ModelRadius.end()) return it->second;
+    float r = 0.0f;
+    CLTABCModel m;
+    if (m_pFileMgr && m.LoadThroughFileMgr(m_pFileMgr, sModel.c_str()))
+    {
+        float mn[3], mx[3];
+        if (LTModelDraw::GetBounds(m, mn, mx))
+            for (int c = 0; c < 8; ++c)
+            {
+                const float x = (c & 1) ? mx[0] : mn[0], y = (c & 2) ? mx[1] : mn[1], z = (c & 4) ? mx[2] : mn[2];
+                const float d = sqrtf(x*x + y*y + z*z);
+                if (d > r) r = d;
+            }
+        r = r * 1.5f + 16.0f;
+    }
+    m_ModelRadius[sModel] = r;
+    return r;
+}
+
+// LT_VISCULLNOOBJ=1 -- the world is culled, objects never are (says so):
+// tells "a world polygon went" from "an object went" in an A/B.
+static bool VisCullNoObjects()
+{
+    static const bool b = []() {
+        const bool v = (getenv("LT_VISCULLNOOBJ") != 0);
+        if (v) { printf("[LT3D] LT_VISCULLNOOBJ=1 -- visibility culls world polygons only, never objects\n"); fflush(stdout); }
+        return v; }();
+    return b;
+}
+
+bool CLTWorldScene::ObjectCulling() const { return VisCulling() && !VisCullNoObjects(); }
+
+bool CLTVisCulledObjects::Get(unsigned int i, LTDynamicModel& out) const
+{
+    if (!m_p->Get(i, out)) return false;
+    if (out.m_bReallyClose || !m_S.VisCulling()) return true;
+    float r = m_S.ModelRadius(out.sModel);
+    if (r <= 0.0f) r = 256.0f;
+    float s = 1.0f;
+    for (int k = 0; k < 3; ++k) if (fabsf(out.m_Scale[k]) > s) s = fabsf(out.m_Scale[k]);
+    return m_S.SphereVisibleNow(out.m_Pos, r * s);
+}
+
+bool CLTVisCulledObjects::GetSprite(unsigned int i, LTDynamicSprite& out) const
+{
+    if (!m_p->GetSprite(i, out)) return false;
+    if (out.m_bReallyClose || !m_S.VisCulling()) return true;
+    // A sprite's frame is at most a few hundred units at any scale the game
+    // sets; a glow grows with distance (2.0x at 500), so double it again.
+    const float s = fmaxf(fabsf(out.m_Draw.m_fScaleX), fabsf(out.m_Draw.m_fScaleY));
+    return m_S.SphereVisibleNow(out.m_Pos, 256.0f * fmaxf(s, 1.0f) * 2.0f);
+}
+
+bool CLTVisCulledObjects::GetPolyGrid(unsigned int i, LTDynamicPolyGrid& out) const
+{
+    if (!m_p->GetPolyGrid(i, out)) return false;
+    if (!m_S.VisCulling()) return true;
+    const float r = (float)out.m_W * fabsf(out.m_Scale[0]) + (float)out.m_H * fabsf(out.m_Scale[2])
+                  + 128.0f * fabsf(out.m_Scale[1]) + 64.0f;
+    return m_S.SphereVisibleNow(out.m_Pos, r);
+}
+
+bool CLTVisCulledObjects::GetParticleSystem(unsigned int i, LTDynamicParticles& out) const
+{
+    if (!m_p->GetParticleSystem(i, out)) return false;
+    if (out.m_bReallyClose || !m_S.VisCulling() || !out.m_pParts || !out.m_nParts) return true;
+    float b[6] = { 1e30f, 1e30f, 1e30f, -1e30f, -1e30f, -1e30f };
+    for (unsigned int k = 0; k < out.m_nParts; ++k)
+    {
+        const LTDynamicParticle& p = out.m_pParts[k];
+        const float h = 4.0f * fabsf(p.m_fSize) + 1.0f;
+        const float lo[3] = { p.m_Pos[0] - h, p.m_Pos[1] - h, p.m_Pos[2] - h };
+        const float hi[3] = { p.m_Pos[0] + h, p.m_Pos[1] + h, p.m_Pos[2] + h };
+        GrowBox(b, lo); GrowBox(b, hi);
+    }
+    return m_S.BoxVisibleNow(b, b + 3);
+}
+
 CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
                                            int nWidth, int nHeight,
                                            const float* pEye3, const float* pAt3,
@@ -3526,6 +3802,12 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
              it != m_MirrorPseudo.end(); ++it)
             SyncMirrorPseudo(it->second);
     }
+
+    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- after the reflection
+    // passes, which never cull, and before the first pass of this view.
+    UpdateVisCull(pEye3, pXform);
+    CLTVisCulledObjects visObjs(*this, pDyn);
+    if (pDyn && VisCulling()) pDyn = &visObjs;
 
     LT3DTarget t;
     t.m_pRGBA = pRGBA; t.m_pDepth = pDepth;
@@ -3825,6 +4107,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
                     if (!bTranslucentPass) continue;
                     float spos[3];
                     if (!obj[i].GetPos(spos)) continue;
+                    if (!SphereVisibleNow(spos, 512.0f)) continue;      // 5ea
                     DrawSpriteQuad(t, MVP, sd, spos, camR, camU, camF, pEye3, st, 0);
                     ++st.m_nObjects;
                     continue;
@@ -3877,6 +4160,15 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             float scale[3];
             ObjectScale(i, scale);
             const bool bScaled = (scale[0] != 1.0f || scale[1] != 1.0f || scale[2] != 1.0f);
+
+            // ...and only where the camera's leaf can see it (5ea).
+            if (VisCulling())
+            {
+                float r = ModelRadius(sModelName);
+                if (r <= 0.0f) r = 256.0f;
+                const float s = fmaxf(1.0f, fmaxf(fabsf(scale[0]), fmaxf(fabsf(scale[1]), fabsf(scale[2]))));
+                if (!SphereVisibleNow(pos, r * s)) continue;
+            }
 
             CachedModel* pM = GetModel(sModelName, sSkinName, bCK, fAlpha, nBlendOp);
             if (!pM) continue;

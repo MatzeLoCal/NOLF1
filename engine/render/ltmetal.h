@@ -159,6 +159,19 @@ void LTMetal_DrawTrisFrom(const float* pMVP, unsigned int nTexture,
                           float fConstAlpha = 1.0f, bool bTexAlpha = true,
                           int nBlendOp = 0);
 
+// ⚠️ ...AND THROUGH AN INDEX LIST (HANDOVER 5ea): the static world's
+// triangles the camera's leaf can see. An index buffer is a uint32 list of
+// vertex numbers in nBuffer; freed with LTMetal_FreeBuffer. nIndexBuf 0 is
+// LTMetal_DrawTrisFrom exactly (nFirst/nCount are vertices); otherwise
+// nFirst/nCount count INDICES.
+unsigned int LTMetal_CreateIndexBuffer(const unsigned int* pIdx, int nIdx);
+void LTMetal_DrawTrisFromIndexed(const float* pMVP, unsigned int nTexture,
+                                 unsigned int nBuffer, unsigned int nIndexBuf,
+                                 int nFirst, int nCount,
+                                 bool bAlphaTest, float fAlphaRef, bool bBlend = false,
+                                 float fConstAlpha = 1.0f, bool bTexAlpha = true,
+                                 int nBlendOp = 0);
+
 // Diagnostics, for the harness rather than the game.
 // Linear depth fog for the draws that follow (until set again): view depth
 // near..far blends toward the colour (0..255). Off by default. HANDOVER 5bo.

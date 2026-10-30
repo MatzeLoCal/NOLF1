@@ -125,6 +125,7 @@ run_test world \
 run_test walk \
     "$HERE/enginetest_walk.cpp" \
     "$R/engine/world/ltworldrender.cpp" \
+    "$R/engine/world/ltworldvis.cpp" \
     "$R/engine/world/ltproptypes.cpp" \
     "$R/engine/kernel/tex/ltspr.cpp" \
     "$R/engine/world/ltworldwalk.cpp" \
@@ -149,6 +150,7 @@ if [ -f "$R/engine/render/ltmetal.mm" ]; then
 run_test metal \
     "$HERE/enginetest_metal.cpp" \
     "$R/engine/world/ltworldrender.cpp" \
+    "$R/engine/world/ltworldvis.cpp" \
     "$R/engine/world/ltproptypes.cpp" \
     "$R/engine/kernel/tex/ltspr.cpp" \
     "$R/engine/world/ltworldmetal.cpp" \
