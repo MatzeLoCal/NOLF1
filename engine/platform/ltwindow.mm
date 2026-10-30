@@ -650,6 +650,28 @@ float LTWindow_ScreenAspect()
 }
 
 
+bool LTWindow_ScreenSize(int* pW, int* pH)
+{
+    @autoreleasepool
+    {
+        [NSApplication sharedApplication];
+        NSScreen* scr = [NSScreen mainScreen];
+        if (!scr || !pW || !pH) return false;
+        const NSRect f = [scr frame];
+        *pW = (int)f.size.width;
+        *pH = (int)f.size.height;
+        return *pW > 0 && *pH > 0;
+    }
+}
+
+
+bool LTWindow_IsFullScreen()
+{
+    if (!g_bOpen || !g_pWindow) return false;
+    return ([g_pWindow styleMask] & NSWindowStyleMaskFullScreen) != 0;
+}
+
+
 void LTWindow_SetPointMapper(LTWindowPointMapFn fn) { g_fnPointMap = fn; }
 
 

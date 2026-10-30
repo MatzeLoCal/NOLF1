@@ -116,11 +116,24 @@ struct ContentView: View {
         }
     }
 
+    // The fixed sizes plus the stored one when it is not among them: a size
+    // chosen in the game's Options > Display is written back here (HANDOVER
+    // 5dw), and a Picker shows nothing for a selection it has no row for.
+    private var sizeChoices: [String] {
+        var all = Self.sizes
+        if !all.contains(where: { $0.0 == width && $0.1 == height }) { all.append((width, height)) }
+        all.sort { ($0.0 * $0.1, $0.0) < ($1.0 * $1.1, $1.0) }
+        return all.map { "\($0.0)x\($0.1)" }
+    }
+
     private var displayRow: some View {
         Picker("Window size", selection: Binding(
             get: { "\(width)x\(height)" },
             set: { v in let p = v.split(separator: "x"); width = Int(p[0]) ?? 1024; height = Int(p[1]) ?? 768 })) {
-            ForEach(Self.sizes, id: \.0) { s in Text(verbatim: "\(s.0) × \(s.1)").tag("\(s.0)x\(s.1)") }
+            ForEach(sizeChoices, id: \.self) { t in
+                let p = t.split(separator: "x")
+                Text(verbatim: "\(p[0]) × \(p[1])").tag(t)
+            }
         }
         .frame(maxWidth: 300)
     }

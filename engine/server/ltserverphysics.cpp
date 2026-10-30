@@ -277,6 +277,13 @@ void LTServerPhys_Update(float fDelta)
 static bool RayBox(const float* o, const float* d, float fLen,
                    const float* mn, const float* mx, float* pT, float* pN)
 {
+    // LT_RAYBOXEDGES=1 = old (see the edge test below); read on the first
+    // box test, so an A/B arm announces itself even if no ray reaches a box.
+    static const bool s_bEdges = []() {
+        const bool b = (getenv("LT_RAYBOXEDGES") != 0);
+        if (b) { printf("[PHYS] LT_RAYBOXEDGES=1 -- a ray along an object box's edge hits it (old)\n"); fflush(stdout); }
+        return b; }();
+
     float tmin = 0.0f, tmax = fLen;
     int nAxis = 0; float nSign = -1.0f;
 
@@ -297,6 +304,20 @@ static bool RayBox(const float* o, const float* d, float fLen,
         if (t2 < tmax) tmax = t2;
         if (tmin > tmax) return false;
     }
+
+    // ⚠️ A RAY ALONG THE BOX'S EDGE MISSES (HANDOVER 5dz). The donor's face
+    // test is strict (fullintersectline.cpp DO_PLANE_TEST_*: min < x < max on
+    // the face's other two axes). M04S02's spawners stand 24 x 16 units
+    // apart, so jorgen2's floor ray ran down x = -800, exactly jorgen1's
+    // edge: it "landed" on his head, 106 units up, and hung there all
+    // mission. LT_RAYBOXEDGES=1 = old (edges hit; says so).
+    if (!s_bEdges)
+        for (int k = 0; k < 3; ++k)
+        {
+            if (k == nAxis) continue;
+            const float p = o[k] + d[k] * tmin;
+            if (p <= mn[k] || p >= mx[k]) return false;
+        }
 
     *pT = tmin;
     pN[0] = pN[1] = pN[2] = 0.0f;

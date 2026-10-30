@@ -36,11 +36,13 @@
 #include "iltstream.h"
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 namespace
 {
@@ -65,6 +67,13 @@ namespace
     // notch turned on this frame -- see LTBind_OnWheel.
     int g_WheelFwd = -1, g_WheelBack = -1;
     std::vector<int> g_Pulses;
+
+    // ⚠️ EVERY TRIGGER THAT WAS EVER BOUND THIS SESSION (5dv). The player's
+    // config is LAYERED over the install's (5cc), so a key the player took
+    // away must be written as an explicit unbind, or the install's
+    // autoexec.cfg binds it again at the next start.
+    std::set<int> g_DikEver, g_ButtonEver;
+    bool          g_bWheelEver = false;
 
     unsigned g_nUnboundKeys = 0;
     unsigned g_nKeyHits     = 0;
@@ -183,12 +192,35 @@ namespace
     bool                     g_bTracking = false;
     std::vector<DeviceInput> g_Tracked;
     size_t                   g_nTrackCap = 0;
+    unsigned                 g_nTrackDevices = 0;    // StartDeviceTrack's DEVICETYPE_ mask
+
+    // A mouse event for the key-assignment screen (5dv): DirectInput's names,
+    // "Button N" and "Wheel" -- what GetDeviceObjects and GetDeviceBindings
+    // answer, since the screen matches all three by name.
+    void TrackMouse(unsigned nControlType, const char* pName, unsigned nValue)
+    {
+        if (!g_bTracking || !(g_nTrackDevices & DEVICETYPE_MOUSE) || g_Tracked.size() >= g_nTrackCap) return;
+        DeviceInput di;
+        memset(&di, 0, sizeof(di));
+        di.m_DeviceType = DEVICETYPE_MOUSE;
+        strncpy(di.m_DeviceName, "##mouse", sizeof(di.m_DeviceName) - 1);
+        di.m_ControlType = nControlType;
+        strncpy(di.m_ControlName, pName, sizeof(di.m_ControlName) - 1);
+        di.m_InputValue = nValue;
+        g_Tracked.push_back(di);
+    }
 
     // The name a person should see on the Controls screen. Only used for
     // display -- the BINDING travels as the DIK code in byte 63.
-    void KeyDisplayName(int nVK, int nDik, char* pOut, size_t n)
+    // ⚠️ ONLY LETTERS AND DIGITS ARE THEIR OWN CHARACTER (HANDOVER 5dv).
+    // Every VK from 32 to 126 used to print as its ASCII code before the
+    // names below were tried -- and VK_LEFT/UP/RIGHT/DOWN are 37..40, so the
+    // Controls screen showed '%' '&' ''' '(' for the arrows, ' ' for Space,
+    // '.' for Delete. A single character also goes through the game's
+    // ConvertKeyToCurrentKeyboard, which must get the ENGLISH key.
+    void VKName(int nVK, int nDik, char* pOut, size_t n)
     {
-        if (nVK >= 32 && nVK < 127)
+        if ((nVK >= '0' && nVK <= '9') || (nVK >= 'A' && nVK <= 'Z'))
         { snprintf(pOut, n, "%c", (char)nVK); return; }
 
         switch (nVK)
@@ -230,7 +262,48 @@ namespace
         }
         if (nVK >= VK_F1 && nVK <= VK_F12) { snprintf(pOut, n, "F%d", nVK - VK_F1 + 1); return; }
         if (nVK >= VK_NUMPAD0 && nVK <= VK_NUMPAD9) { snprintf(pOut, n, "Num %d", nVK - VK_NUMPAD0); return; }
+        switch (nVK)
+        {
+            case VK_MULTIPLY: snprintf(pOut, n, "Num *"); return;
+            case VK_ADD:      snprintf(pOut, n, "Num +"); return;
+            case VK_SUBTRACT: snprintf(pOut, n, "Num -"); return;
+            case VK_DECIMAL:  snprintf(pOut, n, "Num ."); return;
+            case VK_DIVIDE:   snprintf(pOut, n, "Num /"); return;
+            case VK_OEM_102:  snprintf(pOut, n, "ISO Key"); return;
+            default: break;
+        }
         snprintf(pOut, n, "Key %d", nDik);
+    }
+
+    // ⚠️ ONE NAME PER DIK, whatever VK the event carried. Shift arrives as
+    // VK_SHIFT or VK_LSHIFT, both DIK 42; naming by VK gave one key two names,
+    // and the screen matches bindings, tracked keys and device objects BY
+    // NAME. The lowest VK that maps to the DIK names it.
+    void KeyDisplayName(int nVK, int nDik, char* pOut, size_t n)
+    {
+        (void)nVK;
+        for (int vk = 1; vk < 256; ++vk)
+            if (VKToDIK(vk) == nDik) { VKName(vk, nDik, pOut, n); return; }
+        snprintf(pOut, n, "Key %d", nDik);
+    }
+
+    // The other way: a key's NAME back to its DIK, case-insensitive, for
+    // `rangebind "##keyboard" "W" ...` -- the game unbinds a key by the name
+    // GetDeviceBindings gave it (FolderCustomControls.cpp:349).
+    int DikForName(const char* pName)
+    {
+        if (!pName || !*pName) return -1;
+        for (int dik = 1; dik < 256; ++dik)
+        {
+            char buf[64];
+            buf[0] = 0;
+            bool bAny = false;
+            for (int vk = 1; vk < 256 && !bAny; ++vk) bAny = (VKToDIK(vk) == dik);
+            if (!bAny) continue;
+            KeyDisplayName(0, dik, buf, sizeof buf);
+            if (strcasecmp(buf, pName) == 0) return dik;
+        }
+        return -1;
     }
 
     // ---- console commands --------------------------------------------- //
@@ -253,22 +326,61 @@ namespace
 
     // rangebind "##keyboard" "##<dik>" <min> <max> "<action>"
     // bind      "##keyboard" "##<dik>" "<action>"
+    //
+    // ⚠️ THE CONTROLS SCREEN SPEAKS IT TOO (5dv), in three ways the shipped
+    // config never does:
+    //   * the trigger by NAME -- `"W"`, not `"##17"` -- taken from
+    //     GetDeviceBindings; `##` decides, so the name "1" is the 1 key and
+    //     `##1` is DIK 1 (Escape);
+    //   * an EMPTY action, `""`, which UNBINDS the trigger (UnBind,
+    //     FolderCustomControls.cpp:349) -- it used to return, so a re-bound
+    //     action kept its old key as well;
+    //   * the wheel line with ONE range or none (RebindWheel): the line
+    //     replaces the trigger's actions, so the other notch is cleared.
     void Cmd_RangeBind(int argc, char** argv)
     {
-        if (argc < 3) return;
+        if (argc < 2) return;
 
         char dev[64], key[64], act[128];
         Strip(argv[0], dev, sizeof dev);
         Strip(argv[1], key, sizeof key);
-
-        // The action is the LAST argument for both forms, which is why this
-        // takes it by position from the end rather than by index.
-        Strip(argv[argc - 1], act, sizeof act);
-
-        std::map<std::string, int>::const_iterator it = g_Actions.find(Lower(act));
-        if (it == g_Actions.end()) return;     // an action the game never added
+        const char* pRawKey = argv[1] ? argv[1] : "";
+        while (*pRawKey == '"' || *pRawKey == ' ') ++pRawKey;
+        const bool bCode = (pRawKey[0] == '#' && pRawKey[1] == '#');
 
         const std::string sDev = Lower(dev);
+
+        // The wheel: "##z-axis" then (lo hi action) triples. A range below
+        // zero is the backward notch, above zero the forward one.
+        if (sDev == "mouse" && (Lower(key) == "z-axis" || Lower(key) == "wheel"))
+        {
+            g_WheelFwd = g_WheelBack = -1;
+            g_bWheelEver = true;
+            for (int a = 2; a + 2 < argc; a += 3)
+            {
+                char act2[128];
+                Strip(argv[a + 2], act2, sizeof act2);
+                std::map<std::string, int>::const_iterator jt = g_Actions.find(Lower(act2));
+                if (jt == g_Actions.end()) continue;
+                const float lo = (float)atof(argv[a]), hi = (float)atof(argv[a + 1]);
+                if (hi <= 0.0f || lo < 0.0f) g_WheelBack = jt->second;
+                else                         g_WheelFwd  = jt->second;
+            }
+            return;
+        }
+
+        // The action is the LAST argument for both forms, which is why this
+        // takes it by position from the end rather than by index. Empty =
+        // unbind; a name the game never added = the line is ignored.
+        act[0] = 0;
+        if (argc >= 3) Strip(argv[argc - 1], act, sizeof act);
+        int nCmd = -1;
+        if (act[0])
+        {
+            std::map<std::string, int>::const_iterator it = g_Actions.find(Lower(act));
+            if (it == g_Actions.end()) return;
+            nCmd = it->second;
+        }
 
         // ⚠️ THE MOUSE IS A SEPARATE TABLE, NOT A SHARED ONE. Mouse button 1
         // and DIK 1 (Escape) are both spelled "1", so one map would have them
@@ -285,23 +397,6 @@ namespace
         // ⚠️ The key is spelled "Button N", not "##N" -- a different syntax in
         // the same command, which is why this parses past the word rather than
         // calling atoi on the whole string.
-        // The wheel: "##z-axis" then (lo hi action) triples. A range below
-        // zero is the backward notch, above zero the forward one.
-        if (sDev == "mouse" && Lower(key) == "z-axis")
-        {
-            for (int a = 2; a + 2 < argc; a += 3)
-            {
-                char act2[128];
-                Strip(argv[a + 2], act2, sizeof act2);
-                std::map<std::string, int>::const_iterator jt = g_Actions.find(Lower(act2));
-                if (jt == g_Actions.end()) continue;
-                const float lo = (float)atof(argv[a]), hi = (float)atof(argv[a + 1]);
-                if (hi <= 0.0f) g_WheelBack = jt->second;
-                else if (lo >= 0.0f) g_WheelFwd = jt->second;
-            }
-            return;
-        }
-
         if (sDev == "mouse")
         {
             const char* p = key;
@@ -311,17 +406,21 @@ namespace
             const int nButton = atoi(p);
             if (nButton < 0 || nButton > 7) return;
 
-            g_MouseToCommand[nButton] = it->second;
+            g_ButtonEver.insert(nButton);
+            if (nCmd < 0) { g_MouseToCommand.erase(nButton); g_MouseToAction.erase(nButton); return; }
+            g_MouseToCommand[nButton] = nCmd;
             g_MouseToAction[nButton]  = act;
             return;
         }
 
         if (sDev != "keyboard") return;
 
-        const int nDik = atoi(key);
-        if (nDik <= 0) return;
+        const int nDik = bCode ? atoi(key) : DikForName(key);
+        if (nDik <= 0 || nDik > 255) return;
 
-        g_DikToCommand[nDik] = it->second;
+        g_DikEver.insert(nDik);
+        if (nCmd < 0) { g_DikToCommand.erase(nDik); g_DikToAction.erase(nDik); return; }
+        g_DikToCommand[nDik] = nCmd;
         g_DikToAction[nDik]  = act;
     }
 }
@@ -412,24 +511,39 @@ namespace
             fprintf(fp, "AddAction %s %d\n", it->second.c_str(), it->first);
         fprintf(fp, "\n");
 
-        if (!g_DikToAction.empty())
+        // ⚠️ A TRIGGER THE PLAYER UNBOUND IS WRITTEN AS AN UNBIND (5dv) --
+        // `""` for its action, the Controls screen's own form -- because this
+        // file is read AFTER the install's autoexec.cfg, which binds it again.
+        if (!g_DikToAction.empty() || !g_DikEver.empty())
         {
             fprintf(fp, "enabledevice \"##keyboard\"\n");
             for (std::map<int, std::string>::const_iterator it = g_DikToAction.begin();
                  it != g_DikToAction.end(); ++it)
                 fprintf(fp, "rangebind \"##keyboard\" \"##%d\" 0.000000 0.000000 \"%s\" \n",
                         it->first, it->second.c_str());
+            for (std::set<int>::const_iterator it = g_DikEver.begin(); it != g_DikEver.end(); ++it)
+                if (!g_DikToAction.count(*it))
+                    fprintf(fp, "rangebind \"##keyboard\" \"##%d\" 0.000000 0.000000 \"\" \n", *it);
         }
-        if (!g_MouseToAction.empty() || g_WheelFwd >= 0 || g_WheelBack >= 0)
+        if (!g_MouseToAction.empty() || !g_ButtonEver.empty() || g_bWheelEver
+            || g_WheelFwd >= 0 || g_WheelBack >= 0)
         {
             fprintf(fp, "enabledevice \"##mouse\"\n");
-            if (g_WheelBack >= 0 && g_WheelFwd >= 0 && g_ActionNames.count(g_WheelBack) && g_ActionNames.count(g_WheelFwd))
-                fprintf(fp, "rangebind \"##mouse\" \"##z-axis\" -255.000000 -0.100000 \"%s\" 0.100000 255.000000 \"%s\"\n",
-                        g_ActionNames[g_WheelBack].c_str(), g_ActionNames[g_WheelFwd].c_str());
+            // The wheel as ONE line, whatever is bound -- the line replaces
+            // both notches, so an empty one clears them.
+            fprintf(fp, "rangebind \"##mouse\" \"##z-axis\"");
+            if (g_WheelBack >= 0 && g_ActionNames.count(g_WheelBack))
+                fprintf(fp, " -255.000000 -0.100000 \"%s\"", g_ActionNames[g_WheelBack].c_str());
+            if (g_WheelFwd >= 0 && g_ActionNames.count(g_WheelFwd))
+                fprintf(fp, " 0.100000 255.000000 \"%s\"", g_ActionNames[g_WheelFwd].c_str());
+            fprintf(fp, "\n");
             for (std::map<int, std::string>::const_iterator it = g_MouseToAction.begin();
                  it != g_MouseToAction.end(); ++it)
                 fprintf(fp, "rangebind \"##mouse\" \"Button %d\" 0.000000 0.000000 \"%s\" \n",
                         it->first, it->second.c_str());
+            for (std::set<int>::const_iterator it = g_ButtonEver.begin(); it != g_ButtonEver.end(); ++it)
+                if (!g_MouseToAction.count(*it))
+                    fprintf(fp, "rangebind \"##mouse\" \"Button %d\" 0.000000 0.000000 \"\" \n", *it);
         }
     }
 }
@@ -554,6 +668,13 @@ bool LTBind_OnMouseButton(int nButton, bool bDown)
 {
     std::map<int, int>::const_iterator it = g_MouseToCommand.find(nButton);
 
+    if (nButton >= 0 && nButton <= 7)
+    {
+        char name[16];
+        snprintf(name, sizeof name, "Button %d", nButton);
+        TrackMouse(CONTROLTYPE_BUTTON, name, bDown ? 1u : 0u);
+    }
+
     if (getenv("LT_KEYTRACE"))
     {
         printf("[KEY] mouse button %d -> %s%s\n", nButton,
@@ -573,6 +694,8 @@ bool LTBind_OnMouseButton(int nButton, bool bDown)
 bool LTBind_OnWheel(int nDir)
 {
     const int nCmd = (nDir > 0) ? g_WheelFwd : (nDir < 0 ? g_WheelBack : -1);
+    // The screen reads the sign: `(int)m_InputValue > 0` is a forward notch.
+    if (nDir) TrackMouse(CONTROLTYPE_ZAXIS, "Wheel", (unsigned)(nDir > 0 ? 120 : -120));
     if (getenv("LT_KEYTRACE"))
     {
         printf("[KEY] wheel %s -> %s %d\n", nDir > 0 ? "forward" : "back",
@@ -613,7 +736,7 @@ bool LTBind_OnKey(int nVK, bool bDown)
 
     // ⚠️ RECORDED EVEN WHEN UNBOUND -- the whole point of the assignment
     // screen is to bind a key that currently is not.
-    if (g_bTracking && g_Tracked.size() < g_nTrackCap)
+    if (g_bTracking && (g_nTrackDevices & DEVICETYPE_KEYBOARD) && g_Tracked.size() < g_nTrackCap)
     {
         const int nDik = VKToDIK(nVK);
         if (nDik > 0)
@@ -651,7 +774,7 @@ bool LTBind_OnKey(int nVK, bool bDown)
 
 void LTDevice_StartTrack(unsigned nDevices, unsigned nBufferSize)
 {
-    (void)nDevices;
+    g_nTrackDevices = nDevices;
     g_bTracking = true;
     g_nTrackCap = nBufferSize ? nBufferSize : 32;
     g_Tracked.clear();
@@ -706,9 +829,39 @@ bool LTDevice_GetName(unsigned nDeviceType, char* pBuf, unsigned nBufLen)
 // ⚠️ BUILT FROM THE SAME TWO TABLES the bindings themselves live in, so what
 // the screen shows is what the engine will actually do. Deriving the display
 // from a second source is how a screen ends up confidently wrong.
+namespace
+{
+    // One trigger's binding record with one action -- a second action (the
+    // wheel's other notch) is chained by the caller.
+    GameAction* NewAction(int nCmd, const std::map<int, std::string>& byCommand,
+                          float fLow, float fHigh)
+    {
+        GameAction* pA = new GameAction;
+        memset(pA, 0, sizeof(*pA));
+        pA->nActionCode = nCmd;
+        std::map<int, std::string>::const_iterator na = byCommand.find(nCmd);
+        if (na != byCommand.end())
+            strncpy(pA->strActionName, na->second.c_str(), sizeof(pA->strActionName) - 1);
+        pA->nRangeLow  = fLow;
+        pA->nRangeHigh = fHigh;
+        pA->pNext = 0;
+        return pA;
+    }
+
+    DeviceBinding* NewBinding(const char* pDevice, const char* pTrigger)
+    {
+        DeviceBinding* pB = new DeviceBinding;
+        memset(pB, 0, sizeof(*pB));
+        strncpy(pB->strDeviceName, pDevice, sizeof(pB->strDeviceName) - 1);
+        strncpy(pB->strTriggerName, pTrigger, sizeof(pB->strTriggerName) - 1);
+        pB->nScale = 1.0f;
+        return pB;
+    }
+}
+
 void* LTDevice_GetBindings(unsigned nDeviceFlags)
 {
-    if (!(nDeviceFlags & DEVICETYPE_KEYBOARD)) return 0;
+    if (!(nDeviceFlags & (DEVICETYPE_KEYBOARD | DEVICETYPE_MOUSE))) return 0;
 
     // command id -> action name, inverted from the AddAction table.
     std::map<int, std::string> byCommand;
@@ -723,6 +876,33 @@ void* LTDevice_GetBindings(unsigned nDeviceFlags)
 
     DeviceBinding* pHead = 0;
     DeviceBinding* pTail = 0;
+
+    // ⚠️ THE MOUSE (5dv): "Button N" per bound button, and the wheel as ONE
+    // trigger, "Wheel", carrying both notches as ranged actions -- the screen
+    // tells them apart by the sign of nRangeHigh (FolderCustomControls.cpp:
+    // 917). Without these the mouse column was always empty and a click or a
+    // notch could not be assigned.
+    if (nDeviceFlags & DEVICETYPE_MOUSE)
+    {
+        for (std::map<int, int>::const_iterator it = g_MouseToCommand.begin();
+             it != g_MouseToCommand.end(); ++it)
+        {
+            char name[16];
+            snprintf(name, sizeof name, "Button %d", it->first);
+            DeviceBinding* pB = NewBinding("##mouse", name);
+            pB->pActionHead = NewAction(it->second, byCommand, 0.0f, 0.0f);
+            if (!pHead) pHead = pTail = pB; else { pTail->pNext = pB; pTail = pB; }
+        }
+        if (g_WheelFwd >= 0 || g_WheelBack >= 0)
+        {
+            DeviceBinding* pB = NewBinding("##mouse", "Wheel");
+            GameAction** ppA = &pB->pActionHead;
+            if (g_WheelFwd >= 0)  { *ppA = NewAction(g_WheelFwd,  byCommand,  0.1f,  255.0f); ppA = &(*ppA)->pNext; }
+            if (g_WheelBack >= 0) { *ppA = NewAction(g_WheelBack, byCommand, -0.1f, -255.0f); }
+            if (!pHead) pHead = pTail = pB; else { pTail->pNext = pB; pTail = pB; }
+        }
+    }
+    if (!(nDeviceFlags & DEVICETYPE_KEYBOARD)) return pHead;
 
     for (std::map<int, int>::const_iterator it = g_DikToCommand.begin();
          it != g_DikToCommand.end(); ++it)
@@ -785,16 +965,35 @@ void LTDevice_FreeBindings(void* pList)
 // KeyDisplayName produces.
 void* LTDevice_GetObjects(unsigned nDeviceFlags)
 {
-    if (!(nDeviceFlags & DEVICETYPE_KEYBOARD)) return 0;
-
     DeviceObject* pHead = 0;
     DeviceObject* pTail = 0;
 
+    // The mouse's assignable controls (5dv), under the names tracking and
+    // the binding list use: five buttons and the wheel.
+    if (nDeviceFlags & DEVICETYPE_MOUSE)
+    {
+        for (int b = 0; b <= 5; ++b)
+        {
+            DeviceObject* p = new DeviceObject;
+            memset(p, 0, sizeof(*p));
+            p->m_DeviceType = DEVICETYPE_MOUSE;
+            strncpy(p->m_DeviceName, "##mouse", sizeof(p->m_DeviceName) - 1);
+            if (b < 5) { p->m_ObjectType = CONTROLTYPE_BUTTON; snprintf(p->m_ObjectName, sizeof(p->m_ObjectName), "Button %d", b); }
+            else       { p->m_ObjectType = CONTROLTYPE_ZAXIS;  strncpy(p->m_ObjectName, "Wheel", sizeof(p->m_ObjectName) - 1); }
+            p->m_RangeLow  = (b < 5) ? 0.0f : -255.0f;
+            p->m_RangeHigh = (b < 5) ? 1.0f :  255.0f;
+            if (!pHead) pHead = pTail = p; else { pTail->m_pNext = p; pTail = p; }
+        }
+    }
+    if (!(nDeviceFlags & DEVICETYPE_KEYBOARD)) return pHead;
+
     // Every VK this port can map. 1..255 is small and runs once per screen.
+    // One object per DIK: Shift and Left Shift are one key with one name.
+    std::set<int> seen;
     for (int vk = 1; vk < 256; ++vk)
     {
         const int nDik = VKToDIK(vk);
-        if (nDik <= 0) continue;
+        if (nDik <= 0 || !seen.insert(nDik).second) continue;
 
         DeviceObject* p = new DeviceObject;
         memset(p, 0, sizeof(*p));
@@ -981,4 +1180,130 @@ void LTBind_DumpCensus()
         }
     }
     fflush(stdout);
+}
+
+
+// ----------------------------------------------------------------------- //
+// MapVirtualKeyEx -- the game's key LABELS (HANDOVER 5dv).
+//
+// ⚠️ THE CONTROLS SCREEN SHOWED NOTHING FOR W, A, S, D. A one-character key
+// name goes through the game's ConvertKeyToCurrentKeyboard (KeyFixes.cpp:29):
+// English char -> scan code (its own table) -> MapVirtualKeyEx(scan, 1) ->
+// VK -> MapVirtualKeyEx(VK, 2) -> the character that key types in the
+// player's layout. The compat stub returned its input unchanged, so 'W' came
+// back as character 17, a control code, drawn as nothing.
+//
+// Answered from the same VK<->DIK table as the bindings. Type 2 asks macOS
+// what the key types in the CURRENT keyboard layout -- bindings are by
+// physical key, as DirectInput's were, so on a Swiss keyboard the key a US
+// layout calls Y is labelled Z, which is what Windows showed there. Only a
+// printable ASCII answer is used (the menu fonts have nothing else); otherwise
+// the US character. LT_USKEYLABELS=1 = US labels always (says so).
+// ----------------------------------------------------------------------- //
+
+#include <dlfcn.h>
+#include <CoreFoundation/CoreFoundation.h>
+
+namespace
+{
+    // What a US keyboard types on this VK, unshifted (MAPVK_VK_TO_CHAR).
+    unsigned USChar(int vk)
+    {
+        if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) return (unsigned)vk;
+        switch (vk)
+        {
+            case VK_SPACE:      return ' ';
+            case VK_OEM_1:      return ';';
+            case VK_OEM_PLUS:   return '=';
+            case VK_OEM_COMMA:  return ',';
+            case VK_OEM_MINUS:  return '-';
+            case VK_OEM_PERIOD: return '.';
+            case VK_OEM_2:      return '/';
+            case VK_OEM_3:      return '`';
+            case VK_OEM_4:      return '[';
+            case VK_OEM_5:      return '\\';
+            case VK_OEM_6:      return ']';
+            case VK_OEM_7:      return '\'';
+            case VK_OEM_102:    return '\\';
+            default:            return 0;
+        }
+    }
+
+    // The character the Mac key types in the current layout, no modifiers;
+    // 0 if it cannot be asked. HIToolbox is loaded by Cocoa; looked up at run
+    // time so the project needs no Carbon link.
+    unsigned LayoutCharForMacKey(int nMacKey)
+    {
+        typedef void*       (*CopySrcFn)();
+        typedef void*       (*GetPropFn)(void*, CFStringRef);
+        typedef int32_t     (*TranslateFn)(const void*, uint16_t, uint16_t, uint32_t, uint32_t,
+                                           uint32_t, uint32_t*, unsigned long, unsigned long*, uint16_t*);
+        typedef uint8_t     (*KbdTypeFn)();
+        static void* s_h = dlopen("/System/Library/Frameworks/Carbon.framework/Carbon", RTLD_LAZY);
+        if (!s_h) return 0;
+        static CopySrcFn   pCopy  = (CopySrcFn)dlsym(s_h, "TISCopyCurrentKeyboardLayoutInputSource");
+        static GetPropFn   pProp  = (GetPropFn)dlsym(s_h, "TISGetInputSourceProperty");
+        static TranslateFn pTrans = (TranslateFn)dlsym(s_h, "UCKeyTranslate");
+        static KbdTypeFn   pKbd   = (KbdTypeFn)dlsym(s_h, "LMGetKbdType");
+        static CFStringRef* pKey  = (CFStringRef*)dlsym(s_h, "kTISPropertyUnicodeKeyLayoutData");
+        if (!pCopy || !pProp || !pTrans || !pKbd || !pKey || !*pKey) return 0;
+
+        void* src = pCopy();
+        if (!src) return 0;
+        unsigned c = 0;
+        CFDataRef data = (CFDataRef)pProp(src, *pKey);
+        if (data)
+        {
+            uint32_t dead = 0;
+            unsigned long n = 0;
+            uint16_t buf[4] = { 0, 0, 0, 0 };
+            // kUCKeyActionDisplay = 3, kUCKeyTranslateNoDeadKeysMask = 1
+            if (pTrans(CFDataGetBytePtr(data), (uint16_t)nMacKey, 3, 0, pKbd(), 1,
+                       &dead, 4, &n, buf) == 0 && n == 1)
+                c = buf[0];
+        }
+        CFRelease((CFTypeRef)src);
+        return c;
+    }
+
+    unsigned LayoutChar(int vk)
+    {
+        static const bool s_bUS = []() {
+            const bool b = (getenv("LT_USKEYLABELS") != 0);
+            if (b) { printf("[BIND] LT_USKEYLABELS=1 -- key labels from a US layout\n"); fflush(stdout); }
+            return b; }();
+        if (s_bUS) return 0;
+        for (int k = 0; k < 128; ++k)
+        {
+            if (LTInput_MacKeyToVK(k) != vk) continue;
+            unsigned c = LayoutCharForMacKey(k);
+            if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+            return (c > 32 && c < 127) ? c : 0;
+        }
+        return 0;
+    }
+}
+
+// Weakly referenced from compat/windows_compat.c (MapVirtualKeyEx).
+extern "C" unsigned int LTPlatform_MapVirtualKey(unsigned int code, unsigned int mapType)
+{
+    switch (mapType)
+    {
+        case 0:                                     // VK -> scan code
+        {
+            const int d = VKToDIK((int)code);
+            return d > 0 ? (unsigned)(d & 0x7f) : 0u;
+        }
+        case 1: case 3:                             // scan code -> VK
+            for (int vk = 1; vk < 256; ++vk)
+                if (VKToDIK(vk) == (int)code) return (unsigned)vk;
+            return 0;
+        case 2:                                     // VK -> character
+        {
+            const unsigned c = LayoutChar((int)code);
+            return c ? c : USChar((int)code);
+        }
+        default:
+            return 0;
+    }
 }

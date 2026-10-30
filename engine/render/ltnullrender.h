@@ -86,6 +86,9 @@ public:
     bool                SetMode(const RMode* pMode);
     bool                GetMode(RMode* pMode) const;
     bool                HasMode() const { return m_bModeSet; }
+    // The game's startup is over (the host calls this after OnEngineInitialized
+    // returns): a mode set from now on is the player's choice (HANDOVER 5dw).
+    void                SetStartupDone() { m_bStartupDone = true; }
 
     // The offered mode list. Deliberately short and fixed -- these are the
     // resolutions NOLF's UI is authored against.
@@ -187,6 +190,7 @@ private:
 
     RMode               m_Mode;
     bool                m_bModeSet;
+    bool                m_bStartupDone = false;
 
     Surface*            m_pSurfaces;        // singly-linked, newest first
     Surface*            m_pScreen;

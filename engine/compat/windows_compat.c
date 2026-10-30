@@ -873,11 +873,26 @@ HRSRC FindResourceA(HMODULE m, const char* name, const char* type)
 HGLOBAL LoadResource(HMODULE m, HRSRC res)
 { (void)m; (void)res; LTCOMPAT_UNIMPLEMENTED(); return NULL; }
 
+// ⚠️ THE CONTROLS SCREEN'S KEY LABELS (HANDOVER 5dv). The game maps a key's
+// English character to what the player's layout types on that key
+// (KeyFixes.cpp ConvertKeyToCurrentKeyboard): scan -> VK (type 1), VK -> char
+// (type 2). Returning the input unchanged turned 'W' into character 17 --
+// nothing on screen. The platform layer answers (ltbindings.cpp, from the
+// binding table and the Mac's current layout); weak, so a tool that links
+// this file alone still links and gets 0 = "no translation", which sends the
+// game to its fallback (the English name).
+extern unsigned int LTPlatform_MapVirtualKey(unsigned int code, unsigned int mapType) __attribute__((weak));
+
 HKL GetKeyboardLayout(DWORD threadId)
-{ (void)threadId; LTCOMPAT_UNIMPLEMENTED(); return NULL; }
+{ (void)threadId; return (HKL)1; }          // one layout: the Mac's current one
 
 UINT MapVirtualKeyEx(UINT code, UINT mapType, HKL layout)
-{ (void)mapType; (void)layout; LTCOMPAT_UNIMPLEMENTED(); return code; }
+{
+    (void)layout;
+    if (LTPlatform_MapVirtualKey) return LTPlatform_MapVirtualKey(code, mapType);
+    LTCOMPAT_UNIMPLEMENTED();
+    return 0;
+}
 
 HANDLE CreateThread(void* attrs, size_t stackSize,
                     DWORD (*start)(void*), void* param, DWORD flags, DWORD* threadId)

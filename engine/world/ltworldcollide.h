@@ -148,6 +148,7 @@ private:
 
     std::vector<float>              m_Tris;     // 9 floats per triangle
     std::vector<unsigned int>       m_TriPoly;  // LTWorldPolyId, one per triangle
+    std::vector<unsigned char>      m_TriFront; // a world model's: rays hit its front only (5dz)
     std::vector<unsigned char>      m_ModelOff; // per world model: switched off (5ds)
     unsigned int                    m_nModelsOff = 0;
     bool            TriOff(size_t nTri) const

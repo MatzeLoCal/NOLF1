@@ -3291,6 +3291,7 @@ int main(int argc, char** argv)
             fflush(stdout);
             LTRESULT r = pShell->OnEngineInitialized(&mode, &guid);
             LTRecord_Event("host", "OnEngineInitialized %d", (int)r);
+            LTGetNullRender()->SetStartupDone();     // later modes are the player's (5dw)
             printf("OnEngineInitialized returned %d  (stubs so far: %d)\n",
                    (int)r, LTStub_Count());
 

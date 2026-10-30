@@ -19,6 +19,7 @@
 #include "lt2d.h"
 #include "ltwindow.h"
 #include "ltcomp.h"
+#include "ltscene.h"
 #include "ltfilemgr.h"
 #include "ltstub.h"
 
@@ -27,6 +28,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <set>
+#include <utility>
+#include <vector>
+#include <mach-o/dyld.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 
 // ----------------------------------------------------------------------- //
@@ -58,19 +64,41 @@ struct CLTNullRender::Surface
 };
 
 
-// The mode list offered to the game. NOLF's UI is authored at 640x480 and the
-// options screen enumerates whatever it is given, so a short honest list beats
-// a long invented one.
-static const struct { uint32 w, h, d; } kOfferedModes[] =
+// ⚠️ THE MODE LIST OFFERED TO THE GAME (HANDOVER 5dw) -- what Options >
+// Display shows. Common 4:3, 16:10 and 16:9 sizes, the screen's own size and
+// the size in use, each only if it fits the main screen (points) -- a window
+// cannot be larger. ONE renderer name for all of them: the game groups modes
+// by name and description, and the old per-size description ("Null renderer
+// 640x480") made every size a renderer of its own with one resolution.
+// The game's own 4:3-only filter is lifted for this (DEVIATIONS E-013).
+static const struct { uint32 w, h; } kOfferedModes[] =
 {
-    { 640,  480,  32 },
-    { 800,  600,  32 },
-    { 1024, 768,  32 },
-    { 1280, 960,  32 },
+    { 640,  480 }, { 800,  600 }, { 1024, 768 }, { 1152, 864 }, { 1280, 960 },
+    { 1400, 1050 }, { 1600, 1200 },
+    { 1280, 800 }, { 1440, 900 }, { 1680, 1050 }, { 1920, 1200 }, { 2560, 1600 },
+    { 1280, 720 }, { 1366, 768 }, { 1600, 900 }, { 1920, 1080 }, { 2560, 1440 },
 };
 static const int kNumOfferedModes = (int)(sizeof(kOfferedModes) / sizeof(kOfferedModes[0]));
 
 #define NULLRENDER_NAME "nullrender"
+
+// The name every mode carries, and the one GetRenderMode reports, so the
+// Display screen finds the current mode in its list (IsRendererEqual compares
+// the names too). Shown as "Renderer: [Metal - macOS]".
+// ⚠️ WHO DRAWS THE 3D, not whether the compositor runs (HANDOVER 5dx): the
+// GPU game camera is installed on both Metal paths, compositor and readback,
+// and the label said "Software" on the second although Metal drew every
+// frame. Asked when a mode is read, so the list and the current mode agree.
+static const char* LTMode_RendererName()
+{
+    return (LTScene_GpuCameraActive() || LTComp_Active()) ? "Metal" : "Software";
+}
+static void LTMode_SetNames(RMode& m)
+{
+    snprintf(m.m_RenderDLL,    sizeof(m.m_RenderDLL),    "%s", LTMode_RendererName());
+    snprintf(m.m_InternalName, sizeof(m.m_InternalName), "%s", LTMode_RendererName());
+    snprintf(m.m_Description,  sizeof(m.m_Description),  "macOS");
+}
 
 
 CLTNullRender::CLTNullRender()
@@ -159,11 +187,73 @@ static bool LTScreen_Wanted(uint32* pW, uint32* pH)
     return true;
 }
 
+// ⚠️ A SIZE CHOSEN IN THE GAME IS THE LAUNCHER'S NEXT "Window size" (5dw).
+// The launcher passes its size as LT_SCREEN at every start, and that wins at
+// startup -- so without this the choice would last one session. Written to
+// the launcher's own preferences (com.schonder.nolf.launcher width/height,
+// its @AppStorage), and only when this binary runs from inside the launcher
+// (Contents/Helpers): a headless test or play.sh never touches them.
+// LT_NOLAUNCHERSIZE=1 = not written (says so).
+static void LTMode_RememberForLauncher(uint32 w, uint32 h)
+{
+    if (getenv("LT_NOLAUNCHERSIZE"))
+    {
+        printf("[LTRENDER] LT_NOLAUNCHERSIZE=1 -- the launcher's window size is not updated\n");
+        fflush(stdout);
+        return;
+    }
+    char szExe[2048];
+    uint32_t n = sizeof(szExe);
+    if (_NSGetExecutablePath(szExe, &n) != 0 || !strstr(szExe, ".app/Contents/Helpers/")) return;
+
+    const CFStringRef app = CFSTR("com.schonder.nolf.launcher");
+    int iw = (int)w, ih = (int)h;
+    CFNumberRef nw = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &iw);
+    CFNumberRef nh = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &ih);
+    if (nw && nh)
+    {
+        CFPreferencesSetAppValue(CFSTR("width"), nw, app);
+        CFPreferencesSetAppValue(CFSTR("height"), nh, app);
+        CFPreferencesAppSynchronize(app);
+        printf("[LTRENDER] the launcher will start at %ux%u next time\n", w, h);
+        fflush(stdout);
+    }
+    if (nw) CFRelease(nw);
+    if (nh) CFRelease(nh);
+}
+
 bool CLTNullRender::SetMode(const RMode* pMode)
 {
     if (!pMode) return false;
 
     RMode want = *pMode;
+    // ⚠️ A MODE SET AT STARTUP IS THE LAUNCH SIZE, A LATER ONE IS THE
+    // PLAYER'S CHOICE (HANDOVER 5dw). The host sets a boot mode and the game
+    // sets its own during OnEngineInitialized, from its saved screenwidth /
+    // screenheight -- 640x480 in the shipped config -- and those keep being
+    // overridden by LT_SCREEN (the launcher's size) or the screen's shape.
+    // Once the host says startup is over, a call is Options > Display (FolderDisplay::
+    // SetRenderer), and it used to be overridden the same way, so picking a
+    // resolution did nothing. Now it is honoured: the surface takes the size,
+    // the window's content follows (not in full screen), the game re-lays its
+    // interface out (it calls ScreenDimsChanged itself), and the launcher
+    // remembers it for the next start. LT_MODEKEEP=1 = old (says so).
+    static const bool s_bKeep = []() {
+        const bool b = (getenv("LT_MODEKEEP") != 0);
+        if (b) { printf("[LTRENDER] LT_MODEKEEP=1 -- a resolution chosen in the game is overridden (old)\n"); fflush(stdout); }
+        return b; }();
+    const bool bChosen = m_bStartupDone && !s_bKeep
+                      && want.m_Width >= 320 && want.m_Height >= 240
+                      && want.m_Width <= 8192 && want.m_Height <= 8192;
+    if (bChosen)
+    {
+        printf("[LTRENDER] the game chose %ux%u (Options > Display)\n", want.m_Width, want.m_Height);
+        fflush(stdout);
+        if (LTWindow_Wanted() && !LTWindow_IsFullScreen())
+            LTWindow_SetContentSize((int)want.m_Width, (int)want.m_Height);
+        LTMode_RememberForLauncher(want.m_Width, want.m_Height);
+    }
+    else
     {
         uint32 w = 0, h = 0;
         LTScreen_Wanted(&w, &h);
@@ -185,6 +275,11 @@ bool CLTNullRender::SetMode(const RMode* pMode)
             want.m_Width = w; want.m_Height = h;
         }
     }
+    // Our renderer's names and 32 bits, whatever the game passed (its saved
+    // RenderDll / CardDesc name a Windows renderer).
+    LTMode_SetNames(want);
+    want.m_BitDepth = 32;
+    want.m_bHardware = LTTRUE;
     pMode = &want;
 
     // ⚠️ REFUSE A DEGENERATE MODE. Accepting anything at all would look more
@@ -225,6 +320,7 @@ bool CLTNullRender::GetMode(RMode* pMode) const
     if (!pMode || !m_bModeSet) return false;
     *pMode = m_Mode;
     pMode->m_pNext = 0;
+    LTMode_SetNames(*pMode);    // the renderer as it is NOW (5dx)
     return true;
 }
 
@@ -233,19 +329,32 @@ RMode* CLTNullRender::AllocModeList()
     RMode* pHead = 0;
     RMode* pTail = 0;
 
+    // The sizes: the table, the screen's own, the one in use -- unique, and
+    // no larger than the main screen when there is one.
+    std::vector<std::pair<uint32, uint32> > sizes;
     for (int i = 0; i < kNumOfferedModes; ++i)
+        sizes.push_back(std::make_pair(kOfferedModes[i].w, kOfferedModes[i].h));
+    int sw = 0, sh = 0;
+    const bool bScreen = LTWindow_ScreenSize(&sw, &sh);
+    if (bScreen) sizes.push_back(std::make_pair((uint32)sw, (uint32)sh));
+    if (m_bModeSet) sizes.push_back(std::make_pair(m_Mode.m_Width, m_Mode.m_Height));
+
+    std::set<std::pair<uint32, uint32> > seen;
+    for (size_t i = 0; i < sizes.size(); ++i)
     {
+        const uint32 w = sizes[i].first, h = sizes[i].second;
+        const bool bCurrent = m_bModeSet && w == m_Mode.m_Width && h == m_Mode.m_Height;
+        if (!bCurrent && bScreen && (w > (uint32)sw || h > (uint32)sh)) continue;
+        if (!seen.insert(sizes[i]).second) continue;
+
         RMode* p = (RMode*)calloc(1, sizeof(RMode));
         if (!p) break;
 
         p->m_bHardware = LTTRUE;
-        p->m_Width     = kOfferedModes[i].w;
-        p->m_Height    = kOfferedModes[i].h;
-        p->m_BitDepth  = kOfferedModes[i].d;
-        strcpy(p->m_RenderDLL,    NULLRENDER_NAME);
-        strcpy(p->m_InternalName, NULLRENDER_NAME);
-        snprintf(p->m_Description, sizeof(p->m_Description),
-                 "Null renderer %ux%u", p->m_Width, p->m_Height);
+        p->m_Width     = w;
+        p->m_Height    = h;
+        p->m_BitDepth  = 32;
+        LTMode_SetNames(*p);
         p->m_pNext = 0;
 
         if (pTail) pTail->m_pNext = p; else pHead = p;
@@ -876,6 +985,19 @@ static LTRESULT NR_WriteConfigFile(char* pFilename)
     return LT_ERROR;
 }
 
+// ⚠️ "RESTORE DEFAULTS" READS defctrls.cfg THROUGH THIS (HANDOVER 5dv) --
+// FolderControls.cpp:275: read once to see it is there, clear every binding,
+// read again, save. It was the generic stub (LT_ERROR), so the button did
+// nothing. Read-only through the file manager, like the install's
+// autoexec.cfg at start (LTBind_LoadConfig); the name only, from the game's
+// own trees. LT_ERROR when the file is missing or empty, as the game tests.
+static LTRESULT NR_ReadConfigFile(char* pFilename)
+{
+    LTIMPL("ILTClient::ReadConfigFile");
+    if (!pFilename || !pFilename[0]) return LT_ERROR;
+    return LTBind_LoadConfig(pFilename) > 0 ? LT_OK : LT_ERROR;
+}
+
 static LTRESULT NR_ShutdownRender(uint32 flags)
 {
     LTIMPL("ILTClient::ShutdownRender");
@@ -1201,6 +1323,12 @@ static LTRESULT NR_ScaleSurfaceToSurface(HSURFACE hDest, HSURFACE hSrc,
     LT2DRect dr, sr;
     if (pDestRect) dr = ToRect(pDestRect);
     if (pSrcRect)  sr = ToRect(pSrcRect);
+    // An opaque picture over the whole screen: the splash or demo screen,
+    // which the compositor shows whole, not as the menu box (HANDOVER 5dy).
+    if (hDest == LTGetNullRender()->GetScreenSurface() &&
+        (!pDestRect || (dr.left <= 0 && dr.top <= 0 &&
+                        dr.right >= d.m_Width && dr.bottom >= d.m_Height)))
+        LTComp_NoteFullScreen2D();
     LT2D::Scale(d, pDestRect ? &dr : 0, s, pSrcRect ? &sr : 0,
                 false, 0, SrcAlpha(hSrc));
     LT2DSurf d2 = LTGetNullRender()->GetTwinView(hDest);
@@ -1334,6 +1462,7 @@ void LTNullRender_Wire(ILTClient* p)
     p->RelinquishRenderModes = NR_RelinquishRenderModes;
     p->ShutdownRender        = NR_ShutdownRender;
     p->WriteConfigFile       = NR_WriteConfigFile;
+    p->ReadConfigFile        = NR_ReadConfigFile;
 
     p->FlipScreen            = NR_FlipScreen;
     p->ClearScreen           = NR_ClearScreen;

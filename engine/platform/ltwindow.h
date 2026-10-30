@@ -85,4 +85,12 @@ void LTWindow_SetPointMapper(LTWindowPointMapFn fn);
 // LT_WINRESIZE test switch: a headless harness cannot drag a window corner.
 void LTWindow_SetContentSize(int nWidth, int nHeight);
 
+// The main screen's full size in POINTS, false when there is none -- the
+// largest size Options > Display offers (HANDOVER 5dw).
+bool LTWindow_ScreenSize(int* pW, int* pH);
+
+// True while the window is in macOS full screen: a resolution chosen there
+// changes the game's surface, not the window.
+bool LTWindow_IsFullScreen();
+
 #endif // __LT_WINDOW_H__

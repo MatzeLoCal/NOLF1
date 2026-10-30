@@ -481,7 +481,9 @@ void LTInput_ClickTick(int nFrame)
     static const char* pWant = getenv("LT_TEST_CLICK");
     if (!pWant || !pWant[0]) return;
 
+    // "frame[:button],..." -- button 0 (left, the default), 1 right, 2 middle.
     static int  nAt[32];
+    static int  nBtn[32];
     static int  nCount = -1;
     static int  nNext  = 0;
     if (nCount < 0)
@@ -491,24 +493,29 @@ void LTInput_ClickTick(int nFrame)
         {
             while (*p == ' ' || *p == ',') ++p;
             if (!*p) break;
-            nAt[nCount++] = atoi(p);
-            while (*p && *p != ',') ++p;
+            nAt[nCount] = atoi(p);
+            nBtn[nCount] = 0;
+            while (*p && *p != ',' && *p != ':') ++p;
+            if (*p == ':') { ++p; nBtn[nCount] = atoi(p); while (*p && *p != ',') ++p; }
+            ++nCount;
         }
         fprintf(stderr, "[LTCLICK] %d scripted click(s)\n", nCount);
     }
 
     if (nNext >= nCount || nFrame < nAt[nNext]) return;
+    const int nButton = nBtn[nNext];
     ++nNext;
 
     LTInputEvent ev;
     memset(&ev, 0, sizeof(ev));
-    ev.m_Kind = LTInputEvent::kMouseDown; ev.m_Button = 0;
+    ev.m_Kind = LTInputEvent::kMouseDown; ev.m_Button = nButton;
     ev.m_X = 320; ev.m_Y = 240;
     LTInput_Push(ev);
     ev.m_Kind = LTInputEvent::kMouseUp;
     LTInput_Push(ev);
 
-    fprintf(stderr, "[LTCLICK] frame %d: left click\n", nFrame);
+    fprintf(stderr, "[LTCLICK] frame %d: %s click\n", nFrame,
+            nButton == 1 ? "right" : (nButton == 2 ? "middle" : "left"));
 }
 
 

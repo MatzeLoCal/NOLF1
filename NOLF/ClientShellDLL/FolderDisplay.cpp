@@ -247,6 +247,13 @@ void CFolderDisplay::BuildRendererArray()
 	{
 		if (pCurrentMode->m_Width >= 640 && pCurrentMode->m_Height >= 480)
 		{
+			// PORT-BEHAVIOUR: widescreen sizes are offered. The original
+			// skipped every mode whose width was not height * 4 / 3, so a Mac's
+			// 16:10 and 16:9 sizes could never be chosen here -- and a session
+			// started at one of them came back from this screen at 640x480.
+			// Authorised by the project owner, 2026-10-30. Deliberately not
+			// `// PORT:`. See DEVIATIONS.md E-013.
+#if 0
 			// disallow non-standard aspect ratios
 			uint32 testWidth = (pCurrentMode->m_Height * 4 / 3);
 			if (pCurrentMode->m_Width != testWidth)
@@ -256,6 +263,7 @@ void CFolderDisplay::BuildRendererArray()
 				pCurrentMode=pCurrentMode->m_pNext;
 				continue;
 			}
+#endif
 
 			// Get the index for this renderer
 			int nRenderIndex=GetRendererIndex(pCurrentMode);

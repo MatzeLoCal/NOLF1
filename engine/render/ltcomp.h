@@ -87,6 +87,11 @@ bool LTComp_FirstCameraThisFrame();
 void LTComp_NoteObjects();
 bool LTComp_FirstSceneThisFrame();
 
+// The game scaled a picture over the WHOLE screen surface this frame -- the
+// splash and demo screens (HANDOVER 5dy) -- so this frame shows the whole
+// surface, not the menu box.
+void LTComp_NoteFullScreen2D();
+
 // The output rectangle (x, y, w, h) a RenderObjects camera's surface
 // rectangle lands on, under whichever mapping this frame will present with.
 void LTComp_ObjectsRect(int nSurfW, int nSurfH, const int* pSurfRect4, int* pOutRect4);

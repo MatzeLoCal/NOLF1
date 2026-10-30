@@ -20,6 +20,7 @@
 namespace
 {
     const unsigned int kWIF_VISBSP  = (1u << 5);
+    const unsigned int kWIF_MOVEABLE = (1u << 1);   // a brush world model (de_world.h)
     const unsigned int kSURF_SOLID  = (1u << 0);
     const unsigned int kSURF_SKY    = (1u << 4);
 
@@ -101,6 +102,7 @@ void CLTWorldCollide::Build(const CLTWorld& world)
 {
     m_Tris.clear();
     m_TriPoly.clear();
+    m_TriFront.clear();
     m_ModelOff.clear();
     m_nModelsOff = 0;
     m_Cells.clear();
@@ -155,6 +157,7 @@ void CLTWorldCollide::Build(const CLTWorld& world)
                 if (!bOK) continue;
 
                 m_TriPoly.push_back(LTWorldPolyId((unsigned)i, (unsigned)q));
+                m_TriFront.push_back((M.m_nInfoFlags & kWIF_MOVEABLE) ? 1 : 0);
                 for (int v = 0; v < 3; ++v)
                 {
                     const float* p = M.m_Points[idx[v]].m_Pos;
@@ -625,13 +628,27 @@ bool CLTWorldCollide::RaySegment(const float* pFrom3, const float* pTo3,
     float nBest[3] = { 0.0f, 1.0f, 0.0f };
     bool  bHit = false;
 
+    // ⚠️ A WORLD MODEL'S TRIANGLES ARE ONE-SIDED HERE TOO (HANDOVER 5dz), as
+    // the doors below and the brush ray test are (5bh): the donor counts a
+    // polygon only when the segment crosses it from the front. Static world
+    // models (TranslucentWorldModel, invisible blockers -- WIF_MOVEABLE) sit
+    // in this set as well, and two-sided they stopped any ray that STARTS
+    // inside one at its far face: M04S02's kitchen props are placed inside
+    // the invisible block under the pan rack, and their floor ray ended at
+    // its underside -- 12 units above the counter. The main world and the
+    // terrain keep the two-sided rule (5bh). LT_TWOSIDEDMODELS=1 = old.
+    static const bool s_bTwoSidedModels = []() {
+        const bool b = (getenv("LT_TWOSIDEDMODELS") != 0);
+        if (b) { printf("[COLLIDE] LT_TWOSIDEDMODELS=1 -- static world-model triangles hit back faces too (old)\n"); fflush(stdout); }
+        return b; }();
     const size_t nTris = m_Tris.size() / 9;
     for (size_t i = 0; i < nTris; ++i)
     {
         if (TriOff(i)) continue;
         const float* v = &m_Tris[i * 9];
         float t, n[3];
-        if (SegTri(pFrom3, d, fBest, v, v+3, v+6, &t, n) && t < fBest)
+        const bool bFront = !s_bTwoSidedModels && i < m_TriFront.size() && m_TriFront[i];
+        if (SegTri(pFrom3, d, fBest, v, v+3, v+6, &t, n, bFront) && t < fBest)
         { fBest = t; for (int k=0;k<3;++k) nBest[k]=n[k]; bHit = true;
           nBestPoly = (i < m_TriPoly.size()) ? m_TriPoly[i] : 0; }
     }

@@ -27,6 +27,7 @@ namespace
     bool         g_bCamThisFrame = false;
     unsigned int g_nObjFrame    = 0;        // the last frame RenderObjects drew in (5ce)
     bool         g_bObjThisFrame = false;
+    bool         g_bFullThisFrame = false;  // a picture scaled over the whole surface (5dy)
 
     // The mapping last presented -- what the mouse is inverted through.
     bool      g_bHaveMap = false;
@@ -130,7 +131,14 @@ bool LTComp_Wanted()
         // A window: the game (the server host is on -- walk mode has neither
         // and keeps its own Metal path). Headless: asked for by name only, so
         // no test script changes what it measures.
-        if (bWindow) b = bMetal && getenv("LT_SERVER") != 0;
+        // ⚠️ "THE SERVER IS ON" IS THE ENGINE'S OWN RULE, `LT_NOSERVER` unset
+        // (LTServerHost_Enabled), NOT `LT_SERVER` set (HANDOVER 5dx). The
+        // server has been on by default for weeks and play.sh still exports
+        // LT_SERVER=1, so the compositor ran there -- but the launcher never
+        // sets it, and every game started from the launcher drew its 3D
+        // offscreen and read it back: no native-resolution 3D, no zoomed menu
+        // box. The viewer (walk mode) sets LT_NOSERVER and stays off.
+        if (bWindow) b = bMetal && getenv("LT_NOSERVER") == 0;
         else         b = bMetal && EnvOn(pComp);
     }
     s = b ? 1 : 0;
@@ -215,6 +223,8 @@ void LTComp_NoteObjects()
 
 bool LTComp_FirstSceneThisFrame() { return !g_bCamThisFrame && !g_bObjThisFrame; }
 
+void LTComp_NoteFullScreen2D() { g_bFullThisFrame = true; }
+
 void LTComp_ObjectsRect(int nSurfW, int nSurfH, const int* pSurfRect4, int* pOutRect4)
 {
     // The mapping CurrentMap will present with: in-game, the camera's; in a
@@ -259,7 +269,18 @@ LTCompMap LTComp_CurrentMap(int nSurfW, int nSurfH)
         const bool b = getenv("LT_NOMENUZOOM") != 0;
         if (b) { printf("[COMP] LT_NOMENUZOOM=1 -- menus shown unzoomed\n"); fflush(stdout); }
         return b; }();
-    if (!s_bNoZoom && nSurfW > 640 && nSurfH >= 480)
+    // ⚠️ EXCEPT A PICTURE THE GAME STRETCHES OVER THE WHOLE SCREEN (HANDOVER
+    // 5dy). UpdateSplashScreenState and UpdateDemoScreenState scale their
+    // .pcx to (0, 0, screen w, screen h) -- not into the box -- so zooming the
+    // box showed the middle 60% of the splash, logo cut off, at any size but
+    // 640x480. Only THIS frame: the first menu frame after the splash is
+    // zoomed again. LT_SPLASHBOX=1 = old (says so).
+    static const bool s_bSplashBox = []() {
+        const bool b = getenv("LT_SPLASHBOX") != 0;
+        if (b) { printf("[COMP] LT_SPLASHBOX=1 -- full-screen pictures zoomed into the menu box (old)\n"); fflush(stdout); }
+        return b; }();
+    const bool bFull = g_bFullThisFrame && !s_bSplashBox;
+    if (!s_bNoZoom && !bFull && nSurfW > 640 && nSurfH >= 480)
     {
         Fit((float)((nSurfW - 640) / 2), (float)((nSurfH - 480) / 2), 640.0f, 480.0f, ow, oh, m);
         Widen(m, nSurfW, nSurfH, ow, oh);
@@ -295,6 +316,7 @@ void LTComp_FrameEnd()
     ++g_nFrame;
     g_bCamThisFrame = false;
     g_bObjThisFrame = false;
+    g_bFullThisFrame = false;
 }
 
 
