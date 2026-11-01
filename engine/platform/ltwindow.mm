@@ -17,7 +17,9 @@
 #include "ltinput.h"
 
 #import <Cocoa/Cocoa.h>
+#import <QuartzCore/QuartzCore.h>
 
+#include <atomic>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -690,6 +692,120 @@ void LTWindow_SetContentSize(int nWidth, int nHeight)
 }
 
 
+// ----------------------------------------------------------------------- //
+// Pacing by the display (HANDOVER 5ed) -- see ltwindow.h.
+// ----------------------------------------------------------------------- //
+
+@interface LTRefreshTicker : NSObject
+- (void)tick:(CADisplayLink*)link;
+@end
+
+static dispatch_semaphore_t                 g_semTick = nil;
+static std::atomic<unsigned long long>      g_nTicks(0);
+static std::atomic<double>                  g_fTickPeriod(0.0);
+static unsigned long long                   g_nTickSeen = 0;
+static CADisplayLink*                       g_pLink = nil;
+static LTRefreshTicker*                     g_pTicker = nil;
+static NSThread*                            g_pTickThread = nil;
+static bool                                 g_bTickTried = false;
+
+@implementation LTRefreshTicker
+- (void)tick:(CADisplayLink*)link
+{
+    const double d = [link targetTimestamp] - [link timestamp];
+    if (d > 0.0) g_fTickPeriod.store(d);
+    g_nTicks.fetch_add(1);
+    dispatch_semaphore_signal(g_semTick);
+}
+@end
+
+static bool LTWindow_StartTicker()
+{
+    if (g_bTickTried) return g_pLink != nil;
+    g_bTickTried = true;
+    if (!g_bOpen || !g_pView) return false;
+
+    @autoreleasepool
+    {
+        g_semTick = dispatch_semaphore_create(0);
+
+        // ⚠️ ITS OWN RUN LOOP, kept alive by a port: the link is a source on
+        // it, and the thread does nothing but run it.
+        dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+        __block NSRunLoop* loop = nil;
+        g_pTickThread = [[NSThread alloc] initWithBlock:^{
+            @autoreleasepool
+            {
+                loop = [NSRunLoop currentRunLoop];
+                [loop addPort:[NSMachPort port] forMode:NSDefaultRunLoopMode];
+                dispatch_semaphore_signal(ready);
+            }
+            for (;;)
+            {
+                @autoreleasepool
+                {
+                    [loop runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]];
+                }
+            }
+        }];
+        [g_pTickThread setName:@"NOLF display refresh"];
+        [g_pTickThread setQualityOfService:NSQualityOfServiceUserInteractive];
+        [g_pTickThread start];
+        dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+
+        // The VIEW's link follows the window from screen to screen.
+        g_pTicker = [[LTRefreshTicker alloc] init];
+        g_pLink = [g_pView displayLinkWithTarget:g_pTicker selector:@selector(tick:)];
+        if (!g_pLink)
+        {
+            fprintf(stderr, "[WINDOW] no display link -- the loop paces itself at 60 Hz\n");
+            return false;
+        }
+
+        // The screen's fastest rate (120 on ProMotion), unless LT_MAXFPS caps it.
+        NSScreen* sc = [g_pWindow screen] ? [g_pWindow screen] : [NSScreen mainScreen];
+        float fMax = sc ? (float)[sc maximumFramesPerSecond] : 60.0f;
+        if (fMax <= 0.0f) fMax = 60.0f;
+        if (const char* p = getenv("LT_MAXFPS"))
+        {
+            const float c = (float)atof(p);
+            if (c >= 10.0f && c < fMax) fMax = c;
+        }
+        [g_pLink setPreferredFrameRateRange:CAFrameRateRangeMake(fMax < 30.0f ? fMax : 30.0f, fMax, fMax)];
+        [g_pLink addToRunLoop:loop forMode:NSDefaultRunLoopMode];
+        printf("[WINDOW] paced by the display: up to %.0f Hz (CADisplayLink on its own thread)%s\n",
+               fMax, getenv("LT_MAXFPS") ? ", LT_MAXFPS" : "");
+        fflush(stdout);
+    }
+    return true;
+}
+
+bool LTWindow_WaitForRefresh()
+{
+    if (!LTWindow_StartTicker()) return false;
+
+    unsigned long long n = g_nTicks.load();
+    if (n == g_nTickSeen)
+    {
+        // Forget wake-ups for ticks already counted, then wait for the next --
+        // but not forever: a hidden or minimised window's link stops.
+        while (dispatch_semaphore_wait(g_semTick, DISPATCH_TIME_NOW) == 0) {}
+        n = g_nTicks.load();
+        if (n == g_nTickSeen)
+        {
+            if (dispatch_semaphore_wait(g_semTick, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC)) != 0)
+                return false;
+            n = g_nTicks.load();
+        }
+    }
+    // A refresh passed while the frame ran: start now (no half rate).
+    g_nTickSeen = n;
+    return true;
+}
+
+double LTWindow_RefreshInterval() { return g_fTickPeriod.load(); }
+
+
 void LTWindow_Close()
 {
     // ⚠️ FIRST, before anything can fail below. A hidden, detached cursor that
@@ -697,6 +813,8 @@ void LTWindow_Close()
     LTWindow_SetMouseLook(false);
 
     if (!g_bOpen) return;
+
+    if (g_pLink) { [g_pLink invalidate]; g_pLink = nil; }
 
     @autoreleasepool
     {

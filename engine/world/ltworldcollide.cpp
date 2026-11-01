@@ -12,6 +12,7 @@
 #include "ltworldcollide.h"
 #include "ltworld.h"
 
+#include <algorithm>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -82,9 +83,11 @@ namespace
 
 
 CLTWorldCollide::CLTWorldCollide()
-    : m_CellSize(256.0f), m_bBuilt(false)
+    : m_nSerial(0), m_CellSize(256.0f), m_bBuilt(false)
 {
     m_Min[0] = m_Min[1] = m_Min[2] = 0.0f;
+    m_TriMin[0] = m_TriMin[1] = m_TriMin[2] = 0.0f;
+    m_TriMax[0] = m_TriMax[1] = m_TriMax[2] = 0.0f;
     m_Dim[0] = m_Dim[1] = m_Dim[2] = 0;
 }
 
@@ -173,6 +176,10 @@ void CLTWorldCollide::Build(const CLTWorld& world)
     }
 
     if (m_Tris.empty()) return;
+
+    for (int k = 0; k < 3; ++k) { m_TriMin[k] = mn[k]; m_TriMax[k] = mx[k]; }
+    static unsigned int s_nBuilds = 0;
+    m_nSerial = ++s_nBuilds;
 
     // ---- the grid -------------------------------------------------------- //
     //
@@ -293,14 +300,6 @@ bool CLTWorldCollide::Contact(const float* pC3, float fRadius, int nTri,
 
     *pDepth = fRadius - len;
     return true;
-}
-
-
-void CLTWorldCollide::SetDynamic(const std::vector<float>& tris)
-{
-    m_Dyn = tris;
-    m_DynOwner.clear();         // owners belong to one list; set them after
-    m_DynPoly.clear();
 }
 
 
@@ -544,11 +543,13 @@ void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
 // ----------------------------------------------------------------------- //
 // ⚠️ SEGMENT VS TRIANGLE SOUP. Möller-Trumbore per triangle, nearest hit wins.
 //
-// ⚠️ IT WALKS THE WHOLE GRID, not a traversal along the ray. A level is ~9,000
-// triangles and the game casts a handful of rays per frame (one for activate,
-// one per shot), so the honest simple version is affordable and cannot be
-// subtly wrong about which cells a ray crosses. If a future weapon sprays rays
-// this becomes the thing to optimise -- measure before assuming it is.
+// ⚠️ IT WALKS THE CELLS THE SEGMENT CROSSES (5ee). It used to test every
+// triangle -- "a handful of rays per frame" -- but the game casts far more:
+// the player's two per frame, every AI's sight and floor probes, every shot.
+// A level is up to ~27,000 triangles and the whole-soup walk was ~5% of a
+// frame with only the player's rays. See RayStatic for why the walk cannot
+// miss a triangle the old loop would have found. LT_RAYBRUTE=1 = the old
+// loop; LT_RAYGRIDDIFF=1 runs both and lists every disagreement.
 //
 // ⚠️ Dynamic triangles (doors) are tested too: shooting through a closed door
 // because the collision only knew about static geometry would be a bug the
@@ -557,6 +558,62 @@ void CLTWorldCollide::MoveSphere(float* pPos3, const float* pDelta3,
 
 namespace
 {
+    // ⚠️ Door triangles one-sided (5bh); see RaySegment. Read once.
+    bool TwoSidedDoors()
+    {
+        static const bool s_b = []() {
+            const bool b = (getenv("LT_TWOSIDEDBRUSH") != 0);
+            if (b) { printf("[COLLIDE] LT_TWOSIDEDBRUSH=1 -- door triangles hit back faces too\n"); fflush(stdout); }
+            return b; }();
+        return s_b;
+    }
+
+    // Door triangles are boxed in runs of this many: a door's triangles are
+    // consecutive in the list, so a run's box is tight.
+    const size_t kDynBlock = 8;
+    const float  kRayPad   = 4.0f;
+
+    void BlockBoxes(const std::vector<float>& tris, std::vector<float>& boxes)
+    {
+        const size_t n = tris.size() / 9;
+        boxes.assign(((n + kDynBlock - 1) / kDynBlock) * 6, 0.0f);
+        for (size_t b = 0; b * kDynBlock < n; ++b)
+        {
+            float* bx = &boxes[b * 6];
+            bx[0] = bx[1] = bx[2] = 1e30f; bx[3] = bx[4] = bx[5] = -1e30f;
+            const size_t e = (b + 1) * kDynBlock < n ? (b + 1) * kDynBlock : n;
+            for (size_t i = b * kDynBlock * 9; i < e * 9; i += 3)
+                for (int k = 0; k < 3; ++k)
+                {
+                    if (tris[i+k] < bx[k])   bx[k]   = tris[i+k];
+                    if (tris[i+k] > bx[3+k]) bx[3+k] = tris[i+k];
+                }
+        }
+    }
+
+    // Can the segment o + d*t, 0 <= t <= fLen, come within kRayPad of the
+    // box? A hit lies within 1 unit of its triangle (SegTri), so a "no" here
+    // is never a hit missed.
+    bool SegNearBox(const float* o, const float* d, float fLen, const float* bx)
+    {
+        float t0 = 0.0f, t1 = fLen;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float lo = bx[k] - kRayPad, hi = bx[3+k] + kRayPad;
+            if (d[k] == 0.0f)
+            {
+                if (o[k] < lo || o[k] > hi) return false;
+                continue;
+            }
+            float a = (lo - o[k]) / d[k], b = (hi - o[k]) / d[k];
+            if (a > b) { const float f = a; a = b; b = f; }
+            if (a > t0) t0 = a;
+            if (b < t1) t1 = b;
+            if (t0 > t1) return false;
+        }
+        return true;
+    }
+
     // Returns true and fills t/normal when the segment crosses the triangle.
     // bFrontOnly: count the triangle only when the ray ENTERS through its
     // front (stored-winding) face -- the donor's rule; see RaySegment.
@@ -574,6 +631,7 @@ namespace
                         d[0]*e2[1]-d[1]*e2[0] };
         const float det = e1[0]*pv[0] + e1[1]*pv[1] + e1[2]*pv[2];
         if (det > -kEps && det < kEps) return false;      // parallel
+
         if (bFrontOnly && det < 0.0f) return false;       // leaving through the back
 
         const float inv = 1.0f / det;
@@ -590,6 +648,32 @@ namespace
         const float t = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
         if (t < 0.0f || t > fLen) return false;
 
+        // ⚠️ A HIT MUST LIE ON ITS TRIANGLE (5ee). A ray lying IN a sloped
+        // triangle's plane leaves rounding of ~1e-7 |e1||e2| in det, far
+        // above kEps, and u, v, t are then noise: M01S01 had a sight line
+        // along a ramp's plane "hit" a triangle of that plane 2,800 units
+        // away, at t = 0. (Axis-aligned planes never show it: there det is
+        // exactly 0.) No threshold on det separates that noise from real
+        // shallow crossings -- over 2M test rays the noise reached 9e-6 and
+        // real crossings went down to 6e-8 -- so the hit point is checked
+        // instead: of 1.34M hits, 99% lay within 0.001 of their triangle,
+        // 724 within 0.01..1, and 137 further off (23 within 10, 114 beyond).
+        // 1 unit is a surface tolerance, not a natural gap. The grid walk
+        // relies on it too: a hit is near its triangle's cells.
+        // LT_RAYOFFTRI=1 = the old acceptance.
+        static const bool s_bOffTri = []() {
+            const bool b = (getenv("LT_RAYOFFTRI") != 0);
+            if (b) { printf("[COLLIDE] LT_RAYOFFTRI=1 -- a ray hit need not lie on its triangle (old)\n"); fflush(stdout); }
+            return b; }();
+        if (!s_bOffTri)
+        {
+            const float p[3] = { o[0]+d[0]*t, o[1]+d[1]*t, o[2]+d[2]*t };
+            float q[3], e[3];
+            ClosestOnTri(p, v0, v1, v2, q);
+            Sub(p, q, e);
+            if (Dot(e, e) > 1.0f) return false;
+        }
+
         *pT = t;
 
         // Geometric normal; the winding is the world's, so it may face either
@@ -604,6 +688,185 @@ namespace
         for (int k = 0; k < 3; ++k) pN[k] = n[k];
         return true;
     }
+}
+
+// ----------------------------------------------------------------------- //
+// ⚠️ THE GRID WALK MUST GIVE THE OLD ANSWER EXACTLY: the same triangle, so
+// the same t, normal and polygon (surface type, impact effect). Two rules:
+//
+// 1. COVERAGE. A triangle is filed in every cell its bounding box touches.
+//    The segment is cut into pieces one cell long; each piece's box, padded
+//    by kRayPad, is turned into cells by the same CellRange, and every
+//    triangle in those cells is tested. A hit point lies on its piece and
+//    within 1 unit of its triangle (SegTri checks it), so with the 4-unit
+//    pad some cell holds both -- CellRange is monotone, clamping included,
+//    which also covers a level larger than the 512-cell cap.
+//
+// 2. ORDER. The old loop kept the FIRST triangle at the nearest t; cells come
+//    in a different order, so a tie (a shared edge, two coplanar polygons)
+//    goes to the lower index explicitly. Pieces are walked until one starts
+//    beyond the best t found so far -- anything nearer lies on an earlier
+//    piece, a tie at that very t on the next one, which is still walked.
+//
+// Each triangle is tested once per ray (stamps). The stamps are per thread,
+// so a ray from another thread can never skip a triangle.
+// ----------------------------------------------------------------------- //
+
+bool CLTWorldCollide::RayStatic(const float* o, const float* d, float fLen, bool bGrid,
+                                float* pBest, float* pNormal3, unsigned int* pPoly) const
+{
+    static const bool s_bTwoSidedModels = []() {
+        const bool b = (getenv("LT_TWOSIDEDMODELS") != 0);
+        if (b) { printf("[COLLIDE] LT_TWOSIDEDMODELS=1 -- static world-model triangles hit back faces too (old)\n"); fflush(stdout); }
+        return b; }();
+
+    float fBest = fLen;
+    size_t nBestTri = (size_t)-1;
+    bool  bHit = false;
+    const size_t nTris = m_Tris.size() / 9;
+
+    auto test = [&](size_t i)
+    {
+        if (TriOff(i)) return;
+        const float* v = &m_Tris[i * 9];
+        float t, n[3];
+        const bool bFront = !s_bTwoSidedModels && i < m_TriFront.size() && m_TriFront[i];
+        if (!SegTri(o, d, fBest, v, v+3, v+6, &t, n, bFront)) return;
+        if (t < fBest || (bHit && t == fBest && i < nBestTri))
+        {
+            fBest = t; nBestTri = i; bHit = true;
+            for (int k = 0; k < 3; ++k) pNormal3[k] = n[k];
+        }
+    };
+
+    if (!bGrid || !m_bBuilt)
+    {
+        for (size_t i = 0; i < nTris; ++i) test(i);
+    }
+    else
+    {
+        // Only the part of the segment inside the triangles' bounds can hit.
+        float t0 = 0.0f, t1 = fLen;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float lo = m_TriMin[k] - kRayPad, hi = m_TriMax[k] + kRayPad;
+            if (d[k] == 0.0f)
+            {
+                if (o[k] < lo || o[k] > hi) return false;
+                continue;
+            }
+            float a = (lo - o[k]) / d[k], b = (hi - o[k]) / d[k];
+            if (a > b) { const float f = a; a = b; b = f; }
+            if (a > t0) t0 = a;
+            if (b < t1) t1 = b;
+            if (t0 > t1) return false;
+        }
+
+        // ⚠️ Triangles only, not cells: a level's grid can run to tens of
+        // millions of cells (M14S02: 39.5M), and a cell met again on the next
+        // piece costs one walk of its list.
+        struct Stamps
+        {
+            const CLTWorldCollide* pOwner = 0;
+            unsigned int nSerial = 0, nRay = 0;
+            std::vector<unsigned int> tri;
+        };
+        thread_local Stamps st;
+        if (st.pOwner != this || st.nSerial != m_nSerial || st.tri.size() != nTris)
+        {
+            st.pOwner = this; st.nSerial = m_nSerial; st.nRay = 0;
+            st.tri.assign(nTris, 0u);
+        }
+        if (++st.nRay == 0)
+        {
+            std::fill(st.tri.begin(), st.tri.end(), 0u);
+            st.nRay = 1;
+        }
+        const unsigned int nRay = st.nRay;
+
+        for (float ta = t0; ta <= t1 && ta <= fBest; )
+        {
+            float tb = ta + m_CellSize;
+            if (tb > t1) tb = t1;
+
+            float bmn[3], bmx[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                const float pa = o[k] + d[k]*ta, pb = o[k] + d[k]*tb;
+                bmn[k] = (pa < pb ? pa : pb) - kRayPad;
+                bmx[k] = (pa < pb ? pb : pa) + kRayPad;
+            }
+            int lo[3], hi[3];
+            CellRange(bmn, bmx, lo, hi);
+            for (int z = lo[2]; z <= hi[2]; ++z)
+                for (int y = lo[1]; y <= hi[1]; ++y)
+                    for (int x = lo[0]; x <= hi[0]; ++x)
+                    {
+                        const std::vector<int>& cl =
+                            m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x];
+                        for (size_t j = 0; j < cl.size(); ++j)
+                        {
+                            const size_t i = (size_t)cl[j];
+                            if (st.tri[i] == nRay) continue;
+                            st.tri[i] = nRay;
+                            test(i);
+                        }
+                    }
+
+            if (tb >= t1) break;
+            ta = tb;
+        }
+    }
+
+    if (!bHit) return false;
+    *pBest = fBest;
+    *pPoly = (nBestTri < m_TriPoly.size()) ? m_TriPoly[nBestTri] : 0;
+    return true;
+}
+
+// ⚠️ THE DOORS, boxed (5ee). Moving brushes cannot live in the grid, and
+// with the static half walking only its cells they were most of a ray's
+// cost: M02S01 hands over 2,820 door triangles every update and every AI
+// ray tested them all. A run of kDynBlock consecutive triangles is skipped
+// when the segment does not pass within kRayPad of its box; the rest are
+// tested in the old order, so a tie still goes to the same triangle.
+bool CLTWorldCollide::RayDynamic(const float* o, const float* d, bool bCull,
+                                 float* pBest, float* pNormal3) const
+{
+    const std::vector<float>& dyn = m_bDynRay ? m_DynRay : m_Dyn;     // DEVIATIONS E-008
+    const std::vector<float>& box = m_bDynRay ? m_DynRayBox : m_DynBox;
+    const size_t nDyn = dyn.size() / 9;
+    const bool bFront = !TwoSidedDoors();
+    if (box.size() != ((nDyn + kDynBlock - 1) / kDynBlock) * 6) bCull = false;
+    bool bWon = false;
+    for (size_t b = 0; b * kDynBlock < nDyn; ++b)
+    {
+        if (bCull && !SegNearBox(o, d, *pBest, &box[b * 6])) continue;
+        const size_t e = (b + 1) * kDynBlock < nDyn ? (b + 1) * kDynBlock : nDyn;
+        for (size_t i = b * kDynBlock; i < e; ++i)
+        {
+            const float* v = &dyn[i * 9];
+            float t, n[3];
+            if (SegTri(o, d, *pBest, v, v+3, v+6, &t, n, bFront) && t < *pBest)
+            { *pBest = t; for (int k=0;k<3;++k) pNormal3[k]=n[k]; bWon = true; }
+        }
+    }
+    return bWon;
+}
+
+void CLTWorldCollide::SetDynamic(const std::vector<float>& tris)
+{
+    m_Dyn = tris;
+    m_DynOwner.clear();         // owners belong to one list; set them after
+    m_DynPoly.clear();
+    BlockBoxes(m_Dyn, m_DynBox);
+}
+
+void CLTWorldCollide::SetDynamicRay(const std::vector<float>& tris)
+{
+    m_DynRay = tris;
+    m_bDynRay = true;
+    BlockBoxes(m_DynRay, m_DynRayBox);
 }
 
 bool CLTWorldCollide::RaySegment(const float* pFrom3, const float* pTo3,
@@ -637,20 +900,20 @@ bool CLTWorldCollide::RaySegment(const float* pFrom3, const float* pTo3,
     // the invisible block under the pan rack, and their floor ray ended at
     // its underside -- 12 units above the counter. The main world and the
     // terrain keep the two-sided rule (5bh). LT_TWOSIDEDMODELS=1 = old.
-    static const bool s_bTwoSidedModels = []() {
-        const bool b = (getenv("LT_TWOSIDEDMODELS") != 0);
-        if (b) { printf("[COLLIDE] LT_TWOSIDEDMODELS=1 -- static world-model triangles hit back faces too (old)\n"); fflush(stdout); }
+    // (The rule itself is applied in RayStatic.)
+    static const bool s_bBrute = []() {
+        const bool b = (getenv("LT_RAYBRUTE") != 0);
+        if (b) { printf("[COLLIDE] LT_RAYBRUTE=1 -- world rays test every static and door triangle (old)\n"); fflush(stdout); }
         return b; }();
-    const size_t nTris = m_Tris.size() / 9;
-    for (size_t i = 0; i < nTris; ++i)
+    static const bool s_bGridDiff = []() {
+        const bool b = (getenv("LT_RAYGRIDDIFF") != 0);
+        if (b) { printf("[COLLIDE] LT_RAYGRIDDIFF=1 -- every world ray asked both ways, disagreements listed\n"); fflush(stdout); }
+        return b; }();
     {
-        if (TriOff(i)) continue;
-        const float* v = &m_Tris[i * 9];
-        float t, n[3];
-        const bool bFront = !s_bTwoSidedModels && i < m_TriFront.size() && m_TriFront[i];
-        if (SegTri(pFrom3, d, fBest, v, v+3, v+6, &t, n, bFront) && t < fBest)
-        { fBest = t; for (int k=0;k<3;++k) nBest[k]=n[k]; bHit = true;
-          nBestPoly = (i < m_TriPoly.size()) ? m_TriPoly[i] : 0; }
+        float t = 0.0f, n[3] = { 0.0f, 1.0f, 0.0f };
+        unsigned int nPoly = 0;
+        if (RayStatic(pFrom3, d, fLen, !s_bBrute, &t, n, &nPoly))
+        { fBest = t; for (int k=0;k<3;++k) nBest[k]=n[k]; bHit = true; nBestPoly = nPoly; }
     }
 
     // ⚠️ DOOR TRIANGLES ARE ONE-SIDED, as the brush ray test is (server/
@@ -659,21 +922,38 @@ bool CLTWorldCollide::RaySegment(const float* pFrom3, const float* pTo3,
     // either: M01S01 `blocker1` (an invisible-surface Door) -- the game
     // restarts the bullet 1 unit inside it and the far face, reported as
     // "the world", ended the shot (HANDOVER 5bh). Static world triangles keep
-    // the two-sided rule. LT_TWOSIDEDBRUSH=1 = the old rule.
-    static const bool s_bTwoSided = []() {
-        const bool b = (getenv("LT_TWOSIDEDBRUSH") != 0);
-        if (b) { printf("[COLLIDE] LT_TWOSIDEDBRUSH=1 -- door triangles hit back faces too\n"); fflush(stdout); }
-        return b; }();
+    // the two-sided rule. LT_TWOSIDEDBRUSH=1 = the old rule (TwoSidedDoors).
+    const bool  s_bTwoSided = TwoSidedDoors();
     const float fStatic = fBest;        // for LT_RAYDIFF below
     const bool  bStatic = bHit;
     const std::vector<float>& dyn = m_bDynRay ? m_DynRay : m_Dyn;     // DEVIATIONS E-008
     const size_t nDyn = dyn.size() / 9;
-    for (size_t i = 0; i < nDyn; ++i)
+    if (RayDynamic(pFrom3, d, !s_bBrute, &fBest, nBest)) { bHit = true; nBestPoly = 0; }
+
+    // LT_RAYGRIDDIFF=1 -- the whole answer (world and doors) again the other
+    // way; any difference in hit, t, normal or polygon is listed (5ee).
+    if (s_bGridDiff)
     {
-        const float* v = &dyn[i * 9];
-        float t, n[3];
-        if (SegTri(pFrom3, d, fBest, v, v+3, v+6, &t, n, !s_bTwoSided) && t < fBest)
-        { fBest = t; for (int k=0;k<3;++k) nBest[k]=n[k]; bHit = true; nBestPoly = 0; }
+        static unsigned s_nAsked = 0, s_nDiff = 0;
+        ++s_nAsked;
+        float t2 = fLen, n2[3] = { 0.0f, 1.0f, 0.0f };
+        unsigned int nPoly2 = 0;
+        bool bHit2 = RayStatic(pFrom3, d, fLen, s_bBrute, &t2, n2, &nPoly2);
+        if (!bHit2) t2 = fLen;
+        if (RayDynamic(pFrom3, d, s_bBrute, &t2, n2)) { bHit2 = true; nPoly2 = 0; }
+        const bool bSame = (bHit2 == bHit) &&
+            (!bHit || (memcmp(&t2, &fBest, sizeof(float)) == 0 && nPoly2 == nBestPoly &&
+                       memcmp(n2, nBest, sizeof(n2)) == 0));
+        if (!bSame && (++s_nDiff <= 40 || (s_nDiff % 500) == 0))
+        {
+            printf("[RAYGRID] #%u (of %u asked) %.1f-unit ray from (%.2f %.2f %.2f) dir (%.4f %.4f %.4f): %s %s t=%.4f poly %08x, %s %s t=%.4f poly %08x\n",
+                   s_nDiff, s_nAsked, fLen, pFrom3[0], pFrom3[1], pFrom3[2], d[0], d[1], d[2],
+                   s_bBrute ? "brute" : "grid", bHit ? "HIT" : "miss", fBest, nBestPoly,
+                   s_bBrute ? "grid" : "brute", bHit2 ? "HIT" : "miss", t2, nPoly2);
+            fflush(stdout);
+        }
+        if ((s_nAsked % 20000) == 0)
+        { printf("[RAYGRID] %u ray(s) asked, %u disagreement(s), %u door triangle(s) now\n", s_nAsked, s_nDiff, (unsigned)nDyn); fflush(stdout); }
     }
 
     // LT_RAYDIFF=1 -- the whole answer again with the door triangles under

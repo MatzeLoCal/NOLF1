@@ -93,4 +93,16 @@ bool LTWindow_ScreenSize(int* pW, int* pH);
 // changes the game's surface, not the window.
 bool LTWindow_IsFullScreen();
 
+// ⚠️ PACED BY THE DISPLAY (HANDOVER 5ed). Waits until the window's display
+// begins its next refresh -- 60 Hz, or 120 on ProMotion -- through a
+// CADisplayLink ticking on a thread of its own (AppKit runs on the main
+// thread only inside PumpEvents, so a link there would tick only then). A
+// frame that ran past a refresh starts at once instead of waiting a whole
+// period more: no drop to half rate. False, without waiting long, when there
+// is no link or it has stopped ticking (a hidden or minimised window): the
+// caller paces itself then. LT_MAXFPS=<n> caps the link's rate.
+bool LTWindow_WaitForRefresh();
+// The link's refresh period in seconds; 0 before its first tick.
+double LTWindow_RefreshInterval();
+
 #endif // __LT_WINDOW_H__

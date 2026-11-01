@@ -227,6 +227,7 @@ bool            LTServerHost_GetObjectState(void* hObj,
 // ⚠️ An index is only valid within one walk -- SweepDead compacts the list.
 unsigned int    LTServerHost_ObjectCount();
 void*           LTServerHost_ObjectAt(unsigned int i);   // HOBJECT, or null
+void*           LTServerHost_ListedObjectAt(unsigned int i);   // the same, no lookup (5eg)
 // The class and object name of a server handle, for traces ("?" / "").
 const char*     LTServerHost_ClassNameOf(void* hServer);
 const char*     LTServerHost_ObjectNameOf(void* hServer);

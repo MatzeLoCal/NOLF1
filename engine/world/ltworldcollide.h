@@ -66,7 +66,7 @@ public:
     // ⚠️ THE DOOR TRIANGLES RAYS SEE, when that is not all of them (DEVIATIONS
     // E-008: rays pass through the power lines). Contact and ground tests keep
     // SetDynamic's list. Never set (walk mode) = the same list.
-    void            SetDynamicRay(const std::vector<float>& tris) { m_DynRay = tris; m_bDynRay = true; }
+    void            SetDynamicRay(const std::vector<float>& tris);
 
     // ⚠️ A STATIC BRUSH OBJECT THAT IS GONE (5ds). The grid is built once,
     // but a destructible world model (M08S04's vent louvres, shot away) is
@@ -146,6 +146,19 @@ private:
                                int nTris, float* pNormal3, float* pDepth,
                                int* pTri = 0) const;
 
+    // The static half of RaySegment: the nearest static triangle the segment
+    // (unit direction d, length fLen) crosses. bGrid walks only the cells the
+    // segment passes through (5ee); false tests every triangle (the old way).
+    // Both return the same triangle: nearest t, lowest index on a tie.
+    bool            RayStatic(const float* o, const float* d, float fLen, bool bGrid,
+                              float* pBest, float* pNormal3, unsigned int* pPoly) const;
+
+    // ...and the door half: lowers *pBest when a door triangle is nearer and
+    // returns true if one was. bCull skips a block of door triangles whose
+    // box the segment misses (5ee); false tests every one (the old way).
+    bool            RayDynamic(const float* o, const float* d, bool bCull,
+                               float* pBest, float* pNormal3) const;
+
     std::vector<float>              m_Tris;     // 9 floats per triangle
     std::vector<unsigned int>       m_TriPoly;  // LTWorldPolyId, one per triangle
     std::vector<unsigned char>      m_TriFront; // a world model's: rays hit its front only (5dz)
@@ -162,8 +175,13 @@ private:
     std::vector<unsigned int>       m_DynPoly;  // the same, its LTWorldPolyId
     std::vector<float>              m_DynRay;   // the ones rays test, if m_bDynRay
     bool                            m_bDynRay = false;
+    std::vector<float>              m_DynBox;   // per kDynBlock of m_Dyn: min3 max3 (5ee)
+    std::vector<float>              m_DynRayBox;    // ...and of m_DynRay
     std::vector<std::string>        m_Excluded;
     std::vector<std::vector<int> >  m_Cells;    // triangle indices per cell
+    float                           m_TriMin[3];    // the triangles' own bounds (5ee)
+    float                           m_TriMax[3];
+    unsigned int                    m_nSerial;      // which Build, for the ray stamps
     float                           m_Min[3];
     float                           m_CellSize;
     int                             m_Dim[3];

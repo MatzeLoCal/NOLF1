@@ -25,8 +25,9 @@
 // ⚠️ THE SHADER PAIR, AND IT IS DELIBERATELY THE SAME ARITHMETIC AS lt3d.
 //
 // The fragment stage multiplies a texture sample by an interpolated vertex
-// colour, and that colour arrives ALREADY SCALED by the caller -- the 1/128
-// that turns NOLF's stored bytes into a multiplier lives in ltworldrender,
+// colour, and that colour arrives ALREADY SCALED by the caller -- the scale
+// that turns NOLF's stored bytes into a multiplier (VertexLightScale, 5ej)
+// lives in ltworldrender,
 // once, for both backends. Duplicating it here would be the first step to two
 // renderers that disagree about lighting.
 //

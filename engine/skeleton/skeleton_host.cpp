@@ -2698,7 +2698,18 @@ static void LTHost_ConsoleTick(int nFrame)
         size_t from = 0;
         while (from <= all.size())
         {
+            // A ';' ends a line only where "<frame>:" follows it, so a line
+            // may carry ';' itself -- a Spawner's spawn string does (5eb).
             size_t end = all.find(';', from);
+            while (end != std::string::npos)
+            {
+                size_t k = end + 1;
+                while (k < all.size() && all[k] == ' ') ++k;
+                size_t d = k;
+                while (d < all.size() && all[d] >= '0' && all[d] <= '9') ++d;
+                if (d > k && d < all.size() && all[d] == ':') break;
+                end = all.find(';', end + 1);
+            }
             if (end == std::string::npos) end = all.size();
             std::string one = all.substr(from, end - from);
             from = end + 1;
@@ -4120,8 +4131,8 @@ int main(int argc, char** argv)
 
                     // ⚠️ THE TITLE BAR: which renderer draws the 3D view, and
                     // the frame rate measured over the last half second of
-                    // wall time (the loop's own 1/60 s sleep included, so 60
-                    // is the ceiling). Metal exists only in walk mode -- the
+                    // wall time (the pacing included, so the display's refresh
+                    // is the ceiling -- 60, or 120 on ProMotion, 5ed). Metal exists only in walk mode -- the
                     // game path is the software rasteriser (play.sh).
                     // LT_NOTITLESTATS=1 leaves the title alone (an A/B switch).
                     static const bool s_bNoTitle = (getenv("LT_NOTITLESTATS") != 0);
@@ -4171,18 +4182,61 @@ int main(int argc, char** argv)
                     // since the previous frame. A flat 16.7 ms on top of every
                     // frame capped the Metal game at ~29 FPS when the frame
                     // itself took ~17 ms. LT_FIXEDSLEEP=1 restores the flat sleep.
+                    //
+                    // ⚠️ PACED BY THE DISPLAY when the clock is real time
+                    // (HANDOVER 5ed): the loop waits for the window's next
+                    // refresh -- a steady 60, 120 on ProMotion -- instead of
+                    // sleeping the rest of 1/60 s off a free-running clock,
+                    // which drifted against the display (~57 FPS in the title)
+                    // and capped every screen at 60. A FIXED timestep keeps
+                    // the sleep: there each frame IS 1/60 s of game time, and
+                    // 120 Hz would run the game at double speed. No link, or
+                    // a hidden window (the link stops): the sleep as before.
+                    // LT_SLEEPPACING=1 = old (says so); LT_MAXFPS=<n> caps.
                     {
                         static const bool s_bFixed = (getenv("LT_FIXEDSLEEP") != 0);
+                        static const bool s_bSleep = []() {
+                            const bool b = (getenv("LT_SLEEPPACING") != 0);
+                            if (b) { printf("[WINDOW] LT_SLEEPPACING=1 -- the loop sleeps to 1/60 s, not paced by the display (old)\n"); fflush(stdout); }
+                            return b; }();
                         static auto s_tPrev = std::chrono::steady_clock::now();
-                        if (s_bFixed) usleep(16667);
-                        else
+                        const bool bDisplay = !s_bFixed && !s_bSleep && LTGetClock()->IsRealTime()
+                                           && LTWindow_WaitForRefresh();
+                        if (!bDisplay)
                         {
-                            const auto tNow = std::chrono::steady_clock::now();
-                            const long us = (long)std::chrono::duration_cast<std::chrono::microseconds>(
-                                                tNow - s_tPrev).count();
-                            if (us < 16667) usleep((useconds_t)(16667 - us));
+                            if (s_bFixed) usleep(16667);
+                            else
+                            {
+                                const auto tNow = std::chrono::steady_clock::now();
+                                const long us = (long)std::chrono::duration_cast<std::chrono::microseconds>(
+                                                    tNow - s_tPrev).count();
+                                if (us < 16667) usleep((useconds_t)(16667 - us));
+                            }
                         }
                         s_tPrev = std::chrono::steady_clock::now();
+
+                        // LT_PACETRACE=1 -- every 2 s of wall time: frames per
+                        // second, the longest frame-to-frame gap, the display's
+                        // period, and how many frames the display paced.
+                        static const bool s_bTrace = (getenv("LT_PACETRACE") != 0);
+                        if (s_bTrace)
+                        {
+                            static auto s_tWin = s_tPrev, s_tLastFrame = s_tPrev;
+                            static int s_nF = 0, s_nPaced = 0;
+                            static double s_fMaxGap = 0.0;
+                            ++s_nF; if (bDisplay) ++s_nPaced;
+                            const double gap = std::chrono::duration<double>(s_tPrev - s_tLastFrame).count();
+                            if (gap > s_fMaxGap) s_fMaxGap = gap;
+                            s_tLastFrame = s_tPrev;
+                            const double w = std::chrono::duration<double>(s_tPrev - s_tWin).count();
+                            if (w >= 2.0)
+                            {
+                                printf("[PACE] %.1f fps, longest gap %.1f ms, display period %.2f ms, %d of %d frames display-paced\n",
+                                       s_nF / w, s_fMaxGap * 1000.0, LTWindow_RefreshInterval() * 1000.0, s_nPaced, s_nF);
+                                fflush(stdout);
+                                s_tWin = s_tPrev; s_nF = 0; s_nPaced = 0; s_fMaxGap = 0.0;
+                            }
+                        }
                     }
                 }
             }

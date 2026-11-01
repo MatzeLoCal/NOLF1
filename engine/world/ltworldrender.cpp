@@ -151,6 +151,32 @@ namespace
     // do not cancel.
     bool MirrorWorld() { return LTWorldMirror(); }
 
+    // ⚠️ THE BAKED VERTEX LIGHT IS byte / 255 -- 255 IS "THE TEXTURE AS
+    // AUTHORED" -- AND FOR A YEAR IT WAS byte / 128 (HANDOVER 5ej). User
+    // 2026-11-01: "some parts of levels are too bright" -- M04S02's ladies'
+    // room, M03S02's plane cabin. M03S02 bakes its cabin at 210-255 (the same
+    // textures sit at ~110 in M03S01): x 1/128 that is 1.6-2x the texture,
+    // white walls and cream seats. Three readings agree on 1/255:
+    //   * the Windows frame of M01S01's opening cutscene (reference/
+    //     m01s01_cinematic_windows.webp): the walls and door the port drew at
+    //     1/128 were 1.8-2.6x the reference;
+    //   * the preprocessor stores 255,255,255 on brushes it does not light --
+    //     "no light applied" is the identity only if 255 means 1.0 (at 1/128
+    //     the skybox went flat white and needed SURF_BRIGHT);
+    //   * NOLF1's engine writes "Saturate" "1" AND "LightSaturate" "0.5": in
+    //     the lineage Saturate draws vertex light MODULATE2X (donor
+    //     d3d_rendershader_gouraud.cpp:195), and 0.5 x 2 = 1. Jupiter dropped
+    //     LightSaturate, so its half is inferred, not read.
+    // LT_LIGHT128=1 = the old 1/128 (says so).
+    float VertexLightScale()
+    {
+        static const float s = []() {
+            const bool bOld = (getenv("LT_LIGHT128") != 0);
+            if (bOld) { printf("[LT3D] LT_LIGHT128=1 -- world vertex light x 1/128 (old, twice the original)\n"); fflush(stdout); }
+            return bOld ? 1.0f / 128.0f : 1.0f / 255.0f; }();
+        return s;
+    }
+
     // ⚠️ DOES THIS TEXTURE ACTUALLY CUT ANYTHING OUT?
     //
     // CLTDtx::AlphaIsMeaningful() answers "is alpha worth believing", and it
@@ -351,11 +377,11 @@ const LTModelPose* CLTWorldScene::PropPose(size_t i, CachedModel* pM) const
     return &pM->m_AnimPose;
 }
 
-bool CLTWorldScene::ResolveObjectModel(size_t i, std::string& sModel,
-                                       std::string& sSkin,
-                                       bool* pbChromakey,
-                                       float* pfAlpha,
-                                       int* pnBlendOp) const
+bool CLTWorldScene::ResolveObjectModelFile(size_t i, std::string& sModel,
+                                           std::string& sSkin,
+                                           bool* pbChromakey,
+                                           float* pfAlpha,
+                                           int* pnBlendOp) const
 {
     const std::vector<LTWorldObject>& obj = m_World.GetObjects();
     if (i >= obj.size()) return false;
@@ -744,10 +770,8 @@ bool CLTWorldScene::HiddenNow(size_t i) const
     return n == 0 || n == 2;
 }
 
-bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
+bool CLTWorldScene::ResolveObjectSpriteFile(size_t i, LTSpriteDraw& out, bool* pbFileOn) const
 {
-    if (!LTSpritesEnabled()) return false;
-
     const std::vector<LTWorldObject>& obj = m_World.GetObjects();
     if (i >= obj.size()) return false;
 
@@ -757,17 +781,15 @@ bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
     // ⚠️ TWO SEPARATE WAYS OF BEING OFF, and the sprite class uses the second.
     // `Visible` is the engine flag every object has; `StartOn` is ScaleSprite's
     // own, and its Update() is what sets FLAG_VISIBLE when it is true. 82
-    // placements are StartOn false and belong to triggers.
-    // ⚠️ AND THE LIVE STATE WINS when there is one -- ScaleSprite's on/off
-    // messages set FLAG_VISIBLE on the server object (LiveState above).
-    const int nLive = LiveState(i, obj[i]);
-    if (nLive == 0) return false;
-    if (nLive < 0)
+    // placements are StartOn false and belong to triggers. Reported, not
+    // acted on: the LIVE state wins when there is one (ResolveObjectSprite).
     {
+        bool bOn = true;
         const LTWorldProperty* pV = obj[i].Find("Visible");
-        if (pV && !pV->m_bBool) return false;
+        if (pV && !pV->m_bBool) bOn = false;
         const LTWorldProperty* pOn = obj[i].Find("StartOn");
-        if (pOn && !pOn->m_bBool) return false;
+        if (pOn && !pOn->m_bBool) bOn = false;
+        if (pbFileOn) *pbFileOn = bOn;
     }
 
     out = LTSpriteDraw();
@@ -800,6 +822,81 @@ bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
     if (!(out.m_fScaleX > 0.0f)) out.m_fScaleX = 0.5f;
     if (!(out.m_fScaleY > 0.0f)) out.m_fScaleY = 0.5f;
     if (!(out.m_fAlpha >= 0.0f && out.m_fAlpha <= 1.0f)) out.m_fAlpha = 1.0f;
+    return true;
+}
+
+// ⚠️ ONCE PER LEVEL (HANDOVER 5ec) -- see ltworldrender.h. Built on the first
+// question after Load (the prop types are read inside Load, so they are here).
+bool CLTWorldScene::ObjectResolutionReady() const
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NORESOLVECACHE") != 0);
+        if (b) { printf("[WORLD] LT_NORESOLVECACHE=1 -- object models and sprites resolved from their properties every time (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOff) return false;
+    const std::vector<LTWorldObject>& obj = m_World.GetObjects();
+    if (m_bObjResValid && m_ObjModelRes.size() == obj.size()) return true;
+
+    m_ObjModelRes.assign(obj.size(), ObjModelRes());
+    m_ObjSpriteRes.assign(obj.size(), ObjSpriteRes());
+    for (size_t i = 0; i < obj.size(); ++i)
+    {
+        ObjModelRes& m = m_ObjModelRes[i];
+        m.m_bOK = ResolveObjectModelFile(i, m.m_sModel, m.m_sSkin, &m.m_bChromakey, &m.m_fAlpha, &m.m_nBlendOp);
+        ObjSpriteRes& r = m_ObjSpriteRes[i];
+        r.m_bSprite = ResolveObjectSpriteFile(i, r.m_Draw, &r.m_bFileOn);
+    }
+    m_bObjResValid = true;
+    return true;
+}
+
+bool CLTWorldScene::ResolveObjectModel(size_t i, std::string& sModel,
+                                       std::string& sSkin,
+                                       bool* pbChromakey,
+                                       float* pfAlpha,
+                                       int* pnBlendOp) const
+{
+    if (!ObjectResolutionReady())
+        return ResolveObjectModelFile(i, sModel, sSkin, pbChromakey, pfAlpha, pnBlendOp);
+    if (i >= m_ObjModelRes.size()) return false;
+    const ObjModelRes& m = m_ObjModelRes[i];
+    sModel = m.m_sModel;
+    sSkin  = m.m_sSkin;
+    if (pbChromakey) *pbChromakey = m.m_bChromakey;
+    if (pfAlpha)     *pfAlpha     = m.m_fAlpha;
+    if (pnBlendOp)   *pnBlendOp   = m.m_nBlendOp;
+    return m.m_bOK;
+}
+
+bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
+{
+    if (!LTSpritesEnabled()) return false;
+
+    const std::vector<LTWorldObject>& obj = m_World.GetObjects();
+    if (i >= obj.size()) return false;
+
+    bool bFileOn = true;
+    const LTSpriteDraw* pDraw = 0;
+    LTSpriteDraw tmp;
+    if (ObjectResolutionReady())
+    {
+        const ObjSpriteRes& r = m_ObjSpriteRes[i];
+        if (!r.m_bSprite) return false;
+        bFileOn = r.m_bFileOn;
+        pDraw = &r.m_Draw;
+    }
+    else
+    {
+        if (!ResolveObjectSpriteFile(i, tmp, &bFileOn)) return false;
+        pDraw = &tmp;
+    }
+
+    // ⚠️ THE LIVE STATE WINS when there is one -- ScaleSprite's on/off
+    // messages set FLAG_VISIBLE on the server object (LiveState above).
+    const int nLive = LiveState(i, obj[i]);
+    if (nLive == 0) return false;
+    if (nLive < 0 && !bFileOn) return false;
+    out = *pDraw;
     return true;
 }
 
@@ -1787,6 +1884,7 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
     m_pSky = 0;
     m_Static.m_bValid = false;      // rebuilt by the Metal pass; it frees the old buffer
     m_pVisKey = 0;                  // polygon boxes for visibility, rebuilt (5ea)
+    m_bObjResValid = false;         // object models and sprites, re-resolved (5ec)
     m_sError.clear();
 
     if (!m_World.LoadThroughFileMgr(pFileMgr, pWorldName))
@@ -2698,9 +2796,9 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         if (ePass == kPassBlended && !bTrans && !bMirrorGlass) continue;
 
         // ⚠️ SURF_BRIGHT means FULLBRIGHT -- ignore lighting. Every skybox
-        // face carries it, and an unlit brush stores vertex RGB 255, which the
-        // 1/128 scale below turns into 2.0 and saturates the texture to flat
-        // white. That is exactly what the first sky render produced.
+        // face carries it. Under the old 1/128 scale an unlit brush's vertex
+        // RGB 255 became 2.0 and saturated the sky to flat white -- the first
+        // sky render; at 1/255 (5ej) the two agree, the flag still decides.
         const bool bBright = (sf.m_nFlags & kSURF_BRIGHT) != 0;
 
         for (size_t k = 1; k + 1 < po.m_Verts.size(); ++k)
@@ -2750,23 +2848,25 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                 tri[v].m_V = vv / (float)(pTex->m_Height >> pTex->m_nUVShift);
 
                 // Lighting comes from the FILE: each polygon vertex carries an
-                // RGB triple with 128 as neutral. These are baked vertex
-                // lights, which is why unlit brushes are exactly 255,255,255.
+                // RGB triple, 255 = the texture as authored (VertexLightScale).
+                // These are baked vertex lights, which is why unlit brushes are
+                // exactly 255,255,255.
                 if (bBright)
                 {
                     tri[v].m_R = tri[v].m_G = tri[v].m_B = 1.0f;
                 }
                 else
                 {
-                    tri[v].m_R = pv.m_RGB[0] * (1.0f / 128.0f);
-                    tri[v].m_G = pv.m_RGB[1] * (1.0f / 128.0f);
-                    tri[v].m_B = pv.m_RGB[2] * (1.0f / 128.0f);
+                    const float ls = VertexLightScale();
+                    tri[v].m_R = pv.m_RGB[0] * ls;
+                    tri[v].m_G = pv.m_RGB[1] * ls;
+                    tri[v].m_B = pv.m_RGB[2] * ls;
                 }
             }
             if (!bOK) continue;
 
             // ⚠️ ONE DECISION PATH, TWO BACKENDS. Everything above -- the
-            // surface flags, the negated U, the texel scale in P/Q, the 1/128
+            // surface flags, the negated U, the texel scale in P/Q, the
             // vertex-light scale -- has been got wrong at least once already
             // and is settled here. A GPU backend that rebuilt any of it would
             // be a second renderer, and this file exists to prevent that.

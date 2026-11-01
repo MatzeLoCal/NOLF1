@@ -168,7 +168,13 @@ int main(int argc, char** argv)
           "the GPU picture matches the software picture");
     check(same.m_fMean < 4.0,
           "and the mean difference is within rasterisation noise, not structural");
-    check(same.m_fCloseShare > diffView.m_fCloseShare * 1.5,
+    // ⚠️ BY THE MEAN, NOT THE "CLOSE" SHARE (HANDOVER 5ej). The share counts a
+    // pixel within 40 levels as agreeing, so it measures BRIGHTNESS as much as
+    // agreement: when the world light went from x1/128 to the original's
+    // x1/255 the wrong view's share rose from below 2/3 to 84.7% -- dim
+    // pixels of any two views sit within 40 of each other -- while the means
+    // still parted 0.28 against 18.43. A wrong view must differ ten times more.
+    check(diffView.m_fMean > same.m_fMean * 10.0 && diffView.m_fMean > 4.0,
           "NEGATIVE CONTROL: and it matches the RIGHT view much better than a wrong one");
 
     printf("\n=== %d passed, %d failed ===\n", g_nPass, g_nFail);

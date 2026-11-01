@@ -20,6 +20,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef CLTServerObjects::Record SRec;
 
@@ -326,45 +327,93 @@ static bool RayBox(const float* o, const float* d, float fLen,
 }
 
 
-bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
-                          bool (*pFilter)(void*, void*), void* pUser,
-                          float* pPoint3, float* pNormal3, void** ppHitObj,
-                          bool bObjects, bool bIgnoreNonSolid,
-                          unsigned int* pPolyId)
+namespace
 {
-    if (ppHitObj) *ppHitObj = 0;
-    if (pPolyId) *pPolyId = 0;
-    unsigned int nPoly = 0;
-    if (!pFrom3 || !pTo3) return false;
-
-    float d[3] = { pTo3[0]-pFrom3[0], pTo3[1]-pFrom3[1], pTo3[2]-pFrom3[2] };
-    const float fLen = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
-    if (fLen <= 0.0f) return false;
-    for (int k = 0; k < 3; ++k) d[k] /= fLen;
-
-    float fBest = fLen;
-    float nBest[3] = { 0.0f, 1.0f, 0.0f };
-    void* hBest = 0;
-    bool  bHit = false;
-
-    // --- the world -------------------------------------------------------- //
-    if (LTWorldCollide_Ready())
+    // What a ray has found so far: the world's answer going into the object
+    // loop, the nearest hit coming out of it.
+    struct RayBest
     {
-        float pt[3], n[3], t;
-        unsigned int nWP = 0;
-        if (LTGetWorldCollide()->RaySegment(pFrom3, pTo3, pt, n, &t, &nWP))
-        {
-            const float fDist = t * fLen;
-            if (fDist < fBest)
-            { fBest = fDist; for (int k=0;k<3;++k) nBest[k]=n[k]; hBest = 0; bHit = true; nPoly = nWP; }
-        }
-    }
+        float        m_fBest;
+        float        m_N[3];
+        void*        m_h;
+        bool         m_bHit;
+        unsigned int m_nPoly;
+    };
 
-    // --- every live object's box ------------------------------------------ //
+    // LT_RAYGRIDDIFF=1 census of the object loop (5eg), printed at exit.
+    unsigned long long g_nObjAsked = 0, g_nObjDiff = 0, g_nObjHits = 0;
+    unsigned long long g_nFilterNew = 0, g_nFilterOld = 0;
+    void ObjDiffCensus()
+    {
+        printf("[OBJRAY] %llu object loop(s) run both ways (%llu ended on an object), %llu differ; the game's filter was asked %llu time(s) box-first, %llu the old way\n",
+               g_nObjAsked, g_nObjHits, g_nObjDiff, g_nFilterNew, g_nFilterOld);
+        fflush(stdout);
+    }
+}
+
+
+// ⚠️ THE GEOMETRY FIRST, THE GAME'S FILTER LAST (5eg). Every ray walked every
+// live object (~1,470 in M02S01), and every object that passed the flag checks
+// had its name compared against the power lines and was then handed to the
+// game's filter -- a call into the game, which on the client side also looks
+// the object's mirror up -- before any box was tested. Lens flares cast one
+// such ray a frame across the whole level, and this walk was most of what
+// was left of the server ray after 5ef.
+//
+// Now the box (a brush object: its geometry) is tested first, and the name
+// and the filter are asked only for an object whose hit would become the
+// nearest. The answers are the same because both questions are pure: the name
+// is a string compare, and every object filter the game hands a ray (20 of
+// them, server and client: CAI's, CScanner's, Activate, DoVector, Explosion,
+// Ground, Flying, the liquid, list and non-solid ones) reads flags, classes,
+// user flags, container codes, positions and alignment and changes nothing.
+// Objects are still walked in list order with the same tie rules, and an
+// object the filter turns away still never moves fBest, so the nearest hit is
+// the same object at the same bits. The donor asks its filter only after a
+// sphere test too (fullintersectline.cpp i_HandlePossibleIntersection) -- the
+// old order called into the game for objects LithTech never asked about.
+// LT_RAYOBJOLD=1 = the old order (says so); LT_RAYGRIDDIFF=1 runs both and
+// counts any difference, and how often each asked the filter ([OBJRAY]).
+static void RayObjects(bool bOld, const float* pFrom3, const float* pTo3,
+                       const float* d, float fLen,
+                       bool (*pFilter)(void*, void*), void* pUser,
+                       bool bIgnoreNonSolid, unsigned long long* pFilterCalls,
+                       RayBest& b)
+{
+    // ⚠️ SOLID **OR RAYHIT** -- the donor's rule (fullintersectline.cpp
+    // i_ISCallback). A character is shot through its CCharacterHitBox,
+    // which is RAYHIT and NOT solid; testing SOLID alone let every bullet
+    // pass through every enemy (M01S01, HANDOVER 5bb). Triggers carry
+    // neither flag, so the Activate fix below still holds.
+    // LT_SOLIDONLYRAYS=1 = the old rule.
+    static const bool s_bSolidOnly = []() {
+        const bool b = (getenv("LT_SOLIDONLYRAYS") != 0);
+        if (b) { printf("[PHYS] LT_SOLIDONLYRAYS=1 -- rays ignore RAYHIT-only objects\n"); fflush(stdout); }
+        return b; }();
+    // ⚠️ A BRUSH OBJECT IS HIT BY ITS GEOMETRY, WHERE IT IS NOW -- not by
+    // its load-time box. An opened shutter (M01S01 `vwindow2`) kept
+    // catching every shot through the window. LT_BOXRAYS=1 = the old rule.
+    static const bool s_bBoxRays = []() {
+        const bool b = (getenv("LT_BOXRAYS") != 0);
+        if (b) { printf("[PHYS] LT_BOXRAYS=1 -- brush objects hit-tested by their box\n"); fflush(stdout); }
+        return b; }();
+    const unsigned int nHitFlags = s_bSolidOnly ? FLAG_SOLID : (FLAG_SOLID | FLAG_RAYHIT);
+
+    // The two questions that are not geometry, asked last (box-first) or
+    // before the geometry (old). DEVIATIONS E-008: rays pass through the
+    // power lines (the user's call). The game's own filter is how the player
+    // avoids shooting himself and how activate skips what it does not want.
+    auto wanted = [&](void* h, const SRec* p) -> bool {
+        if (LTServerBrush_RaysPassThrough(p->m_sName.c_str())) return false;
+        if (!pFilter) return true;
+        ++*pFilterCalls;
+        return pFilter(h, pUser);
+    };
+
     const unsigned int n = LTServerHost_ObjectCount();
     for (unsigned int i = 0; i < n; ++i)
     {
-        void* h = LTServerHost_ObjectAt(i);
+        void* h = bOld ? LTServerHost_ObjectAt(i) : LTServerHost_ListedObjectAt(i);
         SRec* p = CLTServerObjects::FromHandle(h);
         if (!p) continue;
 
@@ -377,21 +426,8 @@ bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
         // a ray stops on. Measured on T01S03 before this: an Activate ray aimed
         // at TrainingDoor1 from behind stopped at 'CivTrigger' -- a 128x64x64
         // invisible volume -- and never reached the door.
-        if (!bObjects) break;
-        // ⚠️ SOLID **OR RAYHIT** -- the donor's rule (fullintersectline.cpp
-        // i_ISCallback). A character is shot through its CCharacterHitBox,
-        // which is RAYHIT and NOT solid; testing SOLID alone let every bullet
-        // pass through every enemy (M01S01, HANDOVER 5bb). Triggers carry
-        // neither flag, so the Activate fix above still holds.
-        // LT_SOLIDONLYRAYS=1 = the old rule.
-        static const bool s_bSolidOnly = []() {
-            const bool b = (getenv("LT_SOLIDONLYRAYS") != 0);
-            if (b) { printf("[PHYS] LT_SOLIDONLYRAYS=1 -- rays ignore RAYHIT-only objects\n"); fflush(stdout); }
-            return b; }();
-        const unsigned int nHitFlags = s_bSolidOnly ? FLAG_SOLID : (FLAG_SOLID | FLAG_RAYHIT);
         if (bIgnoreNonSolid && !(p->m_Flags & nHitFlags)) continue;
-        // DEVIATIONS E-008: rays pass through the power lines (the user's call).
-        if (LTServerBrush_RaysPassThrough(p->m_sName.c_str())) continue;
+        if (bOld && LTServerBrush_RaysPassThrough(p->m_sName.c_str())) continue;
 
         const bool bBox = p->m_bHasBox;
         if (!bBox && p->m_Dims[0] <= 0.0f && p->m_Dims[1] <= 0.0f && p->m_Dims[2] <= 0.0f)
@@ -401,17 +437,12 @@ bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
         // something a ray stops on. Same flag the game's IGNORE_NONSOLID means.
         if (bBox && !(p->m_Flags & nHitFlags)) continue;
 
-        // The game's own filter -- this is how the player avoids shooting
-        // himself and how activate skips things it does not care about.
-        if (pFilter && !pFilter(h, pUser)) continue;
+        if (bOld && pFilter)
+        {
+            ++*pFilterCalls;
+            if (!pFilter(h, pUser)) continue;
+        }
 
-        // ⚠️ A BRUSH OBJECT IS HIT BY ITS GEOMETRY, WHERE IT IS NOW -- not by
-        // its load-time box. An opened shutter (M01S01 `vwindow2`) kept
-        // catching every shot through the window. LT_BOXRAYS=1 = the old rule.
-        static const bool s_bBoxRays = []() {
-            const bool b = (getenv("LT_BOXRAYS") != 0);
-            if (b) { printf("[PHYS] LT_BOXRAYS=1 -- brush objects hit-tested by their box\n"); fflush(stdout); }
-            return b; }();
         if (bBox && !s_bBoxRays)
         {
             float fFrac, nb[3];
@@ -421,8 +452,8 @@ bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
             {
                 // Same tie rule as the box below: a brush beats the world it
                 // is also part of when they are hit at the same distance.
-                if (r == 1 && fFrac * fLen < fBest + 1.0f)
-                { fBest = fFrac * fLen; for (int k=0;k<3;++k) nBest[k]=nb[k]; hBest = h; bHit = true; nPoly = nBP; }
+                if (r == 1 && fFrac * fLen < b.m_fBest + 1.0f && (bOld || wanted(h, p)))
+                { b.m_fBest = fFrac * fLen; for (int k=0;k<3;++k) b.m_N[k]=nb[k]; b.m_h = h; b.m_bHit = true; b.m_nPoly = nBP; }
                 continue;
             }
         }
@@ -477,16 +508,91 @@ bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
         // Activate ray reached TrainingDoor1's face at z=-1788 and the game
         // was told it had touched a wall.
         const float fSlack = bBox ? 1.0f : 0.0f;     // world units, like fBest
-        if (RayBox(pFrom3, d, fBest + fSlack, mn, mx, &t, nb) && t < fBest + fSlack)
-        { fBest = t; for (int k=0;k<3;++k) nBest[k]=nb[k]; hBest = h; bHit = true; nPoly = 0; }
+        if (RayBox(pFrom3, d, b.m_fBest + fSlack, mn, mx, &t, nb) && t < b.m_fBest + fSlack &&
+            (bOld || wanted(h, p)))
+        { b.m_fBest = t; for (int k=0;k<3;++k) b.m_N[k]=nb[k]; b.m_h = h; b.m_bHit = true; b.m_nPoly = 0; }
+    }
+}
+
+
+bool LTServerPhys_RayTest(const float* pFrom3, const float* pTo3,
+                          bool (*pFilter)(void*, void*), void* pUser,
+                          float* pPoint3, float* pNormal3, void** ppHitObj,
+                          bool bObjects, bool bIgnoreNonSolid,
+                          unsigned int* pPolyId)
+{
+    if (ppHitObj) *ppHitObj = 0;
+    if (pPolyId) *pPolyId = 0;
+    if (!pFrom3 || !pTo3) return false;
+
+    float d[3] = { pTo3[0]-pFrom3[0], pTo3[1]-pFrom3[1], pTo3[2]-pFrom3[2] };
+    const float fLen = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+    if (fLen <= 0.0f) return false;
+    for (int k = 0; k < 3; ++k) d[k] /= fLen;
+
+    RayBest b = { fLen, { 0.0f, 1.0f, 0.0f }, 0, false, 0 };
+
+    // --- the world -------------------------------------------------------- //
+    if (LTWorldCollide_Ready())
+    {
+        float pt[3], n[3], t;
+        unsigned int nWP = 0;
+        if (LTGetWorldCollide()->RaySegment(pFrom3, pTo3, pt, n, &t, &nWP))
+        {
+            const float fDist = t * fLen;
+            if (fDist < b.m_fBest)
+            { b.m_fBest = fDist; for (int k=0;k<3;++k) b.m_N[k]=n[k]; b.m_h = 0; b.m_bHit = true; b.m_nPoly = nWP; }
+        }
     }
 
-    if (!bHit) return false;
+    // --- every live object's box ------------------------------------------ //
+    // LT_RAYOBJOLD=1 / LT_RAYGRIDDIFF=1 -- see RayObjects.
+    static const bool s_bObjOld = []() {
+        const bool b = (getenv("LT_RAYOBJOLD") != 0);
+        if (b) { printf("[PHYS] LT_RAYOBJOLD=1 -- rays ask the game's filter before an object's box (old)\n"); fflush(stdout); }
+        return b; }();
+    static const bool s_bObjDiff = []() {
+        const bool b = (getenv("LT_RAYGRIDDIFF") != 0);
+        if (b) { printf("[PHYS] LT_RAYGRIDDIFF=1 -- the ray's object loop also run the other way\n"); fflush(stdout);
+                 atexit(ObjDiffCensus); }
+        return b; }();
+    if (bObjects)
+    {
+        const RayBest bWorld = b;
+        unsigned long long nCalls = 0;
+        RayObjects(s_bObjOld, pFrom3, pTo3, d, fLen, pFilter, pUser, bIgnoreNonSolid,
+                   s_bObjDiff ? (s_bObjOld ? &g_nFilterOld : &g_nFilterNew) : &nCalls, b);
+        if (s_bObjDiff)
+        {
+            RayBest b2 = bWorld;
+            RayObjects(!s_bObjOld, pFrom3, pTo3, d, fLen, pFilter, pUser, bIgnoreNonSolid,
+                       s_bObjOld ? &g_nFilterNew : &g_nFilterOld, b2);
+            ++g_nObjAsked;
+            if (b.m_h) ++g_nObjHits;
+            if (b.m_bHit != b2.m_bHit || b.m_h != b2.m_h || b.m_nPoly != b2.m_nPoly ||
+                memcmp(&b.m_fBest, &b2.m_fBest, sizeof(float)) != 0 ||
+                memcmp(b.m_N, b2.m_N, sizeof(b.m_N)) != 0)
+            {
+                if (++g_nObjDiff <= 20)
+                {
+                    printf("[OBJRAY] #%llu ray from (%.1f %.1f %.1f) to (%.1f %.1f %.1f): %s %s '%s' at %.4f, %s %s '%s' at %.4f\n",
+                           g_nObjDiff, pFrom3[0], pFrom3[1], pFrom3[2], pTo3[0], pTo3[1], pTo3[2],
+                           s_bObjOld ? "old" : "box-first", b.m_bHit ? "HIT" : "miss",
+                           b.m_h ? CLTServerObjects::FromHandle(b.m_h)->m_sName.c_str() : "world", b.m_fBest,
+                           s_bObjOld ? "box-first" : "old", b2.m_bHit ? "HIT" : "miss",
+                           b2.m_h ? CLTServerObjects::FromHandle(b2.m_h)->m_sName.c_str() : "world", b2.m_fBest);
+                    fflush(stdout);
+                }
+            }
+        }
+    }
 
-    if (pPoint3)  for (int k = 0; k < 3; ++k) pPoint3[k] = pFrom3[k] + d[k]*fBest;
-    if (pNormal3) for (int k = 0; k < 3; ++k) pNormal3[k] = nBest[k];
-    if (ppHitObj) *ppHitObj = hBest;
-    if (pPolyId) *pPolyId = nPoly;
+    if (!b.m_bHit) return false;
+
+    if (pPoint3)  for (int k = 0; k < 3; ++k) pPoint3[k] = pFrom3[k] + d[k]*b.m_fBest;
+    if (pNormal3) for (int k = 0; k < 3; ++k) pNormal3[k] = b.m_N[k];
+    if (ppHitObj) *ppHitObj = b.m_h;
+    if (pPolyId) *pPolyId = b.m_nPoly;
     return true;
 }
 

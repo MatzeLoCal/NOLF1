@@ -684,6 +684,36 @@ public:
     bool                HiddenNow(size_t i) const;
 
 private:
+    // ⚠️ THE OBJECTS' FILE PROPERTIES, RESOLVED ONCE PER LEVEL (HANDOVER 5ec).
+    // The two answers above read up to a dozen properties BY NAME -- a
+    // case-insensitive scan each -- for every object of the level, in every
+    // pass and every reflection, every frame: ~15% of the main thread in
+    // M09S01. What they read is fixed for the level; only a sprite's live
+    // on/off (LiveState) is asked per call. LT_NORESOLVECACHE=1 = old (says so).
+    struct ObjModelRes
+    {
+        std::string m_sModel, m_sSkin;
+        bool        m_bOK = false, m_bChromakey = false;
+        float       m_fAlpha = 1.0f;
+        int         m_nBlendOp = 0;
+    };
+    struct ObjSpriteRes
+    {
+        bool         m_bSprite = false;
+        bool         m_bFileOn = true;      // Visible and StartOn, as the file says
+        LTSpriteDraw m_Draw;
+    };
+    bool                ResolveObjectModelFile(size_t i, std::string& sModel, std::string& sSkin,
+                                               bool* pbChromakey, float* pfAlpha, int* pnBlendOp) const;
+    bool                ResolveObjectSpriteFile(size_t i, LTSpriteDraw& out, bool* pbFileOn) const;
+    bool                ObjectResolutionReady() const;
+    mutable std::vector<ObjModelRes>        m_ObjModelRes;
+    mutable std::vector<ObjSpriteRes>       m_ObjSpriteRes;
+    mutable bool                            m_bObjResValid = false;
+
+public:
+
+private:
 
     LTFogState          m_FogWorld, m_FogSky;
     float               m_fFarZ;

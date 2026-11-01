@@ -1008,6 +1008,7 @@ namespace
     LTRESULT LTHost_AnimUserDims(HOBJECT h, LTVector* pDims, HMODELANIM hAnim);
     void     LTHost_GetObjectDims(HOBJECT h, LTVector* pDims);
     SRec*    LTHost_FindPlayerRecord();
+    bool     ClassIsA(const ClassDef* p, const char* pName);
 
     // E-011 (5dq): while a bolt's touch on a door is delivered, THIS polygon's
     // "Wood Door" (100, hardness 0.65) reads as "Wood" (30, 0.5) -- see
@@ -1124,6 +1125,56 @@ namespace
             }
         }
         if (!bHitAny) return LTFALSE;
+
+        // ⚠️ LT_SIGHTTRACE=1 -- A RAY THAT REACHED THE PLAYER THROUGH THE WORLD.
+        // An AI fires only once its eye ray has reached the player (AI.cpp
+        // IsObjectPositionVisible: IInfo.m_hObject == hObj). For every server
+        // ray that ends on the player the world alone is asked again; hit
+        // nearer, the ray went through it -- by the game's polygon filter (a
+        // see- or shoot-through surface) or by a fault. Names the caster (the
+        // nearest character to the ray's start), both filters and the surface.
+        static const bool s_bSight = []() {
+            const bool b = (getenv("LT_SIGHTTRACE") != 0);
+            if (b) { printf("[PHYS] LT_SIGHTTRACE=1 -- rays that reach the player through the world are listed ([SIGHT])\n"); fflush(stdout); }
+            return b; }();
+        if (s_bSight && hHit && hHit == (void*)LTHost_FindPlayerRecord())
+        {
+            const float dx = to[0]-from[0], dy = to[1]-from[1], dz = to[2]-from[2];
+            const float len = sqrtf(dx*dx + dy*dy + dz*dz);
+            const float px = pt[0]-from[0], py = pt[1]-from[1], pz = pt[2]-from[2];
+            const float fPlayer = sqrtf(px*px + py*py + pz*pz);
+            float wpt[3], wn[3], wt = 0.0f;
+            unsigned int nWP = 0;
+            if (LTWorldCollide_Ready() && LTGetWorldCollide()->RaySegment(from, to, wpt, wn, &wt, &nWP) &&
+                wt * len + 0.5f < fPlayer)
+            {
+                uint32 nST = 0;
+                if (nWP) LTHost_PolyTextureFlags(nWP, &nST);
+                const char* pPassed = !pQuery->m_PolyFilterFn ? "no poly filter"
+                                    : !nWP ? "no polygon id"
+                                    : pQuery->m_PolyFilterFn((HPOLY)nWP, pQuery->m_pUserData) ? "poly filter KEEPS it"
+                                    : "poly filter passes it";
+                const SRec* pCaster = 0; float fNear = 1e30f;
+                for (unsigned int i = 0; i < g_Objects.ObjectCount(); ++i)
+                {
+                    const SRec* c = g_Objects.RecordAt(i);
+                    if (!c || c->m_bDead || !c->m_pClass || !ClassIsA(c->m_pClass, "CCharacter")) continue;
+                    if (ClassIsA(c->m_pClass, "CPlayerObj")) continue;
+                    const float cx = c->m_Pos[0]-from[0], cy = c->m_Pos[1]-from[1], cz = c->m_Pos[2]-from[2];
+                    const float d2 = cx*cx + cy*cy + cz*cz;
+                    if (d2 < fNear) { fNear = d2; pCaster = c; }
+                }
+                Dl_info fo, fp;
+                memset(&fo, 0, sizeof(fo)); memset(&fp, 0, sizeof(fp));
+                if (pQuery->m_FilterFn) dladdr((const void*)pQuery->m_FilterFn, &fo);
+                if (pQuery->m_PolyFilterFn) dladdr((const void*)pQuery->m_PolyFilterFn, &fp);
+                printf("[SIGHT] t=%.2f %s (%.0f away) ray (%.0f %.0f %.0f)->(%.0f %.0f %.0f) reached the player at %.0f through the world at %.0f: poly %u surface %u, %s; filters %s / %s\n",
+                       LTServerHost_Time(), pCaster ? pCaster->m_sName.c_str() : "?", pCaster ? sqrtf(fNear) : 0.0f,
+                       from[0], from[1], from[2], to[0], to[1], to[2], fPlayer, wt * len, nWP, (unsigned)nST, pPassed,
+                       fo.dli_sname ? fo.dli_sname : "-", fp.dli_sname ? fp.dli_sname : "-");
+                fflush(stdout);
+            }
+        }
 
         // ⚠️ LT_RAYTRACE=1 -- SHORT rays, with the server clock. This exists to
         // answer one question: did CPlayerObj::Activate get PAST its early
@@ -2593,6 +2644,92 @@ namespace
         }
 
         return pLink;
+    }
+
+    // ⚠️ THE GAS AND THE BLAST TOUCHED NOBODY: THIS WAS A STUB ANSWERING NULL.
+    // Explosion::ProgDamageObjectsInSphere and AreaDamageObjectsInSphere
+    // (Explosion.cpp:512, 536) find their victims here, so a perfume's cloud
+    // put nobody to sleep, stunned nobody, burned nobody, and a grenade or
+    // lipstick bomb hurt only what its projectile hit directly. A proximity
+    // bomb never armed into a blast (ProjectileTypes.cpp:573), AIs standing
+    // in each other never stepped apart (AINudge.cpp:64) and Ingesing's
+    // teleporters were always clear (AIHumanState.cpp:9868). User report
+    // 2026-10-31: "the parfumes are not working".
+    //
+    // The donor's rule (si_FindObjectsTouchingSphere + SphereFindCallback):
+    // the objects in the world tree whose box touches the sphere's cube AND
+    // whose bounding sphere -- position, |dims| + 0.1 -- overlaps the sphere.
+    // In the tree means not optimised away: FLAG_FORCEOPTIMIZEOBJECT is
+    // clear, and the object has an effect message or a flag of
+    // FLAG_OPTIMIZEMASK (s_object.cpp CanOptimizeObject, NOLF1's mask from
+    // ltbasedefs.h:1187). Inactive objects stay in the tree, so a sleeping
+    // guard is found. A brush object is its geometry box where it stands now
+    // (centre and half extents, as the donor sizes a world model). Prepended
+    // in object order, like every list the engine hands out; the caller
+    // relinquishes it. LT_NOSPHERE=1 = the stub's answer (says so);
+    // LT_SPHERETRACE=1 prints each query that finds anything (see below).
+    ObjectList* LTHost_FindObjectsTouchingSphere(LTVector* pPos, float fRadius)
+    {
+        static const bool s_bOff = []() {
+            const bool b = (getenv("LT_NOSPHERE") != 0);
+            if (b) { printf("[SPHERE] LT_NOSPHERE=1 -- FindObjectsTouchingSphere finds nothing (old stub)\n"); fflush(stdout); }
+            return b; }();
+        if (!pPos || s_bOff) return 0;
+
+        ObjectList* pList = LTHost_CreateObjectList();
+        const float c[3] = { pPos->x, pPos->y, pPos->z };
+        const float r = (fRadius > 0.0f) ? fRadius : 0.0f;
+        const unsigned int nAll = g_Objects.ObjectCount();
+        for (unsigned int i = 0; i < nAll; ++i)
+        {
+            SRec* p = g_Objects.RecordAt(i);
+            if (!p || p->m_bDead || !p->m_pGame) continue;
+            if (p->m_Flags & FLAG_FORCEOPTIMIZEOBJECT) continue;
+            if (p->m_SFXMsg.empty() && !(p->m_Flags & FLAG_OPTIMIZEMASK)) continue;
+
+            float mn[3], mx[3];
+            LTHost_ObjBox(p, mn, mx);
+            float d2 = 0.0f, h2 = 0.0f;
+            bool bOut = false;
+            for (int k = 0; k < 3; ++k)
+            {
+                if (mn[k] > c[k] + r || mx[k] < c[k] - r) { bOut = true; break; }
+                const float o = (p->m_bHasBox ? 0.5f * (mn[k] + mx[k]) : p->m_Pos[k]) - c[k];
+                const float h = 0.5f * (mx[k] - mn[k]);
+                d2 += o * o;
+                h2 += h * h;
+            }
+            if (bOut) continue;
+            const float fFull = sqrtf(h2) + 0.1f + r;
+            if (d2 >= fFull * fFull) continue;
+
+            ObjectLink* pLink = new ObjectLink;
+            pLink->m_hObject = (HOBJECT)p;
+            pLink->m_pNext = pList->m_pFirstLink;
+            pList->m_pFirstLink = pLink;
+            ++pList->m_nInList;
+        }
+
+        // =1: the queries over 32 units (gas, blasts, proximity bombs); =2
+        // also each AI's nudge check, its own radius, every frame.
+        static const int s_nTrace = getenv("LT_SPHERETRACE") ? atoi(getenv("LT_SPHERETRACE")) : 0;
+        if (s_nTrace && pList->m_nInList && (s_nTrace >= 2 || r > 32.0f))
+        {
+            std::string sNames;
+            int n = 0;
+            for (ObjectLink* q = pList->m_pFirstLink; q && n < 8; q = q->m_pNext, ++n)
+            {
+                const SRec* p = CLTServerObjects::FromHandle(q->m_hObject);
+                if (!sNames.empty()) sNames += ", ";
+                sNames += (p && !p->m_sName.empty()) ? p->m_sName
+                        : std::string(p && p->m_pClass ? p->m_pClass->m_ClassName : "?");
+            }
+            if (pList->m_nInList > n) sNames += ", ...";
+            printf("[SPHERE] t=%.2f (%.0f %.0f %.0f) r=%.0f: %d object(s): %s\n",
+                   LTServerHost_Time(), c[0], c[1], c[2], r, pList->m_nInList, sNames.c_str());
+            fflush(stdout);
+        }
+        return pList;
     }
 
     // ⚠️ SAVING OBJECTS, AND IT IS WHY NOTHING IN THIS GAME MOVED.
@@ -5043,6 +5180,7 @@ namespace
             GetClientUserData      = LTHost_GetClientUserData;
             CreateObjectList       = LTHost_CreateObjectList;
             RelinquishList         = LTHost_RelinquishList;
+            FindObjectsTouchingSphere = LTHost_FindObjectsTouchingSphere;
 
             // ⚠️ The pair the GAME uses to choose its own level -- see the
             // block above LTServerHost_StartWorld.
@@ -5816,6 +5954,24 @@ namespace
             out.m_fAnimTime  = LTHost_AnimElapsed(p->m_fAnimStart);
             out.m_bLooping   = p->m_bAnimLooping;
             LTHost_LayersFor(p, out.m_Layers);
+
+            // ⚠️ ITS COLOUR, ALPHA AND FLAG_NOLIGHT (HANDOVER 5eb) -- the
+            // client provider's rule (ltscene.cpp), from the record's
+            // SetObjectColor bytes. Every model drawn from here was white and
+            // opaque whatever the game set: a Controller FADE, a spawned
+            // Prop's Alpha, a Body copying its character's colour. FLAG2 is
+            // not kept on the server record, so the blend stays normal.
+            // LT_NOSERVERMODELCOLOR=1 = old (says so).
+            static const bool s_bNoColour = []() {
+                const bool b = (getenv("LT_NOSERVERMODELCOLOR") != 0);
+                if (b) { printf("[SERVER] LT_NOSERVERMODELCOLOR=1 -- server-drawn models ignore their colour and alpha (old)\n"); fflush(stdout); }
+                return b; }();
+            if (!s_bNoColour)
+            {
+                if (LTDynamicBlendEnabled()) out.m_fAlpha = p->m_Color[3] / 255.0f;
+                for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k] / 255.0f;
+                out.m_bNoLight = (p->m_Flags & FLAG_NOLIGHT) != 0;
+            }
 
             // ⚠️ THE GAME'S NODE CONTROL lives on the CLIENT mirror of this
             // object -- CNodeController registers it on GetServerObj() as the
@@ -7190,6 +7346,19 @@ void* LTServerHost_ObjectAt(unsigned int i)
     // would integrate the physics of things the game has already destroyed.
     if (!p || !g_Objects.IsLive(p)) return 0;
     return (void*)p;
+}
+
+// ⚠️ A RECORD TAKEN FROM THE LIST IS IN IT (5eg). m_Objects and m_Members
+// change together at all four of their change points (ltserverobjects.cpp),
+// so for a record found BY INDEX the membership half of IsLive is always true
+// and only the dead flag is left to ask. The server ray walks every object for
+// every ray, and that hash lookup alone was 3.5% of M02S01's main thread.
+// Same answer as ObjectAt: LT_RAYGRIDDIFF=1 compares the ray's object loop
+// with the old one, which still walks through ObjectAt.
+void* LTServerHost_ListedObjectAt(unsigned int i)
+{
+    SRec* p = g_Objects.RecordAt(i);
+    return (p && !p->m_bDead) ? (void*)p : 0;
 }
 
 bool LTServerHost_GetLiveCameraTransform(float* pPos3, float* pQuat4)

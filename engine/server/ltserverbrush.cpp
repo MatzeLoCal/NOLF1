@@ -69,6 +69,7 @@ namespace
         int                 m_nMovable;     // index into g_Brushes, or -1
         std::vector<float>  m_Tris;
         std::vector<unsigned int> m_TriPoly;    // LTWorldPolyId per triangle
+        float               m_Box[6];       // m_Tris' bounds at rest: min3 max3 (5ef)
     };
     std::vector<HitBrush>              g_HitBrushes;
     std::map<const void*, size_t>      g_HitIndex;
@@ -330,6 +331,13 @@ void LTServerBrush_Build(const CLTWorld& world)
             }
             if (!hb.m_Tris.empty())
             {
+                for (int k = 0; k < 3; ++k) { hb.m_Box[k] = 1e30f; hb.m_Box[3+k] = -1e30f; }
+                for (size_t t = 0; t + 2 < hb.m_Tris.size(); t += 3)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        if (hb.m_Tris[t+k] < hb.m_Box[k])   hb.m_Box[k]   = hb.m_Tris[t+k];
+                        if (hb.m_Tris[t+k] > hb.m_Box[3+k]) hb.m_Box[3+k] = hb.m_Tris[t+k];
+                    }
                 g_HitIndex[p] = g_HitBrushes.size();
                 g_HitBrushes.push_back(hb);
             }
@@ -671,13 +679,66 @@ void LTServerBrush_Update()
 // Returns -1 when hRec is not a brush object this module knows (the caller
 // keeps its box rule), otherwise 1 for a hit (fraction and normal written),
 // 0 for a miss.
+static void ClosestOnTriangle(const float* p, const float* a, const float* b,
+                              const float* c, float* out);
+
 namespace
 {
+    // ⚠️ THE BOX FIRST (5ef). For every ray LTServerPhys_RayTest walks every
+    // brush object, and this used to transform and test all of each one's
+    // triangles: 15% of the main thread in M02S01 (HANDOVER 5ee). The rest
+    // box's 8 corners go through the same Matrix as the triangles -- an
+    // affine map keeps every vertex inside their hull -- and a brush whose
+    // box the segment does not pass within kBrushPad of is a miss. A hit lies
+    // within 1 unit of its triangle (BrushRay), so no hit is skipped.
+    const float kBrushPad = 4.0f;
+    bool BrushNear(const HitBrush& hb, const float* M, bool bMoved,
+                   const float* pFrom3, const float* d)
+    {
+        float mn[3], mx[3];
+        if (!bMoved)
+            for (int k = 0; k < 3; ++k) { mn[k] = hb.m_Box[k]; mx[k] = hb.m_Box[3+k]; }
+        else
+        {
+            for (int k = 0; k < 3; ++k) { mn[k] = 1e30f; mx[k] = -1e30f; }
+            for (int c = 0; c < 8; ++c)
+            {
+                const float src[3] = { hb.m_Box[(c & 1) ? 3 : 0], hb.m_Box[(c & 2) ? 4 : 1], hb.m_Box[(c & 4) ? 5 : 2] };
+                float o[4];
+                LT3D::TransformPoint(M, src, o);
+                for (int k = 0; k < 3; ++k) { if (o[k] < mn[k]) mn[k] = o[k]; if (o[k] > mx[k]) mx[k] = o[k]; }
+            }
+        }
+        // The segment is pFrom3 + d*f, f in [0,1] (d unnormalised).
+        float f0 = 0.0f, f1 = 1.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float lo = mn[k] - kBrushPad, hi = mx[k] + kBrushPad;
+            if (d[k] == 0.0f)
+            {
+                if (pFrom3[k] < lo || pFrom3[k] > hi) return false;
+                continue;
+            }
+            float a = (lo - pFrom3[k]) / d[k], b = (hi - pFrom3[k]) / d[k];
+            if (a > b) { const float t = a; a = b; b = t; }
+            if (a > f0) f0 = a;
+            if (b < f1) f1 = b;
+            if (f0 > f1) return false;
+        }
+        return true;
+    }
+
     // One brush, one rule. Returns the nearest hit fraction (> 1 = none) and
     // writes its normal (facing the ray) and polygon.
+    //
+    // ⚠️ bOnTri: A HIT MUST LIE ON ITS TRIANGLE (5ef), as the world ray's
+    // (ltworldcollide.cpp SegTri, 5ee): a ray lying in a triangle's plane
+    // leaves rounding in det far above 1e-9, u, v, f are then noise and the
+    // "hit" can be anywhere on the line. Refused when the point is more than
+    // 1 unit off the triangle. The box test above relies on it.
     float BrushRay(const HitBrush& hb, const float* M, bool bMoved,
                    const float* pFrom3, const float* d, bool bTwoSided,
-                   float* nBest, unsigned int* pBestPoly)
+                   float* nBest, unsigned int* pBestPoly, bool bOnTri)
     {
         float fBest = 2.0f;
         for (size_t t = 0; t + 8 < hb.m_Tris.size(); t += 9)
@@ -709,6 +770,14 @@ namespace
             if (w < 0.0f || u + w > 1.0f) continue;
             const float f = (e2[0]*qv[0] + e2[1]*qv[1] + e2[2]*qv[2]) * inv;
             if (f < 0.0f || f > 1.0f || f >= fBest) continue;
+            if (bOnTri)
+            {
+                const float p[3] = { pFrom3[0]+d[0]*f, pFrom3[1]+d[1]*f, pFrom3[2]+d[2]*f };
+                float q[3];
+                ClosestOnTriangle(p, v[0], v[1], v[2], q);
+                const float e[3] = { p[0]-q[0], p[1]-q[1], p[2]-q[2] };
+                if (e[0]*e[0] + e[1]*e[1] + e[2]*e[2] > 1.0f) continue;
+            }
             fBest = f;
             *pBestPoly = (t / 9 < hb.m_TriPoly.size()) ? hb.m_TriPoly[t / 9] : 0;
             float n[3] = { e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0] };
@@ -727,6 +796,20 @@ namespace
     // answer changes the shared rand() sequence and the runs part ways.
     std::map<std::string, unsigned> g_RayDiff;
     unsigned g_nRayDiffAsked = 0;
+
+    // LT_RAYGRIDDIFF=1 -- every brush ray ALSO answered without the box test
+    // (must agree bit for bit) and without the on-triangle rule (counted:
+    // what the rule changes). Census at exit, first disagreements listed.
+    unsigned g_nBoxAsked = 0, g_nBoxAskedMoved = 0, g_nBoxDiff = 0, g_nOnTriChanged = 0;
+    std::map<std::string, unsigned> g_OnTriChanged;
+    void BoxDiffCensus()
+    {
+        printf("\n[BRUSHRAY] %u brush ray(s) asked (%u at a moved brush): %u answered differently without the box test, "
+               "%u changed by the on-triangle rule\n", g_nBoxAsked, g_nBoxAskedMoved, g_nBoxDiff, g_nOnTriChanged);
+        for (std::map<std::string, unsigned>::const_iterator i = g_OnTriChanged.begin(); i != g_OnTriChanged.end(); ++i)
+            printf("          %6u  %s\n", i->second, i->first.c_str());
+        fflush(stdout);
+    }
     void RayDiffCensus()
     {
         unsigned n = 0;
@@ -765,9 +848,64 @@ int LTServerBrush_RayTest(const void* hRec, const float* pFrom3, const float* pT
         if (b) { printf("[PHYS] LT_TWOSIDEDBRUSH=1 -- brush rays hit back faces too\n"); fflush(stdout); }
         return b; }();
 
+    // LT_RAYBRUTE=1 / LT_RAYOFFTRI=1 / LT_RAYGRIDDIFF=1 -- as for world rays
+    // (ltworldcollide.cpp, 5ee): no box test / the old acceptance / both ways.
+    static const bool s_bBrute = []() {
+        const bool b = (getenv("LT_RAYBRUTE") != 0);
+        if (b) { printf("[PHYS] LT_RAYBRUTE=1 -- brush rays test every brush's every triangle (old)\n"); fflush(stdout); }
+        return b; }();
+    static const bool s_bOnTri = []() {
+        const bool b = (getenv("LT_RAYOFFTRI") == 0);
+        if (!b) { printf("[PHYS] LT_RAYOFFTRI=1 -- a brush ray hit need not lie on its triangle (old)\n"); fflush(stdout); }
+        return b; }();
+    static const bool s_bBoxDiff = []() {
+        const bool b = (getenv("LT_RAYGRIDDIFF") != 0);
+        if (b) { printf("[PHYS] LT_RAYGRIDDIFF=1 -- brush rays also asked without the box test and the on-triangle rule\n"); fflush(stdout);
+                 atexit(BoxDiffCensus); }
+        return b; }();
+
     const float d[3] = { pTo3[0]-pFrom3[0], pTo3[1]-pFrom3[1], pTo3[2]-pFrom3[2] };
     float nBest[3] = { 0.0f, 1.0f, 0.0f };
-    const float fBest = BrushRay(hb, M, bMoved, pFrom3, d, s_bTwoSided, nBest, &nBestPoly);
+    const float fBest = (!s_bBrute && !BrushNear(hb, M, bMoved, pFrom3, d)) ? 2.0f
+                      : BrushRay(hb, M, bMoved, pFrom3, d, s_bTwoSided, nBest, &nBestPoly, s_bOnTri);
+
+    if (s_bBoxDiff)
+    {
+        ++g_nBoxAsked;
+        if (bMoved) ++g_nBoxAskedMoved;
+        float n2[3] = { 0.0f, 1.0f, 0.0f }; unsigned int nPoly2 = 0;
+        const float f2 = BrushRay(hb, M, bMoved, pFrom3, d, s_bTwoSided, n2, &nPoly2, s_bOnTri);
+        const bool bHit = fBest <= 1.0f, bHit2 = f2 <= 1.0f;
+        const std::string sName = (hb.m_pRec ? hb.m_pRec->m_sName : std::string("?"));
+        if (bHit != bHit2 || (bHit && (memcmp(&fBest, &f2, sizeof(float)) != 0 || nPoly2 != nBestPoly ||
+                                       memcmp(n2, nBest, sizeof(n2)) != 0)))
+        {
+            if (++g_nBoxDiff <= 20)
+            {
+                printf("[BRUSHRAY] box #%u %-20s ray from (%.1f %.1f %.1f) to (%.1f %.1f %.1f): %s %s f=%.5f, %s %s f=%.5f\n",
+                       g_nBoxDiff, sName.c_str(), pFrom3[0], pFrom3[1], pFrom3[2], pTo3[0], pTo3[1], pTo3[2],
+                       s_bBrute ? "all" : "boxed", bHit ? "HIT" : "miss", fBest,
+                       s_bBrute ? "boxed" : "all", bHit2 ? "HIT" : "miss", f2);
+                fflush(stdout);
+            }
+        }
+        float n3[3] = { 0.0f, 1.0f, 0.0f }; unsigned int nPoly3 = 0;
+        const float f3 = BrushRay(hb, M, bMoved, pFrom3, d, s_bTwoSided, n3, &nPoly3, !s_bOnTri);
+        const bool bHit3 = f3 <= 1.0f;
+        if (bHit3 != bHit2 || (bHit2 && (memcmp(&f3, &f2, sizeof(float)) != 0 || nPoly3 != nPoly2)))
+        {
+            ++g_nOnTriChanged; ++g_OnTriChanged[sName];
+            if (g_nOnTriChanged <= 20)
+            {
+                const float fLen = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                printf("[BRUSHRAY] on-triangle #%u %-20s %.0f-unit ray from (%.1f %.1f %.1f): %s %s at %.2f, %s %s at %.2f\n",
+                       g_nOnTriChanged, sName.c_str(), fLen, pFrom3[0], pFrom3[1], pFrom3[2],
+                       s_bOnTri ? "on-triangle" : "old", bHit2 ? "HIT" : "miss", f2 * fLen,
+                       s_bOnTri ? "old" : "on-triangle", bHit3 ? "HIT" : "miss", f3 * fLen);
+                fflush(stdout);
+            }
+        }
+    }
 
     static const bool s_bDiff = []() {
         const bool b = (getenv("LT_RAYDIFF") != 0);
@@ -778,7 +916,7 @@ int LTServerBrush_RayTest(const void* hRec, const float* pFrom3, const float* pT
     {
         ++g_nRayDiffAsked;
         float nOther[3]; unsigned int nOtherPoly = 0;
-        const float fOther = BrushRay(hb, M, bMoved, pFrom3, d, !s_bTwoSided, nOther, &nOtherPoly);
+        const float fOther = BrushRay(hb, M, bMoved, pFrom3, d, !s_bTwoSided, nOther, &nOtherPoly, s_bOnTri);
         const bool bHit = fBest <= 1.0f, bOther = fOther <= 1.0f;
         const float fLen = sqrtf(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
         if (bHit != bOther || (bHit && fabsf(fBest - fOther) * fLen > 0.01f))
