@@ -615,22 +615,143 @@ namespace
     }
 }
 
+// ⚠️ THE TIMED REVEAL, AND WHY MISSION TEXT NEVER WENT AWAY (5ev).
+//
+// lfSD was ignored here, so lfSD->byLastState stayed LTF_STATE_NONE. The one
+// timed caller, CMissionText (the "4:00pm, September 16 / In view of ..."
+// location text), counts its fade down ONLY in LTF_STATE_DRAW_FINISHED
+// (MissionText.cpp:203) -- so the text stood on screen until the next one
+// replaced it (user report 2026-11-03), appeared all at once, and its typing
+// sound never played.
+//
+// The header's rules (lithfontdefs.h, no implementation survives): a letter
+// every fLetterDelay (LTF_TIMED_LETTERS); after each line but the last
+// fLineDelay (LTF_TIMED_LINES) then a scroll of one line over fLineScrollTime
+// (LTF_TIMED_SCROLL); LTF_EXTRA_LOCKLAST keeps the line being typed at the
+// cursor, the finished ones above it. The clock starts when the string is new
+// to lfSD (CMissionText::Start clears szPrevString). States: UPDATING while
+// typing, LINE_DELAY, SCROLLING, FINISHED. The surface clips what scrolls off
+// its top. Wrapping is the same rule as ltgui_DrawWrappedTinted.
+// LT_NOTIMEDTEXT=1 = the old whole-text-at-once draw, no states (says so).
+namespace
+{
+    bool NoTimedText()
+    {
+        static const bool b = []() {
+            const bool bOld = (getenv("LT_NOTIMEDTEXT") != 0);
+            if (bOld) { printf("[LTTEXT] LT_NOTIMEDTEXT=1 -- timed text drawn whole, never FINISHED (old)\n"); fflush(stdout); }
+            return bOld; }();
+        return b;
+    }
+
+    void ltgui_WrapLines(LithFont* pLith, const char* s, int nWidth, std::vector<std::string>& out)
+    {
+        out.clear();
+        if (!pLith || !s || !*s || nWidth <= 0) return;
+        CLTBitmapFont* pFont = GuiFont(pLith);
+        char line[512];
+        int  nLine = 0, lastSpace = -1;
+        for (const char* p = s; ; ++p)
+        {
+            if (*p && *p != '\n' && nLine < (int)sizeof(line) - 1)
+            {
+                if (*p == ' ') lastSpace = nLine;
+                line[nLine++] = *p;
+                line[nLine] = 0;
+                if (pFont->MeasureWidth(line) <= nWidth) continue;
+                int nBreak = (lastSpace > 0) ? lastSpace : nLine - 1;
+                out.push_back(std::string(line, (size_t)nBreak));
+                int nStart = (lastSpace > 0) ? nBreak + 1 : nBreak;
+                memmove(line, line + nStart, (size_t)(nLine - nStart) + 1);
+                nLine -= nStart;
+                lastSpace = -1;
+                continue;
+            }
+            if (nLine > 0) { out.push_back(std::string(line, (size_t)nLine)); nLine = 0; line[0] = 0; lastSpace = -1; }
+            if (!*p) break;
+        }
+    }
+
+    void ltgui_DrawTimed(LithFont* pLith, HSURFACE hDest, const char* s, LITHFONTDRAWDATA* lfDD,
+                         LITHFONTSAVEDATA* lfSD, float fNow, int x, int y, int nLineHeight)
+    {
+        if (!s || !*s) return;
+        if (lfSD->szPrevString != s || lfSD->byLastState == LTF_STATE_NONE)
+        {
+            lfSD->fStartDrawTime = fNow;
+            lfSD->szPrevString   = (char*)s;
+        }
+
+        std::vector<std::string> lines;
+        if ((lfDD->dwFlags & LTF_DRAW_FORMATTED) && lfDD->dwFormatWidth > 0)
+            ltgui_WrapLines(pLith, s, (int)lfDD->dwFormatWidth, lines);
+        else
+            lines.push_back(s);
+        if (lines.empty()) { lfSD->byLastState = LTF_STATE_DRAW_FINISHED; return; }
+
+        const float fLetter = (lfDD->dwFlags & LTF_TIMED_LETTERS) && lfDD->fLetterDelay > 0.0f ? lfDD->fLetterDelay : 0.0f;
+        const float fPause  = (lfDD->dwFlags & LTF_TIMED_LINES)   && lfDD->fLineDelay   > 0.0f ? lfDD->fLineDelay   : 0.0f;
+        const float fScroll = (lfDD->dwFlags & LTF_TIMED_SCROLL)  && lfDD->fLineScrollTime > 0.0f ? lfDD->fLineScrollTime : 0.0f;
+
+        const size_t n = lines.size();
+        float fTotal = 0.0f;
+        for (size_t i = 0; i < n; ++i)
+            fTotal += (float)lines[i].size() * fLetter + (i + 1 < n ? fPause + fScroll : 0.0f);
+        lfSD->fTotalDrawTime = fTotal;
+
+        // Where the reveal has got to.
+        float t = fNow - lfSD->fStartDrawTime;
+        if (t < 0.0f) t = 0.0f;
+        size_t k = n - 1, nShown = lines[n - 1].size();
+        unsigned char state = LTF_STATE_DRAW_FINISHED;
+        float fUp = 0.0f;                              // scroll, 0..1 of a line
+        for (size_t i = 0; i < n; ++i)
+        {
+            const float fType = (float)lines[i].size() * fLetter;
+            if (t < fType) { k = i; nShown = (size_t)(t / fLetter); state = LTF_STATE_DRAW_UPDATING; break; }
+            t -= fType;
+            if (i + 1 == n) { k = i; nShown = lines[i].size(); state = LTF_STATE_DRAW_FINISHED; break; }
+            if (t < fPause) { k = i; nShown = lines[i].size(); state = LTF_STATE_DRAW_LINE_DELAY; break; }
+            t -= fPause;
+            if (t < fScroll) { k = i; nShown = lines[i].size(); state = LTF_STATE_DRAW_SCROLLING; fUp = t / fScroll; break; }
+            t -= fScroll;
+        }
+
+        const HLTCOLOR color = lfDD->hColor;
+        const bool bTint = (color != 0);
+        const int nUp = (int)(fUp * (float)nLineHeight);
+        for (size_t j = 0; j <= k; ++j)
+        {
+            const std::string sLine = (j < k) ? lines[j] : lines[k].substr(0, nShown);
+            if (sLine.empty()) continue;
+            const int yLine = y - (int)(k - j) * nLineHeight - nUp;
+            ltgui_DrawText(pLith, hDest, sLine.c_str(), x, yLine, lfDD->byJustify, color, bTint);
+        }
+        lfSD->byLastState = state;
+    }
+}
+
 void CLTGUIFont::Draw(HSTRING hString, HSURFACE hDest, LITHFONTDRAWDATA* lfDD, int x, int y, LITHFONTSAVEDATA* lfSD)
 {
-    // ⚠️ lfSD is the TIMED reveal's state, and it is still ignored: the whole
-    // string appears at once instead of typing itself out. The caller reads
-    // lfSD->byLastState back to drive its typing sound, so that sound never
-    // plays. Cosmetic, and recorded rather than hidden.
-    (void)lfSD;
     if (!m_pClientDE || !hString) return;
 
+    if (lfDD && lfSD && (lfDD->dwFlags & LTF_DRAW_TIMED) && !NoTimedText())
+    {
+        ltgui_DrawTimed(m_pLithFont, hDest, m_pClientDE->GetStringData(hString), lfDD, lfSD,
+                        m_pClientDE->GetTime(), x, y, GetHeight());
+        return;
+    }
     ltgui_DrawData(m_pLithFont, hDest, m_pClientDE->GetStringData(hString),
                    lfDD, x, y, GetHeight());
 }
 
 void CLTGUIFont::Draw(char* szString, HSURFACE hDest, LITHFONTDRAWDATA* lfDD, int x, int y, LITHFONTSAVEDATA* lfSD)
 {
-    (void)lfSD;
+    if (lfDD && lfSD && (lfDD->dwFlags & LTF_DRAW_TIMED) && m_pClientDE && !NoTimedText())
+    {
+        ltgui_DrawTimed(m_pLithFont, hDest, szString, lfDD, lfSD, m_pClientDE->GetTime(), x, y, GetHeight());
+        return;
+    }
     ltgui_DrawData(m_pLithFont, hDest, szString, lfDD, x, y, GetHeight());
 }
 

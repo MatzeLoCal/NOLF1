@@ -1178,6 +1178,24 @@ namespace
                        fo.dli_sname ? fo.dli_sname : "-", fp.dli_sname ? fp.dli_sname : "-");
                 fflush(stdout);
             }
+            // ...and THROUGH A BRUSH OBJECT (5ev): every brush object the ray
+            // meets nearer than the player -- a door, a window -- with its
+            // flags, so "seen through a door" is a line, not a suspicion.
+            for (unsigned int i = 0; i < g_Objects.ObjectCount(); ++i)
+            {
+                const SRec* b = g_Objects.RecordAt(i);
+                if (!b || b->m_bDead || !b->m_pClass) continue;
+                if (b->m_Type != OT_WORLDMODEL) continue;
+                float fFrac = 0.0f, nb[3];
+                unsigned int nBP = 0;
+                if (LTServerBrush_RayTest((const void*)b, from, to, &fFrac, nb, &nBP) != 1) continue;
+                if (fFrac * len + 0.5f >= fPlayer) continue;
+                printf("[SIGHT] t=%.2f ray (%.0f %.0f %.0f)->(%.0f %.0f %.0f) reached the player at %.0f THROUGH brush %s (%s) at %.0f, flags 0x%08x%s%s\n",
+                       LTServerHost_Time(), from[0], from[1], from[2], to[0], to[1], to[2], fPlayer,
+                       b->m_sName.c_str(), b->m_pClass->m_ClassName, fFrac * len, (unsigned)b->m_Flags,
+                       (b->m_Flags & FLAG_SOLID) ? " SOLID" : " not solid", (b->m_Flags & FLAG_VISIBLE) ? " VISIBLE" : "");
+                fflush(stdout);
+            }
         }
 
         // ⚠️ LT_RAYTRACE=1 -- SHORT rays, with the server clock. This exists to
@@ -7313,6 +7331,34 @@ void LTServerHost_Update(float fElapsed)
                 s_State[p] = nNow;
             }
             s_Last[p] = std::vector<float>(p->m_Pos, p->m_Pos + 3);
+        }
+    }
+
+    // LT_POSWATCH="<name>[,<every n updates>]" -- where that object is, every
+    // n server updates (default 30), for as long as the run lasts. LT_MOVETRACE
+    // shows only the first 30 MoveObject calls; a lift or a gondola that
+    // stops half way needs the whole journey (5eu).
+    if (const char* pW = getenv("LT_POSWATCH"))
+    {
+        static std::string s_sName;
+        static int s_nEvery = 0, s_n = 0;
+        if (!s_nEvery)
+        {
+            s_sName = pW;
+            const size_t c = s_sName.find(',');
+            s_nEvery = 30;
+            if (c != std::string::npos) { s_nEvery = atoi(s_sName.c_str() + c + 1); s_sName.resize(c); }
+            if (s_nEvery < 1) s_nEvery = 1;
+        }
+        if ((s_n++ % s_nEvery) == 0)
+        {
+            std::vector<BaseClass*> v;
+            g_Objects.FindByName(s_sName.c_str(), v);
+            for (size_t i = 0; i < v.size(); ++i)
+                if (SRec* p = CLTServerObjects::FromHandle(v[i] ? v[i]->m_hObject : 0))
+                    printf("[POS] t=%.3f %s (%.1f %.1f %.1f)\n", g_fServerTime, s_sName.c_str(),
+                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2]);
+            fflush(stdout);
         }
     }
 

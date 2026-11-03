@@ -180,6 +180,8 @@ LTRESULT CLTSoundMgr::PlaySound(PlaySoundInfo* pInfo, HLTSOUND& hResult)
     if (p.m_fPitch <= 0.0f) p.m_fPitch = 1.0f;
 
     for (int k = 0; k < 3; ++k) p.m_Pos[k] = ((float*)&pInfo->m_vPosition)[k];
+    p.m_nPriority = (int)pInfo->m_nPriority;
+    p.m_pTag      = pC;
 
     // LT_SNDTRACE: WHERE and how loud -- "played" is not "heard". A 3D voice
     // line placed at the wrong point, or with radii that put the listener
@@ -199,7 +201,39 @@ LTRESULT CLTSoundMgr::PlaySound(PlaySoundInfo* pInfo, HLTSOUND& hResult)
         m_Mixer.Play(&pC->m_Samples[0], (unsigned int)pC->m_Samples.size(),
                      pC->m_nRate, pC->m_nChannels, p);
 
-    if (!nVoice) return LT_ERROR;          // every voice busy
+    if (!nVoice)                           // every voice busy
+    {
+        m_Dropped[pInfo->m_szSoundName]++;
+        // LT_SNDDROPTRACE=1 -- WHAT holds the voices when one is refused:
+        // name, positioning, the game's priority, loop, distance and the gain
+        // it is mixed at now. "Not heard" and "not played" look the same in
+        // play (user report 2026-11-03, M14S01: the player's gun) (5et).
+        static const bool s_bDropTrace = (getenv("LT_SNDDROPTRACE") != 0);
+        static unsigned int s_nShown = 0;
+        if (s_bDropTrace && s_nShown < 8)
+        {
+            ++s_nShown;
+            std::vector<CLTMixer::VoiceInfo> vi;
+            m_Mixer.Snapshot(vi);
+            printf("[SNDDROP] refused %s (prio %u, %s) -- %u voices busy:\n", pInfo->m_szSoundName,
+                   (unsigned)pInfo->m_nPriority, p.m_eMode == CLTMixer::k3D ? "3d" : (p.m_eMode == CLTMixer::kAmbient ? "ambient" : "local"),
+                   (unsigned)vi.size());
+            for (size_t i = 0; i < vi.size(); ++i)
+            {
+                const char* pName = "?";
+                for (std::map<std::string, Cached*>::const_iterator it = m_Cache.begin(); it != m_Cache.end(); ++it)
+                    if (it->second == vi[i].m_pTag) { pName = it->first.c_str(); break; }
+                printf("[SNDDROP]   %-40s %-7s prio %d %s dist %6.0f gain %.3f%s\n", pName,
+                       vi[i].m_eMode == CLTMixer::k3D ? "3d" : (vi[i].m_eMode == CLTMixer::kAmbient ? "ambient" : "local"),
+                       vi[i].m_nPriority, vi[i].m_bLoop ? "LOOP" : "    ", vi[i].m_fDist, vi[i].m_fGain,
+                       vi[i].m_bHeard ? "" : "  (no channel)");
+            }
+            fflush(stdout);
+        }
+        return LT_ERROR;
+    }
+
+    if (m_Mixer.IsStarved(nVoice)) m_Starved[pInfo->m_szSoundName]++;
 
     // ⚠️ The handle is only handed BACK when the caller asked for it. Without
     // GETHANDLE the game never kills the sound, so publishing a handle it will
@@ -317,6 +351,10 @@ LTRESULT CLTSoundMgr::InitSound(InitSoundInfo* pSoundInfo)
 
     if (pSoundInfo->m_nVolume <= 100)
         m_Mixer.SetVolume((float)pSoundInfo->m_nVolume / 100.0f);
+
+    // The game's MaxSWVoices (GameClientShell.cpp: console var, else 32): how
+    // many sounds are MIXED at once, chosen by earshot and priority (5et).
+    m_Mixer.SetChannels(pSoundInfo->m_nNumSWVoices);
 
     printf("[SOUND] %u Hz stereo, %u voices requested, master volume %u%%\n",
            (unsigned)CLTMixer::kRate, (unsigned)pSoundInfo->m_nNumSWVoices,
@@ -491,6 +529,17 @@ void CLTSoundMgr::DumpCensus() const
            m_nPlayed, m_nDecoded, m_nMissing);
     printf("        IsSoundDone asked %u time(s), answered yes %u\n",
            m_nDoneAsks, m_nDoneYes);
+    printf("        voices: peak %u busy at once, %u sound(s) refused for want of one\n",
+           m_Mixer.PeakVoices(), m_Mixer.Dropped());
+    for (std::map<std::string,unsigned int>::const_iterator it = m_Dropped.begin();
+         it != m_Dropped.end(); ++it)
+        printf("        refused x%-4u %s\n", it->second, it->first.c_str());
+    unsigned int nStarved = 0;
+    for (std::map<std::string,unsigned int>::const_iterator it = m_Starved.begin(); it != m_Starved.end(); ++it)
+        nStarved += it->second;
+    printf("        %u sound(s) started in earshot without a channel\n", nStarved);
+    for (std::map<std::string,unsigned int>::const_iterator it = m_Starved.begin(); it != m_Starved.end(); ++it)
+        printf("        no channel x%-4u %s\n", it->second, it->first.c_str());
 
     for (std::map<std::string,unsigned int>::const_iterator it = m_Played.begin();
          it != m_Played.end(); ++it)

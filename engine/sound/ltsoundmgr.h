@@ -133,6 +133,8 @@ private:
     unsigned int                    m_nDoneYes;
     std::vector<std::string>        m_MissingNames;
     std::map<std::string, unsigned int> m_Played;
+    std::map<std::string, unsigned int> m_Dropped;  // no voice free (5et)
+    std::map<std::string, unsigned int> m_Starved;  // in earshot, started without a channel
     bool                            m_bSaidUnsupported;
     bool                            m_bListenerInClient;
     float                           m_ListenerPos[3];

@@ -209,6 +209,63 @@ int main()
         check(Peak(out, 0) == 32767, "and sit exactly at the rail");
     }
 
+    printf("\n--- voices by earshot and priority (5et) ---\n");
+    {
+        // ⚠️ M14S01: 29 of the 32 voices were ambient loops thousands of units
+        // away, silent, and they refused the player's own gun. A sound out of
+        // earshot keeps running but takes no channel.
+        CLTMixer mx;
+        const float ear[3] = { 0, 0, 0 }, right[3] = { 1, 0, 0 };
+        mx.SetListener(ear, right);
+        CLTMixer::Params far;
+        far.m_eMode = CLTMixer::k3D; far.m_bLoop = true;
+        far.m_fInner = 100.0f; far.m_fOuter = 500.0f;
+        far.m_Pos[0] = 5000.0f;                         // 10x its outer radius
+        bool bAll = true;
+        for (int i = 0; i < 40; ++i)
+            bAll = bAll && mx.Play(&tone[0], (unsigned)tone.size(), kSrcRate, 1, far) != 0;
+        check(bAll, "forty silent loops all get a slot");
+
+        CLTMixer::Params gun;                           // local, priority 4
+        gun.m_nPriority = 4;
+        const unsigned int hGun = mx.Play(&tone[0], (unsigned)tone.size(), kSrcRate, 1, gun);
+        check(hGun != 0, "the gun is not refused behind them");
+        check(!mx.IsStarved(hGun), "and it has a channel");
+        std::vector<short> out(512 * 2, 0);
+        mx.Render(&out[0], 512);
+        check(Peak(out, 0) > 10000, "and it is heard");
+    }
+    {
+        // More sounds in earshot than channels: the lowest-ranked wait, a
+        // higher one takes a channel at once, and a waiting one-shot still
+        // ends when it would have.
+        CLTMixer mx;
+        mx.SetChannels(4);
+        const float ear[3] = { 0, 0, 0 }, right[3] = { 1, 0, 0 };
+        mx.SetListener(ear, right);
+        CLTMixer::Params near3d;
+        near3d.m_eMode = CLTMixer::k3D;
+        near3d.m_fInner = 100.0f; near3d.m_fOuter = 2000.0f;
+        near3d.m_Pos[0] = 300.0f;
+        unsigned int h[6];
+        for (int i = 0; i < 6; ++i)
+        {
+            near3d.m_nPriority = i;                     // 0 lowest .. 5 highest
+            h[i] = mx.Play(&tone[0], (unsigned)tone.size(), kSrcRate, 1, near3d);
+        }
+        check(mx.IsStarved(h[0]) && mx.IsStarved(h[1]), "with 4 channels the two lowest priorities wait");
+        check(!mx.IsStarved(h[2]) && !mx.IsStarved(h[5]), "and the four highest are mixed");
+
+        near3d.m_nPriority = 9;
+        const unsigned int hHigh = mx.Play(&tone[0], (unsigned)tone.size(), kSrcRate, 1, near3d);
+        check(!mx.IsStarved(hHigh) && mx.IsStarved(h[2]), "a higher one takes the lowest mixed one's channel");
+
+        mx.Advance(CLTMixer::kRate / 2);
+        check(!mx.IsDone(h[0]), "a waiting one-shot is still running half way");
+        mx.Advance(CLTMixer::kRate / 2 + 64);
+        check(mx.IsDone(h[0]), "and has ended at its own length");
+    }
+
     printf("\n=== %d passed, %d failed ===\n", g_nPass, g_nFail);
     return g_nFail ? 1 : 0;
 }

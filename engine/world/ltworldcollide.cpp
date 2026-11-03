@@ -108,7 +108,13 @@ void CLTWorldCollide::Build(const CLTWorld& world)
     m_TriFront.clear();
     m_ModelOff.clear();
     m_nModelsOff = 0;
-    m_Cells.clear();
+    // Released, not just cleared: clear() kept the capacity, so the 914 MB of
+    // M14S02's old table stayed allocated for the rest of the session (5es).
+    std::vector<std::vector<int> >().swap(m_Cells);
+    std::vector<unsigned int>().swap(m_Block);
+    std::vector<unsigned int>().swap(m_BlockOff);
+    std::vector<int>().swap(m_CellTris);
+    m_bOldTable = false;
     m_bBuilt = false;
 
     const std::vector<LTWorldModelHeader>& mdl = world.GetModels();
@@ -196,9 +202,10 @@ void CLTWorldCollide::Build(const CLTWorld& world)
         if (m_Dim[k] > 512) m_Dim[k] = 512;     // keep the table bounded
     }
 
-    m_Cells.resize((size_t)m_Dim[0] * m_Dim[1] * m_Dim[2]);
-
     const int nTris = (int)(m_Tris.size() / 9);
+
+    // Each triangle's cell range, the same rule for both tables.
+    std::vector<int> range((size_t)nTris * 6);
     for (int i = 0; i < nTris; ++i)
     {
         const float* t = &m_Tris[(size_t)i * 9];
@@ -213,16 +220,128 @@ void CLTWorldCollide::Build(const CLTWorld& world)
                 if (f > tmx[a]) tmx[a] = f;
             }
         }
+        CellRange(tmn, tmx, &range[(size_t)i * 6], &range[(size_t)i * 6 + 3]);
+    }
 
-        int lo[3], hi[3];
-        CellRange(tmn, tmx, lo, hi);
+    // ---- the two-level table (5es) ---- //
+    // Pass 1 finds the occupied blocks and counts each cell's entries; pass 2
+    // turns the counts into offsets; pass 3 files the triangles in ascending
+    // order, which is the order the old per-cell push_back gave.
+    for (int k = 0; k < 3; ++k) m_BDim[k] = (m_Dim[k] + kBlockSide - 1) >> kBlockBits;
+    m_Block.assign((size_t)m_BDim[0] * m_BDim[1] * m_BDim[2], kNoBlock);
+    unsigned int nOcc = 0;
+    auto Slot = [&](int x, int y, int z, bool bMake) -> unsigned int* {
+        unsigned int& b = m_Block[((size_t)(z >> kBlockBits) * m_BDim[1] + (y >> kBlockBits)) * m_BDim[0]
+                                  + (x >> kBlockBits)];
+        if (b == kNoBlock)
+        {
+            if (!bMake) return 0;
+            b = nOcc++;
+            m_BlockOff.resize((size_t)nOcc * (kBlockCells + 1), 0u);
+        }
+        const unsigned int l = ((((unsigned)z & (kBlockSide - 1)) << kBlockBits | ((unsigned)y & (kBlockSide - 1)))
+                                << kBlockBits) | ((unsigned)x & (kBlockSide - 1));
+        return &m_BlockOff[(size_t)b * (kBlockCells + 1) + l];
+    };
+    for (int i = 0; i < nTris; ++i)
+    {
+        const int* lo = &range[(size_t)i * 6]; const int* hi = lo + 3;
         for (int z = lo[2]; z <= hi[2]; ++z)
             for (int y = lo[1]; y <= hi[1]; ++y)
                 for (int x = lo[0]; x <= hi[0]; ++x)
-                    m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x].push_back(i);
+                    ++Slot(x, y, z, true)[1];
     }
+    unsigned int nRun = 0;
+    for (unsigned int b = 0; b < nOcc; ++b)
+    {
+        unsigned int* o = &m_BlockOff[(size_t)b * (kBlockCells + 1)];
+        o[0] = nRun;
+        for (int l = 0; l < kBlockCells; ++l) { nRun += o[l + 1]; o[l + 1] = nRun; }
+    }
+    m_CellTris.resize(nRun);
+    {
+        std::vector<unsigned int> cur(m_BlockOff);
+        for (int i = 0; i < nTris; ++i)
+        {
+            const int* lo = &range[(size_t)i * 6]; const int* hi = lo + 3;
+            for (int z = lo[2]; z <= hi[2]; ++z)
+                for (int y = lo[1]; y <= hi[1]; ++y)
+                    for (int x = lo[0]; x <= hi[0]; ++x)
+                    {
+                        const size_t at = (size_t)(Slot(x, y, z, false) - m_BlockOff.data());
+                        m_CellTris[cur[at]++] = i;
+                    }
+        }
+    }
+    m_BlockOff.shrink_to_fit();
+
+    // ---- the old table, only when asked (says so) ---- //
+    static const bool s_bOld   = (getenv("LT_OLDGRID") != 0);
+    static const bool s_bCheck = (getenv("LT_GRIDCHECK") != 0);
+    if (s_bOld || s_bCheck)
+    {
+        m_Cells.resize((size_t)m_Dim[0] * m_Dim[1] * m_Dim[2]);
+        for (int i = 0; i < nTris; ++i)
+        {
+            const int* lo = &range[(size_t)i * 6]; const int* hi = lo + 3;
+            for (int z = lo[2]; z <= hi[2]; ++z)
+                for (int y = lo[1]; y <= hi[1]; ++y)
+                    for (int x = lo[0]; x <= hi[0]; ++x)
+                        m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x].push_back(i);
+        }
+    }
+    if (s_bCheck)
+    {
+        size_t nDiffer = 0, nEntries = 0;
+        for (int z = 0; z < m_Dim[2]; ++z)
+            for (int y = 0; y < m_Dim[1]; ++y)
+                for (int x = 0; x < m_Dim[0]; ++x)
+                {
+                    const std::vector<int>& c = m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x];
+                    const int *p, *e;
+                    CellTris(x, y, z, p, e);
+                    nEntries += c.size();
+                    if ((size_t)(e - p) != c.size() || (c.size() && memcmp(p, &c[0], c.size() * sizeof(int)) != 0))
+                        ++nDiffer;
+                }
+        printf("[COLLIDE] LT_GRIDCHECK=1 -- %zu cells, %zu entries: %zu cell(s) differ from the old table\n",
+               m_Cells.size(), nEntries, nDiffer);
+        fflush(stdout);
+    }
+    if (s_bOld)
+    {
+        static bool bSaid = false;
+        if (!bSaid) { bSaid = true; printf("[COLLIDE] LT_OLDGRID=1 -- the old one-vector-per-cell table is read (old)\n"); fflush(stdout); }
+        m_bOldTable = true;
+    }
+    else if (s_bCheck)
+        std::vector<std::vector<int> >().swap(m_Cells);
 
     m_bBuilt = true;
+}
+
+
+void CLTWorldCollide::GridStats(unsigned int* pOccupied, size_t* pEntries, size_t* pBytes) const
+{
+    unsigned int nOcc = 0; size_t nEnt = 0;
+    size_t nBytes = m_Cells.capacity() * sizeof(std::vector<int>);
+    for (size_t i = 0; i < m_Cells.size(); ++i)
+        nBytes += m_Cells[i].capacity() * sizeof(int);
+    nBytes += (m_Block.capacity() + m_BlockOff.capacity()) * sizeof(unsigned int)
+            + m_CellTris.capacity() * sizeof(int);
+    if (m_bBuilt)
+        for (int z = 0; z < m_Dim[2]; ++z)
+            for (int y = 0; y < m_Dim[1]; ++y)
+                for (int x = 0; x < m_Dim[0]; ++x)
+                {
+                    const int *p, *e;
+                    CellTris(x, y, z, p, e);
+                    if (e != p) ++nOcc;
+                    nEnt += (size_t)(e - p);
+                }
+    if (pOccupied) *pOccupied = nOcc;
+    if (pEntries)  *pEntries  = nEnt;
+    if (pBytes)    *pBytes    = nBytes;
 }
 
 
@@ -255,9 +374,9 @@ void CLTWorldCollide::Gather(const float* pMin3, const float* pMax3,
         for (int y = lo[1]; y <= hi[1]; ++y)
             for (int x = lo[0]; x <= hi[0]; ++x)
             {
-                const std::vector<int>& c =
-                    m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x];
-                for (size_t i = 0; i < c.size(); ++i) out.push_back(c[i]);
+                const int *p, *e;
+                CellTris(x, y, z, p, e);
+                out.insert(out.end(), p, e);
             }
 
     // ⚠️ A triangle spanning several cells appears several times. Left as is:
@@ -802,11 +921,11 @@ bool CLTWorldCollide::RayStatic(const float* o, const float* d, float fLen, bool
                 for (int y = lo[1]; y <= hi[1]; ++y)
                     for (int x = lo[0]; x <= hi[0]; ++x)
                     {
-                        const std::vector<int>& cl =
-                            m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x];
-                        for (size_t j = 0; j < cl.size(); ++j)
+                        const int *pc, *pe;
+                        CellTris(x, y, z, pc, pe);
+                        for (; pc != pe; ++pc)
                         {
-                            const size_t i = (size_t)cl[j];
+                            const size_t i = (size_t)*pc;
                             if (st.tri[i] == nRay) continue;
                             st.tri[i] = nRay;
                             test(i);

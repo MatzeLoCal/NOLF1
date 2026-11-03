@@ -52,12 +52,45 @@ public:
         float   m_fVolume;      // 0..1
         float   m_fPitch;       // 1 = as recorded
         bool    m_bLoop;
+        int     m_nPriority;    // the game's PlaySoundInfo priority (5et)
+        const void* m_pTag;     // the caller's, for diagnostics only
 
         Params()
             : m_eMode(kLocal), m_fInner(0), m_fOuter(0),
-              m_fVolume(1.0f), m_fPitch(1.0f), m_bLoop(false)
+              m_fVolume(1.0f), m_fPitch(1.0f), m_bLoop(false),
+              m_nPriority(0), m_pTag(0)
         { m_Pos[0] = m_Pos[1] = m_Pos[2] = 0.0f; }
     };
+
+    // One live voice, as diagnostics see it (LT_SNDDROPTRACE, 5et).
+    struct VoiceInfo
+    {
+        const void* m_pTag;
+        Mode        m_eMode;
+        int         m_nPriority;
+        float       m_fGain;        // the louder channel's gain right now
+        float       m_fDist;        // from the listener (0 for local)
+        bool        m_bLoop;
+        bool        m_bHeard;       // has a channel (5et)
+    };
+    void            Snapshot(std::vector<VoiceInfo>& out) const;
+
+    // ⚠️ VOICES GO BY EARSHOT AND PRIORITY (5et), as in the donor's
+    // CSoundMgr::Update. Every sound keeps a SLOT while it lives; only the
+    // best nChannels of those in earshot are MIXED. Out of earshot = beyond
+    // 1.5 x its outer radius, or volume 0. Order: local sounds first, then
+    // priority + volume / distance; on a tie the one already heard, then the
+    // newest. A sound that is not heard still runs on, so a loop stays in step
+    // and a one-shot ends when it would have. nChannels is the game's
+    // MaxSWVoices (32).
+    void            SetChannels(unsigned int n) { m_nChannelsMax = n ? n : 32u; }
+    // In earshot but no channel free for it -- the case a player hears as
+    // "the sound did not play" (diagnostics).
+    bool            IsStarved(unsigned int nVoice) const
+    { const Voice* p = Find(nVoice); return p && p->m_bEar && !p->m_bAudible; }
+    void            Assign();
+    unsigned int    Dropped() const { return m_nDropped; }
+    unsigned int    PeakVoices() const { return m_nPeak; }
 
     CLTMixer();
 
@@ -142,11 +175,16 @@ private:
         Params          m_Params;
         unsigned int    m_nId;
         bool            m_bActive;
+        bool            m_bAudible = true;  // mixed, not just running (5et)
+        bool            m_bEar = true;      // in earshot at the last Assign
+        unsigned int    m_nSerial = 0;      // start order, newest wins a tie
+        unsigned int    m_nFreedGen = 0;    // render pass in which the main thread freed it
     };
 
     Voice*          Find(unsigned int nId);
     const Voice*    Find(unsigned int nId) const;
     void            GainsFor(const Voice& v, float& fL, float& fR) const;
+    static void     AdvanceVoice(Voice& v, unsigned int nFrames);
 
     std::vector<Voice>  m_Voices;
     unsigned int        m_nNextId;
@@ -154,6 +192,15 @@ private:
     float               m_Right[3];
     float               m_fMaster;
     bool                m_bPaused;
+    unsigned int        m_nDropped = 0;
+    unsigned int        m_nPeak = 0;
+    unsigned int        m_nChannelsMax = 32;
+    unsigned int        m_nSerial = 0;
+    // Render passes completed. A slot the MAIN thread frees (Stop, Assign's
+    // victims) may still be read by a render pass in flight; it is reused only
+    // once a later pass has finished. Written by the device thread.
+    volatile unsigned int m_nRenderGen = 1;
+    std::vector<int>    m_Order;            // Assign's scratch
 };
 
 // The music (HANDOVER 5cj): a source that ADDS nFrames of interleaved stereo

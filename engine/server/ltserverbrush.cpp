@@ -297,6 +297,41 @@ void LTServerBrush_Build(const CLTWorld& world)
         }
     }
 
+    // ⚠️ AND WHAT A KEYFRAMER MOVES (5eu). A KeyFramer's `ObjectName` lists
+    // the objects it carries along its keys (KeyFramer.cpp, MoveObject every
+    // update). A brush named there is no door, so it stayed STATIC: the server
+    // object travelled, while the model drawn and the hull stood on stayed
+    // where the level built them. M14S02's gondola (`Gondola`, the hull;
+    // `gondolaFacade`, what is seen; `arc1`, `arc2`) never left the station,
+    // Cate never reached MadeItTrigger, and the lever's 30 s timer failed the
+    // mission (user report 2026-11-03). LT_NOKEYFRAMEDBRUSH=1 = static again
+    // (says so).
+    static const bool s_bNoKeyframed = []() {
+        const bool b = (getenv("LT_NOKEYFRAMEDBRUSH") != 0);
+        if (b) { printf("[BRUSH] LT_NOKEYFRAMEDBRUSH=1 -- brushes a KeyFramer moves stay static (old)\n"); fflush(stdout); }
+        return b; }();
+    std::set<std::string> keyframed;
+    if (!s_bNoKeyframed)
+    {
+        const std::vector<LTWorldObject>& objs = world.GetObjects();
+        for (size_t o = 0; o < objs.size(); ++o)
+        {
+            if (strcasecmp(objs[o].m_sType.c_str(), "KeyFramer") != 0) continue;
+            const LTWorldProperty* pn = objs[o].Find("ObjectName");
+            if (!pn || pn->m_nType != 0 || pn->m_sString.empty()) continue;
+            std::string cur;
+            const std::string& v = pn->m_sString;
+            for (size_t k = 0; k <= v.size(); ++k)
+            {
+                const char c = (k < v.size()) ? v[k] : ';';
+                if (c == ';' || c == ',' || c == ' ' || c == '\t')
+                { if (!cur.empty()) keyframed.insert(Upper(cur)); cur.clear(); }
+                else cur += c;
+            }
+        }
+    }
+    unsigned int nKeyframed = 0;
+
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         const LTWorldModelHeader& W = mdl[i];
@@ -367,7 +402,9 @@ void LTServerBrush_Build(const CLTWorld& world)
                    (p->m_Flags & FLAG_SOLID) ? " SOLID" : "",
                    mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]);
         }
-        if (!Movable(p) && !attached.count(Upper(W.m_sName)))
+        const bool bKeyframed = keyframed.count(Upper(W.m_sName)) != 0;
+        if (bKeyframed && !Movable(p) && !attached.count(Upper(W.m_sName))) ++nKeyframed;
+        if (!Movable(p) && !attached.count(Upper(W.m_sName)) && !bKeyframed)
         {
             if (!(p->m_Flags & FLAG_SOLID) && !NoBrushFlags())
             {
@@ -451,6 +488,8 @@ void LTServerBrush_Build(const CLTWorld& world)
            (unsigned int)g_Brushes.size(), nTris);
     printf("[BRUSH] %u brush object(s); %u not solid -- excluded from collision\n",
            (unsigned int)g_BrushObjects.size(), nNonSolid);
+    if (nKeyframed)
+        printf("[BRUSH] %u of the movable ones are moved by a KeyFramer (5eu)\n", nKeyframed);
     fflush(stdout);
     LTServerBrush_UpdateVisibility();
 }

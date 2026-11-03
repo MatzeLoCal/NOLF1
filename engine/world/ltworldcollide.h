@@ -80,7 +80,10 @@ public:
     void            SetExcluded(const std::vector<std::string>& names) { m_Excluded = names; }
 
     unsigned int    Triangles() const { return (unsigned int)(m_Tris.size() / 9); }
-    unsigned int    Cells() const     { return (unsigned int)m_Cells.size(); }
+    unsigned int    Cells() const     { return m_bBuilt ? (unsigned int)((size_t)m_Dim[0] * m_Dim[1] * m_Dim[2]) : 0u; }
+    // Cells holding anything, triangle entries over all cells, and the bytes
+    // the cell table takes (5es -- M14S02's 39.5M cells).
+    void            GridStats(unsigned int* pOccupied, size_t* pEntries, size_t* pBytes) const;
 
     // Moves a sphere from pos by delta, sliding along whatever it hits.
     // Writes the resolved centre back into pos.
@@ -178,7 +181,40 @@ private:
     std::vector<float>              m_DynBox;   // per kDynBlock of m_Dyn: min3 max3 (5ee)
     std::vector<float>              m_DynRayBox;    // ...and of m_DynRay
     std::vector<std::string>        m_Excluded;
-    std::vector<std::vector<int> >  m_Cells;    // triangle indices per cell
+    // ⚠️ THE CELL TABLE IS TWO-LEVEL (5es). One std::vector per cell cost 24
+    // bytes for every EMPTY cell: M14S02's triangles span 145,000 units, its
+    // 39.5M cells are 97% empty, and the table was 914 MB for 9 MB of indices.
+    // Now: blocks of 8x8x8 cells; a block that holds nothing is one word, an
+    // occupied one has kBlockCells+1 offsets into one flat array. Each cell
+    // still lists the same triangles in the same (ascending) order, so every
+    // ray and sphere move reads the same candidates as before.
+    enum { kBlockBits = 3, kBlockSide = 1 << kBlockBits,
+           kBlockCells = kBlockSide * kBlockSide * kBlockSide };
+    static constexpr unsigned int kNoBlock = 0xFFFFFFFFu;
+    std::vector<unsigned int>       m_Block;    // per block: its slot in m_BlockOff, or kNoBlock
+    std::vector<unsigned int>       m_BlockOff; // per occupied block: kBlockCells+1 offsets into m_CellTris
+    std::vector<int>                m_CellTris; // every cell's triangle indices, cell after cell
+    int                             m_BDim[3];
+    // The OLD table, built only for LT_OLDGRID=1 (read instead) or
+    // LT_GRIDCHECK=1 (compared cell by cell with the new one).
+    std::vector<std::vector<int> >  m_Cells;
+    bool                            m_bOldTable = false;
+    void            CellTris(int x, int y, int z, const int*& pBegin, const int*& pEnd) const
+    {
+        if (m_bOldTable)
+        {
+            const std::vector<int>& c = m_Cells[((size_t)z * m_Dim[1] + y) * m_Dim[0] + x];
+            pBegin = c.empty() ? 0 : &c[0]; pEnd = pBegin + c.size();
+            return;
+        }
+        const unsigned int b = m_Block[((size_t)(z >> kBlockBits) * m_BDim[1] + (y >> kBlockBits)) * m_BDim[0]
+                                       + (x >> kBlockBits)];
+        if (b == kNoBlock) { pBegin = pEnd = 0; return; }
+        const unsigned int* o = &m_BlockOff[(size_t)b * (kBlockCells + 1)];
+        const unsigned int l = ((((unsigned)z & (kBlockSide - 1)) << kBlockBits | ((unsigned)y & (kBlockSide - 1)))
+                                << kBlockBits) | ((unsigned)x & (kBlockSide - 1));
+        pBegin = m_CellTris.data() + o[l]; pEnd = m_CellTris.data() + o[l + 1];
+    }
     float                           m_TriMin[3];    // the triangles' own bounds (5ee)
     float                           m_TriMax[3];
     unsigned int                    m_nSerial;      // which Build, for the ray stamps
