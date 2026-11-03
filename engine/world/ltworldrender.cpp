@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <strings.h>
 #include <algorithm>
 #include <set>
 
@@ -116,6 +117,8 @@ CLTWorldScene::~CLTWorldScene()
          it != m_Models.end(); ++it) delete it->second;
     for (std::map<std::pair<int, const LT3DTexture*>, LT3DTexture*>::iterator it = m_MirrorPseudo.begin();
          it != m_MirrorPseudo.end(); ++it) delete it->second;
+    for (std::map<std::string, CLTSprite*>::iterator it = m_SprInfo.begin();
+         it != m_SprInfo.end(); ++it) delete it->second;
 }
 
 
@@ -615,6 +618,30 @@ bool LTSpritesEnabled()
 }
 
 
+// ---- THE SPRITE CLOCK (HANDOVER 5em) -- see ltworldrender.h ------------- //
+namespace { double g_fSpriteClock = 0.0; }
+void   LTWorldSetSpriteClock(double fSeconds) { g_fSpriteClock = fSeconds > 0.0 ? fSeconds : 0.0; }
+double LTWorldSpriteClock()                   { return g_fSpriteClock; }
+
+bool LTRotatableSpritesEnabled()
+{
+    static const bool b = []() {
+        const bool bOff = (getenv("LT_NOROTSPRITES") != 0);
+        if (bOff) { printf("[LT3D] LT_NOROTSPRITES=1 -- rotatable sprites face the camera (old)\n"); fflush(stdout); }
+        return !bOff; }();
+    return b;
+}
+
+bool LTSpriteAnimEnabled()
+{
+    static const bool b = []() {
+        const bool bOff = (getenv("LT_NOSPRANIM") != 0);
+        if (bOff) { printf("[LT3D] LT_NOSPRANIM=1 -- every sprite shows frame 0: particles, sprite objects, .spr surfaces, PolyGrids (old)\n"); fflush(stdout); }
+        return !bOff; }();
+    return b;
+}
+
+
 // ⚠️ LT_NOSKY=1 skips the sky PASS while leaving the sky model excluded from
 // the world pass, so the frame is the level and nothing else. It is a
 // diagnostic, not a feature: when the two backends disagree over a large flat
@@ -669,6 +696,96 @@ bool LTMirrorsEnabled()
         if (b) { printf("[LT3D] LT_NOMIRRORS=1 -- mirrors show their texture, no reflection (old)\n"); fflush(stdout); }
         return b; }();
     return !s_bOff && s_bMirrorsConsole;
+}
+
+// See ltworldrender.h (HANDOVER 5el).
+namespace { bool s_bEnvConsole = true; float s_fEnvScale = 1.0f; }
+void LTWorldSetEnvMaps(bool bOn, float fScale)
+{
+    s_bEnvConsole = bOn;
+    s_fEnvScale = (fScale > 0.0f && fScale < 1000.0f) ? fScale : 1.0f;
+}
+bool LTEnvMapsEnabled()
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOENVMAP") != 0);
+        if (b) { printf("[LT3D] LT_NOENVMAP=1 -- world environment maps are not drawn (old)\n"); fflush(stdout); }
+        return b; }();
+    return !s_bOff && s_bEnvConsole;
+}
+float LTEnvMapScale() { return s_fEnvScale; }
+
+// See ltworldrender.h (HANDOVER 5en).
+namespace { bool s_bChromeConsole = false; std::string s_sChromeMap; float s_fChromePan = 0.0005f, s_fChromeScale = 1.0f; }
+void LTWorldSetChrome(bool bOn, const char* pEnvMap, float fPanSpeed, float fScale)
+{
+    s_bChromeConsole = bOn;
+    s_sChromeMap = (pEnvMap && pEnvMap[0]) ? pEnvMap : "Tex\\Chrome.dtx";
+    s_fChromePan = (fPanSpeed == fPanSpeed && fabsf(fPanSpeed) < 1.0f) ? fPanSpeed : 0.0005f;
+    s_fChromeScale = (fScale > 0.0f && fScale < 1000.0f) ? fScale : 1.0f;
+}
+bool LTChromeEnabled()
+{
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOCHROME") != 0);
+        if (b) { printf("[LT3D] LT_NOCHROME=1 -- model chrome is not drawn (old)\n"); fflush(stdout); }
+        return b; }();
+    return !s_bOff && s_bChromeConsole;
+}
+
+bool CLTWorldScene::ChromeFor(const float* pEye3, const float* pFwd3, const float* pUp3,
+                              LTModelDraw::LTModelChrome& out)
+{
+    if (!LTChromeEnabled()) return false;
+    out.m_pEnv = GetTexture(s_sChromeMap);
+    if (!out.m_pEnv) return false;
+    // ⚠️ THE CAMERA'S OWN RIGHT, LithTech's: up x forward (x right, y up, z
+    // forward, left-handed). The sprite passes build the opposite vector,
+    // which a symmetric quad never notices; a chrome map would be mirrored.
+    out.m_Right[0] = pUp3[1]*pFwd3[2] - pUp3[2]*pFwd3[1];
+    out.m_Right[1] = pUp3[2]*pFwd3[0] - pUp3[0]*pFwd3[2];
+    out.m_Right[2] = pUp3[0]*pFwd3[1] - pUp3[1]*pFwd3[0];
+    const float rl = sqrtf(out.m_Right[0]*out.m_Right[0] + out.m_Right[1]*out.m_Right[1] + out.m_Right[2]*out.m_Right[2]);
+    if (rl > 1e-6f) for (int k = 0; k < 3; ++k) out.m_Right[k] /= rl;
+    // ...and its up, square to forward and right.
+    out.m_Up[0] = pFwd3[1]*out.m_Right[2] - pFwd3[2]*out.m_Right[1];
+    out.m_Up[1] = pFwd3[2]*out.m_Right[0] - pFwd3[0]*out.m_Right[2];
+    out.m_Up[2] = pFwd3[0]*out.m_Right[1] - pFwd3[1]*out.m_Right[0];
+    out.m_Scale = 0.5f / s_fChromeScale;
+    out.m_PanU  = 0.5f + pEye3[0] * s_fChromePan;
+    out.m_PanV  = 0.5f + pEye3[2] * s_fChromePan;
+    return true;
+}
+
+namespace
+{
+    // ⚠️ THE ORIGINAL'S ENVIRONMENT COORDINATES (HANDOVER 5el), d3d.ren
+    // 0x1001e950 step for step, per VERTEX as it does: I = vertex - eye,
+    // R = I - 2(N.I)N normalised, v = 0.5 - 0.5 R.y, u = 0.5 - 0.5 R.x --
+    // or R.z on a wall that faces mostly along X (N.y^2 <= 0.54439 and
+    // N.x^2 >= N.z^2) -- both times the scale (DetailTextureScale, read at
+    // 0x1008fe3c by the env pass's caller). N's sign does not matter: N.I N
+    // and the squares are the same either way.
+    void EnvCoords(const float* P, const float* E, const float* N, float fScale,
+                   float* pU, float* pV)
+    {
+        const float I[3] = { P[0] - E[0], P[1] - E[1], P[2] - E[2] };
+        const float d = 2.0f * (N[0]*I[0] + N[1]*I[1] + N[2]*I[2]);
+        float R[3] = { I[0] - d*N[0], I[1] - d*N[1], I[2] - d*N[2] };
+        const float l = sqrtf(R[0]*R[0] + R[1]*R[1] + R[2]*R[2]);
+        if (l != 0.0f) { R[0] /= l; R[1] /= l; R[2] /= l; }
+        const bool bXWall = !(N[1]*N[1] > 0.54439f) && !(N[2]*N[2] > N[0]*N[0]);
+        *pU = (0.5f - 0.5f * (bXWall ? R[2] : R[0])) * fScale;
+        *pV = (0.5f - 0.5f * R[1]) * fScale;
+    }
+}
+
+void CLTWorldScene::EyeInModel(const float* pEye3, const float* L, float* pOut3)
+{
+    // L is rigid (a world model's rotation and position): inverse = R^T (e - t).
+    const float d[3] = { pEye3[0] - L[3], pEye3[1] - L[7], pEye3[2] - L[11] };
+    for (int c = 0; c < 3; ++c)
+        pOut3[c] = L[0*4+c]*d[0] + L[1*4+c]*d[1] + L[2*4+c]*d[2];
 }
 
 
@@ -827,6 +944,26 @@ bool CLTWorldScene::ResolveObjectSpriteFile(size_t i, LTSpriteDraw& out, bool* p
 
 // ⚠️ ONCE PER LEVEL (HANDOVER 5ec) -- see ltworldrender.h. Built on the first
 // question after Load (the prop types are read inside Load, so they are here).
+bool CLTWorldScene::ObjectChromeFile(size_t i) const
+{
+    const std::vector<LTWorldObject>& obj = m_World.GetObjects();
+    if (i >= obj.size()) return false;
+    if (obj[i].m_sType == "PropType")
+    {
+        const LTWorldProperty* pT = obj[i].Find("Type");
+        const CLTPropTypes::Entry* pE = (pT && !pT->m_sString.empty()) ? m_PropTypes.Find(pT->m_sString) : 0;
+        return pE && pE->m_bChrome;
+    }
+    const LTWorldProperty* pC = obj[i].Find("Chrome");
+    return pC && pC->m_bBool;
+}
+
+bool CLTWorldScene::ObjectChrome(size_t i) const
+{
+    if (!ObjectResolutionReady()) return ObjectChromeFile(i);
+    return i < m_ObjModelRes.size() && m_ObjModelRes[i].m_bChrome;
+}
+
 bool CLTWorldScene::ObjectResolutionReady() const
 {
     static const bool s_bOff = []() {
@@ -843,8 +980,14 @@ bool CLTWorldScene::ObjectResolutionReady() const
     {
         ObjModelRes& m = m_ObjModelRes[i];
         m.m_bOK = ResolveObjectModelFile(i, m.m_sModel, m.m_sSkin, &m.m_bChromakey, &m.m_fAlpha, &m.m_nBlendOp);
+        m.m_bChrome = m.m_bOK && ObjectChromeFile(i);
         ObjSpriteRes& r = m_ObjSpriteRes[i];
         r.m_bSprite = ResolveObjectSpriteFile(i, r.m_Draw, &r.m_bFileOn);
+        if (r.m_bSprite && LTSpriteAnimEnabled())
+        {
+            const CLTSprite* pS = SpriteInfo(r.m_Draw.m_sSprite);
+            if (pS && pS->GetNumFrames() > 1 && pS->GetFPS() > 0) r.m_pAnim = pS;
+        }
     }
     m_bObjResValid = true;
     return true;
@@ -877,6 +1020,8 @@ bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
 
     bool bFileOn = true;
     const LTSpriteDraw* pDraw = 0;
+    const CLTSprite* pAnim = 0;
+    bool bResolved = false;
     LTSpriteDraw tmp;
     if (ObjectResolutionReady())
     {
@@ -884,6 +1029,8 @@ bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
         if (!r.m_bSprite) return false;
         bFileOn = r.m_bFileOn;
         pDraw = &r.m_Draw;
+        pAnim = r.m_pAnim;
+        bResolved = true;
     }
     else
     {
@@ -897,6 +1044,15 @@ bool CLTWorldScene::ResolveObjectSprite(size_t i, LTSpriteDraw& out) const
     if (nLive == 0) return false;
     if (nLive < 0 && !bFileOn) return false;
     out = *pDraw;
+    // ⚠️ ITS FRAME OF THE MOMENT (5em): 423 placements are animated -- candle
+    // and fire flickers, FlrSpr01 -- and showed frame 0. The level started
+    // them; the preload asks through here too, so both see the same frame.
+    if (pAnim)
+    {
+        const char* pF = pAnim->GetFrame(pAnim->FrameAtMs(LTWorldSpriteClock() * 1000.0));
+        if (pF && pF[0]) out.m_sSprite = pF;
+    }
+    else if (!bResolved) out.m_sSprite = SpriteFrameNow(out.m_sSprite);
     return true;
 }
 
@@ -1040,17 +1196,18 @@ const LT3DTexture* CLTWorldScene::GetTexture(const std::string& sName, bool bBle
     // knows the difference. Without this those surfaces got no texture at all
     // and drew flat shaded, which reads as a lighting fault.
     //
-    // ⚠️ Frame 0, deliberately, and it is a STILL for now. The sprite carries
-    // a real frame rate (1..30) so animating is a clock away, but the clock is
-    // the one thing that would make world rendering non-reproducible, and the
-    // frame contract is built on it being reproducible. Animate when there is
-    // somewhere to put the time that the harness can hold still.
+    // ⚠️ AND IT ANIMATES (5em). It used to be frame 0 for good, because a
+    // clock would make world rendering non-reproducible; the clock now lives
+    // where the harness can hold it still (LTWorldSpriteClock: 0 unless the
+    // host advances it). A multi-frame sprite loads EVERY frame here and keeps
+    // the alias in m_AnimSurf, which UpdateAnimatedSurfaces points at the
+    // frame of the moment; a still is the alias of its frame 0, as before.
     if (EndsWith(sName, ".spr"))
     {
-        CLTSprite spr;
-        if (spr.LoadThroughFileMgr(m_pFileMgr, sName.c_str()) && spr.GetNumFrames() > 0)
+        const CLTSprite* pSpr = SpriteInfo(sName);
+        if (pSpr && pSpr->GetNumFrames() > 0)
         {
-            const std::string sFrame = spr.GetFrame(0);
+            const std::string sFrame = pSpr->GetFrame(0);
             if (!sFrame.empty() && sFrame != sName)
             {
                 const LT3DTexture* pTex = GetTexture(sFrame, bBlend);
@@ -1069,6 +1226,31 @@ const LT3DTexture* CLTWorldScene::GetTexture(const std::string& sName, bool bBle
                 pAlias->m_Tex.m_bBlend = bBlend;
                 if (bBlend) pAlias->m_Tex.m_bAlphaTest = false;
                 m_Textures[sKey] = pAlias;
+
+                if (pTex && pSpr->GetNumFrames() > 1 && pSpr->GetFPS() > 0 && LTSpriteAnimEnabled())
+                {
+                    AnimSurf a;
+                    a.m_pAlias = pAlias; a.m_pSprite = pSpr; a.m_bBlend = bBlend; a.m_pCur = pTex;
+                    for (unsigned int k = 0; k < pSpr->GetNumFrames(); ++k)
+                    {
+                        // A frame that will not load keeps the one before it
+                        // (frame 0 at worst) rather than leaving a hole.
+                        const LT3DTexture* pK = GetTexture(pSpr->GetFrame(k), bBlend);
+                        a.m_Frames.push_back(pK ? pK : (a.m_Frames.empty() ? pTex : a.m_Frames.back()));
+                    }
+                    pAlias->m_bAnimAlias = true;
+                    // ⚠️ AT THE FRAME OF THE MOMENT ALREADY: a surface is first
+                    // asked for inside a frame, after that frame's update ran.
+                    SetAnimSurfFrame(a, LTWorldSpriteClock() * 1000.0);
+                    m_AnimSurf.push_back(a);
+                    // LT_SPRTRACE=1 -- each animated `.spr` surface as it is loaded.
+                    if (getenv("LT_SPRTRACE"))
+                    {
+                        printf("[SPR] animated surface %s%s: %u frames at %u fps\n", sName.c_str(),
+                               bBlend ? " (blended)" : "", pSpr->GetNumFrames(), pSpr->GetFPS());
+                        fflush(stdout);
+                    }
+                }
                 return pAlias->m_bValid ? &pAlias->m_Tex : 0;
             }
         }
@@ -1168,6 +1350,50 @@ const LT3DTexture* CLTWorldScene::GetTexture(const std::string& sName, bool bBle
     if (bBlend) pC->m_Tex.m_bAlphaTest = false;
 
     m_Textures[sKey] = pC;
+
+    // ⚠️ ITS ENVIRONMENT MAP (HANDOVER 5el): `EnvMap <dtx>` in the command
+    // string, the token the original's texture loader links (2-7% of most
+    // levels' polygons, 30% of T01S02's). Attached whatever EnvMapWorld says
+    // -- the draw asks the switch -- and only to the opaque variant: a
+    // blended surface keeps its plain texture. The base's alpha counts only
+    // when it uploads with one (DXT, 5551, an alpharef, 4444); the 816
+    // 32-bit textures with an unused all-zero channel read as 1, as D3D
+    // reads a texture without alpha.
+    if (pC->m_bValid && !bBlend)
+    {
+        const std::string sCmd = dtx.GetCommandString();
+        const char* p = sCmd.c_str();
+        while (*p)
+        {
+            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+            const char* q = p;
+            while (*q && *q != ' ' && *q != '\t' && *q != '\r' && *q != '\n') ++q;
+            const bool bTok = (q - p == 6) && strncasecmp(p, "EnvMap", 6) == 0;
+            p = q;
+            if (!bTok) continue;
+            while (*p == ' ' || *p == '\t') ++p;
+            q = p;
+            while (*q && *q != ' ' && *q != '\t' && *q != '\r' && *q != '\n') ++q;
+            std::string sEnv(p, (size_t)(q - p));
+            if (sEnv.size() >= 2 && sEnv[0] == '"' && sEnv[sEnv.size() - 1] == '"')
+                sEnv = sEnv.substr(1, sEnv.size() - 2);
+            if (!sEnv.empty() && LowerOf(sEnv) != LowerOf(sName))
+            {
+                pC->m_Tex.m_pEnvMap = GetTexture(sEnv);
+                pC->m_Tex.m_bEnvBaseAlpha = dtx.AlphaIsMeaningful()
+                                            || (dtx.GetIFlags() & CLTDtx::kPrefer4444) != 0;
+                // LT_ENVTRACE=1 -- each texture given an env map, as it loads.
+                if (getenv("LT_ENVTRACE"))
+                {
+                    printf("[ENV] %s -> %s%s, base alpha %s\n", sName.c_str(), sEnv.c_str(),
+                           pC->m_Tex.m_pEnvMap ? "" : " (NOT LOADED)",
+                           pC->m_Tex.m_bEnvBaseAlpha ? "counts" : "reads 1");
+                    fflush(stdout);
+                }
+            }
+            break;
+        }
+    }
     return pC->m_bValid ? &pC->m_Tex : 0;
 }
 
@@ -1303,6 +1529,50 @@ const LT3DTexture* CLTWorldScene::GetObjectAlphaTexture(const std::string& sName
 }
 
 
+// ----------------------------------------------------------------------- //
+//
+// The sprite clock's consumers (HANDOVER 5em) -- see ltworldrender.h.
+//
+// ----------------------------------------------------------------------- //
+
+const CLTSprite* CLTWorldScene::SpriteInfo(const std::string& sSpr) const
+{
+    std::map<std::string, CLTSprite*>::iterator it = m_SprInfo.find(sSpr);
+    if (it != m_SprInfo.end()) return it->second;
+    CLTSprite* pS = new CLTSprite;
+    if (!m_pFileMgr || !pS->LoadThroughFileMgr(m_pFileMgr, sSpr.c_str()) || pS->GetNumFrames() == 0)
+    { delete pS; pS = 0; }
+    m_SprInfo[sSpr] = pS;
+    return pS;
+}
+
+std::string CLTWorldScene::SpriteFrameNow(const std::string& sSpr) const
+{
+    if (!LTSpriteAnimEnabled() || !EndsWith(sSpr, ".spr")) return sSpr;
+    const CLTSprite* pS = SpriteInfo(sSpr);
+    if (!pS || pS->GetNumFrames() < 2 || pS->GetFPS() == 0) return sSpr;
+    const char* pF = pS->GetFrame(pS->FrameAtMs(LTWorldSpriteClock() * 1000.0));
+    return (pF && pF[0]) ? std::string(pF) : sSpr;
+}
+
+void CLTWorldScene::SetAnimSurfFrame(AnimSurf& a, double fMs)
+{
+    const unsigned int k = a.m_pSprite->FrameAtMs(fMs);
+    const LT3DTexture* pK = (k < a.m_Frames.size()) ? a.m_Frames[k] : 0;
+    if (!pK || pK == a.m_pCur) return;
+    a.m_pCur = pK;
+    a.m_pAlias->m_Tex = *pK;
+    a.m_pAlias->m_Tex.m_bBlend = a.m_bBlend;
+    if (a.m_bBlend) a.m_pAlias->m_Tex.m_bAlphaTest = false;
+}
+
+void CLTWorldScene::UpdateAnimatedSurfaces()
+{
+    const double fMs = LTWorldSpriteClock() * 1000.0;
+    for (size_t i = 0; i < m_AnimSurf.size(); ++i) SetAnimSurfFrame(m_AnimSurf[i], fMs);
+}
+
+
 bool CLTWorldScene::ModelObjectAlpha(const LTWorldModelHeader& M,
                                      const ILTWorldModelXform* pXform, float* pAlpha)
 {
@@ -1342,9 +1612,11 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
     for (int k = 0; k < 3; ++k) fZ += (pPos3[k] - pEye3[k]) * pFwd3[k];
 
     // ⚠️ Behind the camera. The bias below divides by fZ, and a sprite behind
-    // the eye has nothing to contribute anyway.
+    // the eye has nothing to contribute anyway. A ROTATABLE one is a flat quad
+    // that can reach past the eye while its centre is behind -- the clipper
+    // takes its triangles as it takes a wall's (5em).
     const float kNearZ = 4.0f;               // the world projection's near plane
-    if (fZ < kNearZ) return;
+    if (fZ < kNearZ && !sd.m_bRotatable) return;
 
     float fSizeX = (float)pTex->m_Width  * sd.m_fScaleX;
     float fSizeY = (float)pTex->m_Height * sd.m_fScaleY;
@@ -1353,7 +1625,7 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
     // constants. A glow sprite is DELIBERATELY not perspective-correct in
     // size: it shrinks as you walk into it and grows as you walk away, which
     // is how a point light reads as a point light.
-    if (sd.m_bGlow)
+    if (sd.m_bGlow && !sd.m_bRotatable)
     {
         float f = (fZ - 10.0f) / (500.0f - 10.0f);
         if (f < 0.0f) f = 0.0f;
@@ -1370,7 +1642,7 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
     // shrink would make every flare balloon as it approached the eye; the
     // pair together leave the picture identical and only change which side of
     // the depth test the sprite lands on.
-    if (sd.m_bZBias)
+    if (sd.m_bZBias && !sd.m_bRotatable)
     {
         float fBias = -20.0f;
         if (fZ + fBias < kNearZ) fBias = kNearZ - fZ;
@@ -1382,6 +1654,26 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
 
     float R[3], U[3];
     for (int k = 0; k < 3; ++k) { R[k] = pRight3[k] * fSizeX; U[k] = pUp3[k] * fSizeY; }
+
+    // ⚠️ FLAG_ROTATEABLESPRITE (5em) -- the donor's d3d_DrawRotatableSprite:
+    // the object's own right and up, times its scale and the texture size, no
+    // glow; the bias moves each CORNER toward the eye and shrinks it to match
+    // (below), since a flat quad has no single depth. Was drawn facing the
+    // camera: a bullet mark turned with the view instead of lying on the wall.
+    if (sd.m_bRotatable)
+    {
+        float Mr[16];
+        const float kZero[3] = { 0.0f, 0.0f, 0.0f };
+        LT3D::FromQuatPos(sd.m_Quat, kZero, Mr);
+        fSizeX = (float)pTex->m_Width  * sd.m_fScaleX;
+        fSizeY = (float)pTex->m_Height * sd.m_fScaleY;
+        for (int k = 0; k < 3; ++k)
+        {
+            c[k] = pPos3[k];
+            R[k] = Mr[k*4+0] * fSizeX;
+            U[k] = Mr[k*4+1] * fSizeY;
+        }
+    }
 
     // ⚠️ +up gets V = 0. The projection carries a Y flip (LT3D::Perspective)
     // precisely so that world-up ends at the TOP of a top-down frame buffer,
@@ -1397,6 +1689,19 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
         W[2][k] = c[k] - U[k] + R[k];
         W[3][k] = c[k] - U[k] - R[k];
     }
+    if (sd.m_bRotatable && sd.m_bZBias)
+        for (int q = 0; q < 4; ++q)
+        {
+            float rel[3], z = 0.0f, x = 0.0f, y = 0.0f;
+            for (int k = 0; k < 3; ++k) rel[k] = W[q][k] - pEye3[k];
+            for (int k = 0; k < 3; ++k) { z += rel[k] * pFwd3[k]; x += rel[k] * pRight3[k]; y += rel[k] * pUp3[k]; }
+            if (z <= kNearZ) continue;
+            float fBias = -20.0f;
+            if (z + fBias < kNearZ) fBias = kNearZ - z;
+            const float f = 1.0f + fBias / z;
+            for (int k = 0; k < 3; ++k)
+                W[q][k] = pEye3[k] + pRight3[k] * x * f + pUp3[k] * y * f + pFwd3[k] * (z + fBias);
+        }
 
     LT3DVert v[4];
     for (int q = 0; q < 4; ++q)
@@ -1414,10 +1719,10 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
     // inspect with worldview or propview -- this is the only way to ask which
     // file, at what size, with which blend it was.
     if (getenv("LT_SPRDEBUG"))
-        fprintf(stderr, "[SPR] %-34s a=%.3f op=%d glow=%d zb=%d  %dx%d  size %.1fx%.1f  z=%.0f  texa=%d\n",
+        fprintf(stderr, "[SPR] %-34s a=%.3f op=%d glow=%d zb=%d  %dx%d  size %.1fx%.1f  z=%.0f  texa=%d%s\n",
                 sd.m_sSprite.c_str(), sd.m_fAlpha, sd.m_nBlendOp, (int)sd.m_bGlow,
                 (int)sd.m_bZBias, pTex->m_Width, pTex->m_Height, fSizeX, fSizeY, fZ,
-                (int)pTex->m_bTexAlpha);
+                (int)pTex->m_bTexAlpha, sd.m_bRotatable ? "  rot" : "");
 
     static const int kIdx[2][3] = { { 0, 1, 2 }, { 0, 2, 3 } };
     for (int f = 0; f < 2; ++f)
@@ -1715,6 +2020,11 @@ CLTWorldScene::CachedModel* CLTWorldScene::GetModel(const std::string& sModel,
                 pC->m_Skins[k].m_pRGBA  = &pC->m_SkinRGBA[k][0];
                 pC->m_Skins[k].m_Width  = (int)dtx.GetMip(0)->m_nWidth;
                 pC->m_Skins[k].m_Height = (int)dtx.GetMip(0)->m_nHeight;
+                // ⚠️ ITS ALPHA IS THE CHROME MASK (5en) -- counted by the
+                // world env maps' rule (5el): declared, or PREFER4444. 27 of
+                // 29 chrome weapon skins carry 4444 and alpha 117..255.
+                pC->m_Skins[k].m_bEnvBaseAlpha = dtx.AlphaIsMeaningful()
+                                              || (dtx.GetIFlags() & CLTDtx::kPrefer4444) != 0;
                 // ⚠️ THE PROP SAYS WHETHER ITS TEXTURE IS A CUT-OUT, not the
                 // texture. `Chromakey` in Attributes\PropTypes.txt is the
                 // authored flag and it predicts every case this port verified
@@ -1886,6 +2196,7 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
     m_pVisKey = 0;                  // polygon boxes for visibility, rebuilt (5ea)
     m_bObjResValid = false;         // object models and sprites, re-resolved (5ec)
     m_sError.clear();
+    LTWorldSetSpriteClock(0.0);     // the level's sprites start now (5em)
 
     if (!m_World.LoadThroughFileMgr(pFileMgr, pWorldName))
     {
@@ -2795,6 +3106,35 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         if (ePass == kPassOpaque  &&  bTrans && !bMirrorFill) continue;
         if (ePass == kPassBlended && !bTrans && !bMirrorGlass) continue;
 
+        // ⚠️ AN ENVIRONMENT-MAPPED SURFACE (HANDOVER 5el; LT3DTexture::
+        // m_pEnvMap) -- opaque ones only, as the original's env pass. Its
+        // coordinates follow the eye, so the GPU's static recorder leaves it
+        // out and the frame draws it; while m_bEnvActive, each vertex gets
+        // them from the polygon's own plane (Newell's normal: any winding,
+        // any number of corners).
+        const bool bEnvTex = pTex->m_pEnvMap && !bTrans && !bMirrorLive && !bMirrorFill;
+        if (bEnvTex && pSink && pSink->DeferEnvPoly(q)) continue;
+        const bool bEnv = bEnvTex && m_bEnvActive;
+        float envN[3] = { 0.0f, 1.0f, 0.0f };
+        if (bEnv)
+        {
+            float n[3] = { 0.0f, 0.0f, 0.0f };
+            const size_t nv = po.m_Verts.size();
+            for (size_t a = 0; a < nv; ++a)
+            {
+                const unsigned int i0 = po.m_Verts[a].m_nPoint, i1 = po.m_Verts[(a + 1) % nv].m_nPoint;
+                if (i0 >= M.m_Points.size() || i1 >= M.m_Points.size()) continue;
+                const float* p0 = M.m_Points[i0].m_Pos;
+                const float* p1 = M.m_Points[i1].m_Pos;
+                n[0] += (p0[1] - p1[1]) * (p0[2] + p1[2]);
+                n[1] += (p0[2] - p1[2]) * (p0[0] + p1[0]);
+                n[2] += (p0[0] - p1[0]) * (p0[1] + p1[1]);
+            }
+            const float l = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+            if (l > 0.0f) { envN[0] = n[0] / l; envN[1] = n[1] / l; envN[2] = n[2] / l; }
+        }
+        const float fEnvScale = LTEnvMapScale();
+
         // ⚠️ SURF_BRIGHT means FULLBRIGHT -- ignore lighting. Every skybox
         // face carries it. Under the old 1/128 scale an unlit brush's vertex
         // RGB 255 became 2.0 and saturated the sky to flat white -- the first
@@ -2815,6 +3155,7 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                 const LTWorldPoint& pt = M.m_Points[pv.m_nPoint];
                 LT3D::TransformPoint(pMVP, pt.m_Pos, tri[v].m_Clip);
                 for (int q2 = 0; q2 < 3; ++q2) wpos[v][q2] = pt.m_Pos[q2];
+                if (bEnv) EnvCoords(pt.m_Pos, m_EnvEye, envN, fEnvScale, &tri[v].m_U2, &tri[v].m_V2);
 
                 // ⚠️ P and Q carry the TEXEL SCALE in their length -- measured
                 // across 80,913 surfaces they are 1, 2, 4, 8, 0.5, 0.25 and so
@@ -3395,21 +3736,18 @@ bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
     // ⚠️ THE POSE, by time. Keyframe times are milliseconds from the
     // start of the animation; a looping animation wraps on the last
     // key's time, a one-shot holds its last frame -- which is what a
-    // character that has finished `walkstop` should look like.
+    // character that has finished `walkstop` should look like. Between
+    // two keys it is IN BETWEEN them (LTModelDraw::PoseKeys, 5ek).
     LTModelPose pose;
     const LTModelPose* pPose = 0;
     const std::vector<LTABCAnim>& anims = pM->m_Model.GetAnims();
     if (d.m_nAnim >= 0 && (size_t)d.m_nAnim < anims.size()
         && !anims[d.m_nAnim].m_Keyframes.empty())
     {
-        const LTABCAnim& a = anims[d.m_nAnim];
-        const unsigned int nLen = a.m_Keyframes.back().m_nTime;
-        unsigned int t = (unsigned int)(d.m_fAnimTime * 1000.0f);
-        if (nLen > 0) t = d.m_bLooping ? (t % nLen) : (t > nLen ? nLen : t);
-
-        unsigned int kf = 0;
-        for (size_t k = 0; k < a.m_Keyframes.size(); ++k)
-            if (a.m_Keyframes[k].m_nTime <= t) kf = (unsigned int)k;
+        unsigned int kf = 0, kf1 = 0;
+        float fFrac = 0.0f;
+        LTModelDraw::PoseKeys(pM->m_Model, (unsigned)d.m_nAnim, d.m_fAnimTime,
+                              d.m_bLooping, &kf, &kf1, &fFrac);
 
         // ⚠️ WITH THE GAME'S NODE CONTROL when it installed one --
         // the jaw of a speaking character, a head following a speaker.
@@ -3426,16 +3764,20 @@ bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
             if (L.m_nAnim < 0 || (size_t)L.m_nAnim >= anims.size()) continue;
             LTModelDraw::Layer y;
             y.m_nAnim      = (unsigned)L.m_nAnim;
-            y.m_nKeyframe  = LTModelDraw::KeyframeAt(pM->m_Model, (unsigned)L.m_nAnim,
-                                                     L.m_fAnimTime, L.m_bLooping);
+            LTModelDraw::SetLayerTime(y, pM->m_Model, L.m_fAnimTime, L.m_bLooping);
             y.m_nWeightSet = L.m_nWeightSet;
             layers.push_back(y);
         }
 
-        if (LTModelDraw::BuildPose(pM->m_Model, (unsigned)d.m_nAnim, kf, pose,
-                                   bNC ? NodeTrampoline : 0, bNC ? &tr : 0,
-                                   layers.empty() ? 0 : &layers[0],
-                                   (unsigned)layers.size()))
+        // The cross-fade from the previous animation, while it runs (5ek).
+        LTModelDraw::BlendFrom from;
+        from.m_nAnim = d.m_nBlendAnim >= 0 ? (unsigned)d.m_nBlendAnim : 0u;
+        from.m_nKey = d.m_nBlendKey; from.m_fWeight = d.m_fBlendWeight;
+        if (LTModelDraw::BuildPoseSpan(pM->m_Model, (unsigned)d.m_nAnim, kf, kf1, fFrac, pose,
+                                       bNC ? NodeTrampoline : 0, bNC ? &tr : 0,
+                                       layers.empty() ? 0 : &layers[0],
+                                       (unsigned)layers.size(),
+                                       d.m_nBlendAnim >= 0 ? &from : 0))
             pPose = &pose;
     }
 
@@ -3541,6 +3883,22 @@ bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
                    (d.m_nAnim >= 0 && (size_t)d.m_nAnim < anims.size())
                        ? (unsigned)anims[d.m_nAnim].m_Keyframes.size() : 0u,
                    pPose ? "posed" : "BIND (no pose)");
+            // ...the pose itself, as one number per axis: the sum of every
+            // node's posed position. A character stepping keys repeats it
+            // frame after frame and then jumps; one between keys never
+            // repeats while it moves (5ek's measurement).
+            if (pPose)
+            {
+                double sum[3] = { 0.0, 0.0, 0.0 };
+                for (unsigned n = 0; n < pPose->Count(); ++n)
+                    for (int k = 0; k < 3; ++k) sum[k] += pPose->Get(n)[k*4 + 3];
+                unsigned k0 = 0, k1 = 0; float fr = 0.0f;
+                LTModelDraw::PoseKeys(pM->m_Model, (unsigned)d.m_nAnim, d.m_fAnimTime,
+                                      d.m_bLooping, &k0, &k1, &fr);
+                printf("[POSE] %-34s keys %3u->%3u at %.3f  sum (%.4f %.4f %.4f)  fade %d/%u %.3f\n",
+                       d.sModel.c_str(), k0, k1, fr, sum[0], sum[1], sum[2],
+                       d.m_nBlendAnim, d.m_nBlendKey, d.m_nBlendAnim >= 0 ? d.m_fBlendWeight : 1.0f);
+            }
             // ...and every extra tracker blended onto it.
             const std::vector<LTABCWeightSet>& ws = pM->m_Model.GetWeightSets();
             for (size_t l = 0; l < d.m_Layers.size(); ++l)
@@ -3854,6 +4212,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     st.m_nWorldTris = st.m_nObjTris = st.m_nPixels = st.m_nSkyPixels = st.m_nObjects = 0;
     st.m_nDynamic = 0;
     if (!m_bLoaded || !pRGBA || !pDepth) return st;
+    UpdateAnimatedSurfaces();       // `.spr` surfaces to the frame of the moment (5em)
 
     // ---- pass 0: MIRRORS (HANDOVER 5de) ---------------------------------- //
     //
@@ -4086,7 +4445,16 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         camU[2] = camR[0]*camF[1] - camR[1]*camF[0];
     }
 
+    // Model chrome for this camera (5en): passes 3b and 6, opaque models only.
+    LTModelDraw::LTModelChrome chrome;
+    const bool bChromeOK = ChromeFor(pEye3, camF, camU, chrome);
+    auto chromeOf = [&](const LTDynamicModel& d) -> const LTModelDraw::LTModelChrome* {
+        return (bChromeOK && d.m_bChrome && !LTIsTranslucentDraw(d.m_fAlpha, d.m_nBlendOp)) ? &chrome : 0; };
+
     // ---- pass 2: the world ---------------------------------------------- //
+    // ⚠️ THE ENVIRONMENT MAPS (5el) for this pass only -- see m_bEnvActive.
+    m_bEnvActive = LTEnvMapsEnabled();
+    t.m_bEnvMap = m_bEnvActive;
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         if (&mdl[i] == m_pSky) continue;        // drawn already, at infinity
@@ -4108,8 +4476,10 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         // almost everything -- takes the same path it always did, so nothing
         // pays for doors existing.
         float Local[16], ModelMVP[16];
+        for (int k = 0; k < 3; ++k) m_EnvEye[k] = pEye3[k];
         if (pXform && pXform->GetModelTransform(M.m_sName, Local))
         {
+            EyeInModel(pEye3, Local, m_EnvEye);
             LT3D::Multiply(pVP, Local, ModelMVP);
             DrawModel(t, ModelMVP, M, tex, st);
         }
@@ -4135,6 +4505,8 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             DrawModel(t, pVP, M, tex, st, BuildOrder(M, pEye3));
         }
     }
+    m_bEnvActive = false;
+    t.m_bEnvMap = false;
 
     // ...and the reflections of mirrors on a model pass 2 skipped -- one
     // translucent by its object's alpha (5de; see ForEachActiveMirror).
@@ -4410,7 +4782,8 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
                 t, pM->m_Model, ObjMVP, World,
                 pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins, 0, false,
                 PropPose(i, pM),
-                0, false, 0, LTPropMirrorModel());
+                0, false, 0, LTPropMirrorModel(),
+                (bChromeOK && !bTranslucentPass && ObjectChrome(i)) ? &chrome : 0);   // 5en
 
             ++st.m_nObjects;
             st.m_nObjTris += ms.m_nTriangles;
@@ -4454,7 +4827,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
                 t, pM->m_Model, dd.m_ObjMVP, dd.m_World,
                 pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins, 0, false,
                 dd.m_bPose ? &dd.m_Pose : 0,
-                0, false, dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0);
+                0, false, dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0, chromeOf(d));
 
             if (ProbeOn()) { LT3D::g_bProbeHold = true; LT3D::g_nProbeID = 0; }
 
@@ -4671,7 +5044,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
                 t, pM->m_Model, dd.m_ObjMVP, dd.m_World,
                 pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins, 0, false,
                 dd.m_bPose ? &dd.m_Pose : 0,
-                0, false, dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0);
+                0, false, dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0, chromeOf(d));
             ++st.m_nObjects;
             ++st.m_nDynamic;
             st.m_nObjTris += ms.m_nTriangles;

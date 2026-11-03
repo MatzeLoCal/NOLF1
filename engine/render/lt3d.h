@@ -228,6 +228,19 @@ struct LT3DTarget
     // (the default: menus, the sky box, the view weapon).
     float           m_fFarW;
 
+    // ⚠️ THE WORLD PASS'S ENVIRONMENT MAPS ARE ON (HANDOVER 5el): only then is
+    // a texture's m_pEnvMap combined, at the vertices' m_U2/m_V2. Set by the
+    // world pass alone, so nothing else that draws a world texture (sprites,
+    // poly grids, the menu) can pick up an env term at coordinates it never set.
+    bool            m_bEnvMap;
+
+    // ⚠️ MODEL CHROME (HANDOVER 5en): when set, every texel is
+    // lerp(chrome, texel, texel.a) -- the original drew the chrome first and
+    // the skin over it, blended by the skin's alpha -- at m_U2/m_V2, before
+    // the light. The skin's alpha counts only where m_bEnvBaseAlpha says so
+    // (as for world env maps); otherwise it reads 1 and no chrome shows.
+    const struct LT3DTexture* m_pChrome;
+
     // ⚠️ A CONSTRUCTOR, for the reason LT3DTexture has one: every existing
     // caller assigns the four fields above and nothing else, and an
     // uninitialised flag here would change how the game's own frames shade.
@@ -236,7 +249,8 @@ struct LT3DTarget
           m_bAffineColour(false), m_bBilinear(false), m_nMaxAniso(1),
           m_bTrilinear(false), m_pProbeID(0), m_pProbeTex(0), m_pProbeUV(0),
           m_pProbeMip(0), m_bFog(false), m_fFogNear(0.0f), m_fFogFar(1.0f),
-          m_fFogKX(0.0f), m_fFogKY(0.0f), m_fFarW(0.0f)
+          m_fFogKX(0.0f), m_fFogKY(0.0f), m_fFarW(0.0f), m_bEnvMap(false),
+          m_pChrome(0)
     { m_FogRGB[0] = m_FogRGB[1] = m_FogRGB[2] = 0.0f; }
 };
 
@@ -248,6 +262,10 @@ struct LT3DVert
     float m_Clip[4];        // x, y, z, w
     float m_U, m_V;         // texture coordinates, 0..1
     float m_R, m_G, m_B;    // per-vertex modulation, 0..1
+    // ⚠️ THE ENVIRONMENT MAP'S COORDINATES (HANDOVER 5el) -- read only when
+    // the texture has an LT3DTexture::m_pEnvMap. Set by the world pass from
+    // the eye and the polygon's plane, as the original does per vertex.
+    float m_U2 = 0.0f, m_V2 = 0.0f;
 };
 
 // A texture to sample. Nearest-neighbour, wrapping.
@@ -413,6 +431,18 @@ struct LT3DTexture
     // stand-in is used, so the GPU backend can name the reflection's texture.
     int                     m_nMirrorSlot;
 
+    // ⚠️ THE ORIGINAL'S WORLD ENVIRONMENT MAP (HANDOVER 5el) -- a texture whose
+    // DTX command string says `EnvMap <dtx>`. d3d.ren draws such a surface
+    // with the env map on stage 0 (reflection coordinates, m_U2/m_V2) and
+    // this texture on stage 1 as D3DTOP_MODULATEALPHA_ADDCOLOR(TEXTURE,
+    // CURRENT): colour = min(1, base.rgb + base.a * env.rgb), and the light
+    // multiplies that. The base's ALPHA is the reflectivity -- the gloss
+    // masks in M04S02's shiny metal are 0/255 in it. m_bEnvBaseAlpha false =
+    // the texture uploads without an alpha channel, which D3D reads as 1.
+    // Null when the texture has none or EnvMapWorld is off.
+    const LT3DTexture*      m_pEnvMap;
+    bool                    m_bEnvBaseAlpha;
+
     // ⚠️ A CONSTRUCTOR, not an aggregate. Every existing caller builds one of
     // these by assigning the four fields above and nothing else; leaving
     // m_nMips as stack garbage would make the sampler index a mip array full
@@ -424,7 +454,8 @@ struct LT3DTexture
           m_fConstAlpha(1.0f), m_bTexAlpha(true), m_nBlendOp(0),
           m_nMips(0), m_nUVShift(0),
           m_pScreenRGBA(0), m_nScreenW(0), m_nScreenH(0),
-          m_nMirrorPlane(-1), m_pMirrorFallback(0), m_nMirrorSlot(-1)
+          m_nMirrorPlane(-1), m_pMirrorFallback(0), m_nMirrorSlot(-1),
+          m_pEnvMap(0), m_bEnvBaseAlpha(false)
     {
         for (int i = 0; i < kMaxMips; ++i)
         {

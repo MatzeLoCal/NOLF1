@@ -1038,10 +1038,21 @@ void CCheatMgr::Process( CheatCode nCheatCode )
 			SetPos(!s_CheatInfo[nCheatCode].bActive);
 		break;
 
-#ifndef _FINAL
+		// PORT-BEHAVIOUR: mpclip works in the final build. The original kept
+		// this case inside the #ifndef _FINAL block below, so the shipped game
+		// recognised the code and did nothing. Authorised by the project
+		// owner, 2026-11-03. Deliberately not `// PORT:`. See DEVIATIONS.md
+		// E-014.
 		case CHEAT_CLIP:		// toggle clipping mode
 			SetClipMode(!s_CheatInfo[nCheatCode].bActive);
 		break;
+
+#ifndef _FINAL
+#if 0	// PORT-BEHAVIOUR: moved above (E-014)
+		case CHEAT_CLIP:		// toggle clipping mode
+			SetClipMode(!s_CheatInfo[nCheatCode].bActive);
+		break;
+#endif
 
 		case CHEAT_TELEPORT:	// teleport to beginning
 			Teleport();

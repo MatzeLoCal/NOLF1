@@ -11,7 +11,7 @@ host   trees 7
 file   autoexec.cfg 10002 Game
 file   CRES.DLL 774144 nolfgoty.rez
 res    CRES.DLL 6031 strings
-mode   set 640x480x32 hw=1 nullrender
+mode   set 640x480x32 hw=1 Software
 host   CreateClientShell ok
 impl   ILTClient::GetScreenSurface
 impl   ILTClient::GetEngineHook
@@ -32,7 +32,7 @@ impl   ILTClient::RegisterConsoleProgram
 file   Attributes\Attachments.txt 15306 nolfgoty.rez
 stub   ILTClient::SetModelHook
 impl   ILTClient::SetRenderMode
-mode   set 640x480x32 hw=1 skeleton
+mode   set 640x480x32 hw=1 Software
 impl   ILTCursor::LoadCursorBitmapResource
 cursor load #104 (no bitmap)
 cursor set #104

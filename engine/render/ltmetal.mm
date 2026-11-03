@@ -213,6 +213,68 @@ fragment float4 fs_world(VOut in [[stage_in]],
     return float4(c, u.blend != 0 ? clamp(a, 0.0, 1.0) : cover);
 }
 
+// ---- THE WORLD'S ENVIRONMENT MAP (HANDOVER 5el) ---------------------------
+//
+// d3d.ren's rule (LT3DTexture::m_pEnvMap): the env map on stage 0 at the
+// reflection coordinates, the surface's texture on stage 1 as
+// MODULATEALPHA_ADDCOLOR -- min(1, base + base.a * env) -- and the light
+// after it. The same arithmetic as lt3d.cpp's software path, which is the
+// reference; a second UV pair is the only thing the vertex carries extra.
+struct VInEnv {
+    float3 pos [[attribute(0)]];
+    float2 uv  [[attribute(1)]];
+    float3 rgb [[attribute(2)]];
+    float2 uv2 [[attribute(3)]];
+};
+
+struct VOutEnv {
+    float4 pos [[position]];
+    float2 uv;
+    float2 uv2;
+    float  fogZ;
+    float2 fogXY;
+    float3 rgb [[center_no_perspective]];
+    float3 rgbPersp;
+};
+
+vertex VOutEnv vs_env(VInEnv vin [[stage_in]],
+                      constant Uniforms& u [[buffer(1)]])
+{
+    VOutEnv o;
+    o.pos = u.mvp * float4(vin.pos, 1.0);
+    o.uv  = vin.uv;
+    o.uv2 = vin.uv2;
+    o.rgb = vin.rgb;
+    o.rgbPersp = vin.rgb;
+    o.fogZ = o.pos.w;
+    o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
+    return o;
+}
+
+fragment float4 fs_env(VOutEnv in [[stage_in]],
+                       constant Uniforms& u [[buffer(1)]],
+                       constant int& baseAlpha [[buffer(2)]],    // bit 0: base alpha counts; bit 1: chrome (5en)
+                       texture2d<float> tex [[texture(0)]],
+                       texture2d<float> env [[texture(1)]],
+                       sampler smp [[sampler(0)]])
+{
+    float4 t = tex.sample(smp, in.uv);
+    if (u.alphaTest != 0 && t.a < u.alphaRef) discard_fragment();
+    const float a = ((baseAlpha & 1) != 0) ? t.a : 1.0;
+    const float3 e = env.sample(smp, in.uv2).rgb;
+    const float3 b = ((baseAlpha & 2) != 0) ? mix(e, t.rgb, a) : min(t.rgb + a * e, float3(1.0));
+    float3 vc = (u.affineColour != 0) ? in.rgb : in.rgbPersp;
+    float3 c = b * vc;
+    if (u.fogOn != 0 && u.fogFar != u.fogNear)
+    {
+        const float fd = (u.fogKX != 0.0 || u.fogKY != 0.0)
+                       ? length(float3(in.fogXY, in.fogZ)) : in.fogZ;
+        float f = clamp((fd - u.fogNear) / (u.fogFar - u.fogNear), 0.0, 1.0);
+        c = mix(c, u.fogColor.rgb, f);
+    }
+    return float4(c, 1.0);
+}
+
 // ---- GPU SKINNING (HANDOVER 5cd) ------------------------------------------
 //
 // LTModelDraw::Draw's per-vertex work, moved here VERBATIM in meaning: the
@@ -333,6 +395,7 @@ namespace
     // them.
     id<MTLRenderPipelineState>  g_PipeAdd   = nil;
     id<MTLRenderPipelineState>  g_PipeMul   = nil;
+    id<MTLRenderPipelineState>  g_PipeEnv   = nil;     // the env map's two textures (5el)
 
     // ⚠️ THE SKINNING TWINS (HANDOVER 5cd): the same four blend states with
     // vs_skin, no vertex descriptor -- vs_skin reads its buffers by index.
@@ -425,6 +488,7 @@ namespace
 
     // The opaque scene pipeline again with alpha-to-coverage on; null at 1x.
     id<MTLRenderPipelineState> g_ScenePipeA2C = nil;
+    id<MTLRenderPipelineState> g_ScenePipeEnv = nil;   // 5el, at the scene's sample count
 
     // LT_CUTOUTS=0: the scene pass samples cut-outs nearest and discards at
     // the reference, as the old path does, and uploads skip the colour fill.
@@ -470,6 +534,33 @@ namespace
         [d setStorageMode:MTLStorageModePrivate];
         g_DepthTex = [g_Device newTextureWithDescriptor:d];
         return g_DepthTex != nil;
+    }
+
+    // ⚠️ THE ENV MAP'S PIPELINE (HANDOVER 5el) -- a copy of an OPAQUE world
+    // descriptor (offscreen, or the scene's sample count) with the two-texture
+    // shaders and a vertex that carries the second UV pair. Nil when it fails:
+    // the caller then draws those surfaces plain (LTMetal_DrawEnvTris).
+    id<MTLRenderPipelineState> BuildEnvPipe(id<MTLLibrary> lib, MTLRenderPipelineDescriptor* pdOpaque)
+    {
+        id<MTLFunction> vs = [lib newFunctionWithName:@"vs_env"];
+        id<MTLFunction> fs = [lib newFunctionWithName:@"fs_env"];
+        if (!vs || !fs) return nil;
+        MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+        vd.attributes[0].format = MTLVertexFormatFloat3; vd.attributes[0].offset = 0;                 vd.attributes[0].bufferIndex = 0;
+        vd.attributes[1].format = MTLVertexFormatFloat2; vd.attributes[1].offset = sizeof(float) * 3; vd.attributes[1].bufferIndex = 0;
+        vd.attributes[2].format = MTLVertexFormatFloat3; vd.attributes[2].offset = sizeof(float) * 5; vd.attributes[2].bufferIndex = 0;
+        vd.attributes[3].format = MTLVertexFormatFloat2; vd.attributes[3].offset = sizeof(float) * 8; vd.attributes[3].bufferIndex = 0;
+        vd.layouts[0].stride = sizeof(LTMetalEnvVert);
+        vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+        MTLRenderPipelineDescriptor* ed = [pdOpaque copy];
+        [ed setVertexFunction:vs];
+        [ed setFragmentFunction:fs];
+        [ed setVertexDescriptor:vd];
+        [ed setAlphaToCoverageEnabled:NO];
+        NSError* e = nil;
+        id<MTLRenderPipelineState> p = [g_Device newRenderPipelineStateWithDescriptor:ed error:&e];
+        if (!p) { printf("[METAL] env-map pipeline failed: %s\n", e ? [[e localizedDescription] UTF8String] : "?"); fflush(stdout); }
+        return p;
     }
 
     // ⚠️ Shared by the on-screen and offscreen paths, so the two cannot end up
@@ -519,6 +610,7 @@ namespace
             Fail(err ? [[err localizedDescription] UTF8String] : "pipeline failed");
             return false;
         }
+        g_PipeEnv = BuildEnvPipe(lib, pd);
         id<MTLFunction> vsSkin = [lib newFunctionWithName:@"vs_skin"];
         auto skinTwin = [&](int k) {
             if (!vsSkin) return;
@@ -1292,6 +1384,84 @@ void LTMetal_DrawTris(const float* pMVP, unsigned int nTexture,
 }
 
 
+// ---- the world's environment map (HANDOVER 5el) --------------------------- //
+
+void LTMetal_DrawEnvTris(const float* pMVP, unsigned int nTexture, unsigned int nEnvTexture,
+                         const LTMetalEnvVert* pVerts, int nVerts,
+                         bool bAlphaTest, float fAlphaRef, bool bBaseAlpha,
+                         bool bChrome)
+{
+    if (!g_Enc || !pVerts || nVerts < 3 || !pMVP) return;
+    if (nTexture == 0 || nTexture >= g_Textures.size()) return;
+    id<MTLRenderPipelineState> pipe = (g_bSceneVP && g_ScenePipeEnv) ? g_ScenePipeEnv : g_PipeEnv;
+    if (!pipe || nEnvTexture == 0 || nEnvTexture >= g_Textures.size())
+    {
+        // No pipeline or no env map: the surface plain, as before 5el.
+        std::vector<LTMetalVert> plain((size_t)nVerts);
+        for (int i = 0; i < nVerts; ++i)
+        {
+            memcpy(plain[(size_t)i].m_Pos, pVerts[i].m_Pos, sizeof(float) * 3);
+            memcpy(plain[(size_t)i].m_UV,  pVerts[i].m_UV,  sizeof(float) * 2);
+            memcpy(plain[(size_t)i].m_RGB, pVerts[i].m_RGB, sizeof(float) * 3);
+        }
+        LTMetal_DrawTris(pMVP, nTexture, &plain[0], nVerts, bAlphaTest, fAlphaRef);
+        return;
+    }
+
+    const size_t nBytes = sizeof(LTMetalEnvVert) * (size_t)nVerts;
+    if (g_ArenaUsed + nBytes > g_ArenaCap)
+    {
+        size_t nWant = (g_ArenaUsed + nBytes) * 2;
+        if (nWant < (size_t)(4 << 20)) nWant = (size_t)(4 << 20);
+        id<MTLBuffer> nb = [g_Device newBufferWithLength:nWant options:MTLResourceStorageModeShared];
+        if (!nb) return;
+        if (g_Arena && g_ArenaUsed) memcpy([nb contents], [g_Arena contents], g_ArenaUsed);
+        g_Arena = nb;
+        g_ArenaCap = nWant;
+    }
+    memcpy((unsigned char*)[g_Arena contents] + g_ArenaUsed, pVerts, nBytes);
+    const size_t nOffset = g_ArenaUsed;
+    g_ArenaUsed += nBytes;
+
+    // The world's uniforms, as EncodeTris fills them for an opaque run.
+    struct Uniforms { float mvp[16]; int alphaTest; float alphaRef; int blend;
+                      float constAlpha; int affineColour; int a2c; float fogK[2];
+                      float fogColor[4]; float fogNear; float fogFar; int fogOn; int screen; } u;
+    static_assert(sizeof(Uniforms) == 128, "Uniforms must match the MSL struct (128 bytes)");
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) u.mvp[c*4 + r] = pMVP[r*4 + c];
+    u.alphaTest = bAlphaTest ? 1 : 0;
+    u.alphaRef = (fAlphaRef > 0.0f && fAlphaRef <= 1.0f) ? fAlphaRef : 0.5f;
+    u.blend = 0; u.constAlpha = 1.0f;
+    static const int nAffine = (getenv("LT_AFFINECOLOUR") != 0) ? 1 : 0;
+    u.affineColour = nAffine; u.a2c = 0;
+    u.fogK[0] = g_Fog.m_fKX; u.fogK[1] = g_Fog.m_fKY;
+    u.fogOn = g_Fog.m_bOn ? 1 : 0;
+    u.fogNear = g_Fog.m_fNear; u.fogFar = g_Fog.m_fFar;
+    for (int k = 0; k < 3; ++k) u.fogColor[k] = g_Fog.m_RGB[k] / 255.0f;
+    u.fogColor[3] = 1.0f;
+    u.screen = 0;
+    const int nBaseAlpha = (bBaseAlpha ? 1 : 0) | (bChrome ? 2 : 0);
+
+    [g_Enc setRenderPipelineState:pipe];
+    [g_Enc setDepthStencilState:g_Depth];
+    g_nEncMode = 16;        // nothing EncodeTris knows: its next run rebinds
+    static const int nATS = getenv("LT_ATSAMPLER") ? atoi(getenv("LT_ATSAMPLER")) : 1;
+    if (g_bSceneVP && g_SceneSampler)
+        [g_Enc setFragmentSamplerState:((bAlphaTest && nATS && !SceneCutouts()) ? g_SceneSamplerAT : g_SceneSampler) atIndex:0];
+    else
+        [g_Enc setFragmentSamplerState:((bAlphaTest && nATS) ? g_SamplerAT : g_Sampler) atIndex:0];
+    [g_Enc setVertexBuffer:g_Arena offset:nOffset atIndex:0];
+    [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+    [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+    [g_Enc setFragmentBytes:&nBaseAlpha length:sizeof(nBaseAlpha) atIndex:2];
+    [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
+    [g_Enc setFragmentTexture:g_Textures[nEnvTexture] atIndex:1];
+    [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];
+    g_nTris += (unsigned int)(nVerts / 3);
+}
+
+
 // ---- vertex buffers made once (HANDOVER 5bu) ------------------------------ //
 
 namespace { std::vector<id<MTLBuffer> > g_Buffers(1, nil); }   // handle 0 = none
@@ -1704,6 +1874,7 @@ namespace
         [pd setDepthAttachmentPixelFormat:MTLPixelFormatDepth32Float];
         [pd setRasterSampleCount:(NSUInteger)n];
         g_ScenePipes[0] = [g_Device newRenderPipelineStateWithDescriptor:pd error:&err];
+        g_ScenePipeEnv = BuildEnvPipe(lib, pd);
         id<MTLFunction> vsSkinS = [lib newFunctionWithName:@"vs_skin"];
         auto sceneTwin = [&](int k) {
             if (!vsSkinS) return;

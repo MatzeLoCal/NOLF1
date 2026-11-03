@@ -167,6 +167,9 @@ BaseClass* CLTServerObjects::Create(ClassDef* pClass, ObjectCreateStruct* pStruc
         return b; }();
     pRec->m_bAnimLooping = !s_bNoLoop;
     pRec->m_fAnimStart = 0.0f;
+    pRec->m_nBlendAnim = -1;
+    pRec->m_nBlendKey = 0;
+    pRec->m_fBlendSec = 0.0f;
     pRec->m_bFromWorld = false;     // CreateWorldObjects sets it
     pRec->m_nContainerCode = 0;
     pRec->m_nWorldIndex = -1;
@@ -234,6 +237,10 @@ void CLTServerObjects::Apply(Record* pRec, const ObjectCreateStruct* pStruct)
     for (int k = 0; k < 4; ++k) pRec->m_Rot[k] = pStruct->m_Rotation.m_Quat[k];
 
     pRec->m_Flags = pStruct->m_Flags;
+    pRec->m_Flags2 = pStruct->m_Flags2;             // 5em
+    pRec->m_Scale[0] = pStruct->m_Scale.x;
+    pRec->m_Scale[1] = pStruct->m_Scale.y;
+    pRec->m_Scale[2] = pStruct->m_Scale.z;
     pRec->m_Type  = (unsigned char)pStruct->m_ObjectType;
     pRec->m_nContainerCode = pStruct->m_ContainerCode;
 
@@ -388,16 +395,25 @@ unsigned int CLTServerObjects::SweepDead()
     // owner told "your speaker is gone" may itself be in this list, and must
     // still exist to hear it. A handler that removes something else only
     // marks it; the next sweep takes it, links and all.
+    //
+    // A dead record's links are found through its own index, in the order
+    // they were made, by POSITION and re-reading the size: a handler may link
+    // to it again (allowed, see CreateLink), and that link is broken and told
+    // too, as the old restart-from-the-top did. Compaction moves positions, so
+    // it runs here, before any is held, and never from inside a handler.
     static const bool bTrace = (getenv("LT_LIFETRACE") != 0);
+    CompactLinks(false);
     for (size_t i = 0; i < dead.size(); ++i)
     {
         Record* d = dead[i];
-        for (size_t k = 0; k < m_Links.size(); )
+        if (!m_LinkIdx.count(d)) continue;
+        for (size_t j = 0; j < m_LinkIdx[d].size(); ++j)
         {
-            if (m_Links[k].first != d && m_Links[k].second != d) { ++k; continue; }
+            const size_t k = m_LinkIdx[d][j];
             Record* pOwner  = m_Links[k].first;
             Record* pLinked = m_Links[k].second;
-            m_Links.erase(m_Links.begin() + k);
+            if (!pOwner) continue;      // broken already
+            KillLink(k);
             if (bTrace)
             {
                 printf("[LIFE] link broken: %s is told %s is gone\n",
@@ -406,8 +422,8 @@ unsigned int CLTServerObjects::SweepDead()
             }
             if (pOwner->m_pGame)
                 pOwner->m_pGame->EngineMessageFn(MID_LINKBROKEN, (void*)pLinked, 0.0f);
-            k = 0;      // the handler may have created or broken links
         }
+        m_LinkIdx.erase(d);
     }
 
     for (size_t i = 0; i < dead.size(); ++i)
@@ -439,18 +455,89 @@ bool CLTServerObjects::CreateLink(Record* pOwner, Record* pLinked)
         return b; }();
     if (s_bOld) { if (!IsLive(pOwner) || !IsLive(pLinked)) return false; }
     else if (!m_Members.count(pOwner) || !m_Members.count(pLinked)) return false;
-    for (size_t k = 0; k < m_Links.size(); ++k)
-        if (m_Links[k].first == pOwner && m_Links[k].second == pLinked) return true;
+
+    // ⚠️ A SECOND LINK BETWEEN THE SAME TWO OBJECTS IS A SECOND LINK -- the
+    // shipped engine (GOTY lithtech.exe, CreateInterLink 0x43bdb0) refuses
+    // only a self-link and inserts every other one; BreakInterObjectLink
+    // (DisconnectLinks 0x43bbe0, bDisconnectAll 0) takes ONE away. iltserver.h
+    // says "will not create another link", the binary does not. The game
+    // counts on it: CinematicTrigger::SetupLinks links its speaker as
+    // m_hCurSpeaker AND m_hLastSpeaker, then breaks one when the line ends --
+    // with one link only, the speaker's removal told nobody, and HandleOff read
+    // the freed AI (M03S01 hero2, the user's crash 2026-10-31; HANDOVER 5eo).
+    // Trigger::ObjectTouch links its toucher on every touch and never unlinks:
+    // those pile up here as they did there. LT_LINKDEDUPE=1 = one link per
+    // pair (old, says so).
+    static const bool s_bDedupe = []() {
+        const bool b = (getenv("LT_LINKDEDUPE") != 0);
+        if (b) { printf("[SERVER] LT_LINKDEDUPE=1 -- one inter-object link per pair (old: M03S01's cutscene crash)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bDedupe && m_LinkIdx.count(pOwner))
+    {
+        const std::vector<size_t>& v = m_LinkIdx[pOwner];
+        for (size_t j = 0; j < v.size(); ++j)
+            if (m_Links[v[j]].first == pOwner && m_Links[v[j]].second == pLinked) return true;
+    }
+    const size_t k = m_Links.size();
     m_Links.push_back(std::make_pair(pOwner, pLinked));
+    m_LinkIdx[pOwner].push_back(k);
+    m_LinkIdx[pLinked].push_back(k);
+    ++m_nLiveLinks;
     return true;
 }
 
 
+// ONE link, the oldest of that pair -- found through the owner's index, as the
+// shipped engine walks the owner's own list (DisconnectLinks).
 void CLTServerObjects::BreakLink(Record* pOwner, Record* pLinked)
 {
+    if (!pOwner || !m_LinkIdx.count(pOwner)) return;
+    const std::vector<size_t>& v = m_LinkIdx[pOwner];
+    for (size_t j = 0; j < v.size(); ++j)
+        if (m_Links[v[j]].first == pOwner && m_Links[v[j]].second == pLinked)
+        { KillLink(v[j]); return; }
+}
+
+
+void CLTServerObjects::KillLink(size_t k)
+{
+    m_Links[k] = std::pair<Record*, Record*>((Record*)0, (Record*)0);
+    --m_nLiveLinks;
+    ++m_nDeadLinks;
+}
+
+
+// ⚠️ BROKEN LINKS ARE LEFT AS HOLES and their positions stay in both ends'
+// indexes; this squeezes them out and rebuilds the indexes. Only where no
+// position is held: the top of SweepDead, and Links() (the save). Unforced it
+// waits until the holes are half the table, so its cost stays linear in the
+// links made -- a player standing in a Trigger is linked to it every frame
+// (60 a second, never broken), and erasing from the middle of one list per
+// break made a long stay quadratic.
+void CLTServerObjects::CompactLinks(bool bForce)
+{
+    if (!m_nDeadLinks) return;
+    if (!bForce && (m_nDeadLinks < 256 || m_nDeadLinks * 2 < m_Links.size())) return;
+    std::vector<std::pair<Record*, Record*> > kept;
+    kept.reserve(m_nLiveLinks);
     for (size_t k = 0; k < m_Links.size(); ++k)
-        if (m_Links[k].first == pOwner && m_Links[k].second == pLinked)
-        { m_Links.erase(m_Links.begin() + k); return; }
+        if (m_Links[k].first) kept.push_back(m_Links[k]);
+    m_Links.swap(kept);
+    m_LinkIdx.clear();
+    for (size_t k = 0; k < m_Links.size(); ++k)
+    {
+        m_LinkIdx[m_Links[k].first].push_back(k);
+        m_LinkIdx[m_Links[k].second].push_back(k);
+    }
+    m_nDeadLinks = 0;
+}
+
+
+void CLTServerObjects::ClearLinks()
+{
+    m_Links.clear();
+    m_LinkIdx.clear();
+    m_nLiveLinks = m_nDeadLinks = 0;
 }
 
 
@@ -461,9 +548,13 @@ void CLTServerObjects::Destroy(Record* pRec)
     // ⚠️ Silently drop any link still naming it -- the allocator may hand the
     // same address to the next object, and a stale entry would then notify an
     // owner about an object it never linked.
-    for (size_t k = 0; k < m_Links.size(); )
-        if (m_Links[k].first == pRec || m_Links[k].second == pRec) m_Links.erase(m_Links.begin() + k);
-        else ++k;
+    if (m_LinkIdx.count(pRec))
+    {
+        const std::vector<size_t>& v = m_LinkIdx[pRec];
+        for (size_t j = 0; j < v.size(); ++j)
+            if (m_Links[v[j]].first) KillLink(v[j]);
+        m_LinkIdx.erase(pRec);
+    }
 
     for (size_t i = 0; i < m_Objects.size(); ++i)
     {
@@ -565,7 +656,7 @@ void CLTServerObjects::Term()
     DestroyAll();
     m_Objects.clear();
     m_Members.clear();
-    m_Links.clear();
+    ClearLinks();
     m_ByWorldIndex.clear();
     m_WorldMade.clear();
     m_Classes.clear();
@@ -582,7 +673,7 @@ unsigned int CLTServerObjects::ClearObjects()
     DestroyAll();
     m_Objects.clear();
     m_Members.clear();
-    m_Links.clear();
+    ClearLinks();
     m_ByWorldIndex.clear();
     m_WorldMade.clear();
 

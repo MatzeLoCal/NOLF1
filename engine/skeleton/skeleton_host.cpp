@@ -644,6 +644,12 @@ static LTBOOL LTHost_IsCommandOn(int nCommand)
     return LTCommand_IsOn(nCommand) ? LTTRUE : LTFALSE;
 }
 
+// The message line turns the controls off while it is open (5er).
+static void LTHost_SetInputState(LTBOOL bOn)
+{
+    LTCommand_SetInputState(bOn != 0);
+}
+
 
 // The objects the game moves through the client physics -- CMoveMgr's own
 // local object (CMoveMgr.cpp:2074), NOT the client object, which only follows
@@ -756,6 +762,18 @@ public:
         }
         if (g_ClientMovers.size() > 16) g_ClientMovers.clear();
         g_ClientMovers.insert((void*)hObj);
+        // ⚠️ FLAG_GOTHRUWORLD MEANS NO WORLD. The donor's mover returns before
+        // any world collision for such an object (moveobject.cpp:167) and
+        // skips solid world models too (MaybeCollide:1037). CMoveMgr sets it,
+        // with FLAG_SOLID cleared, for spectator mode (CMoveMgr.cpp:2260) --
+        // the mpclip cheat -- and every move still went through the wall test,
+        // so the "flight" stopped at the first wall (HANDOVER 5eq).
+        // LT_OLDGOTHRUWORLD=1 = collide anyway (old; says so).
+        if ((LTScene_GetObjectFlags((void*)hObj) & FLAG_GOTHRUWORLD) && !LTScene_OldGoThruWorld())
+        {
+            LTScene_MoveThrough((void*)hObj, want);
+            return LT_OK;
+        }
         LTScene_MoveWithCollision((void*)hObj, want, 0);
         return LT_OK;
     }
@@ -1028,6 +1046,30 @@ static void LTHost_UpdateFog()
     // renders 32-bit, which is what the original asks for before it offers
     // reflections.
     LTWorldSetMirrors(F("DrawPortals", 1.0f) != 0.0f);
+    // ⚠️ WORLD ENVIRONMENT MAPS (HANDOVER 5el): the game's "Environment Map"
+    // option writes EnvMapWorld (FolderAdvDisplay.cpp:198); d3d.ren registers
+    // it at 1. The env coordinates are scaled by DetailTextureScale (autoexec
+    // 1.0; d3d.ren's own default 0.2).
+    LTWorldSetEnvMaps(F("EnvMapWorld", 1.0f) != 0.0f, F("DetailTextureScale", 0.2f));
+    // ⚠️ MODEL CHROME (HANDOVER 5en): the game's "Chrome" option writes
+    // EnvMapEnable (FolderAdvDisplay.cpp:199; d3d.ren registers it at 0);
+    // the level's chrome map arrives as the console line `EnvMap <dtx>`
+    // (GameClientShell.cpp, Tex\Chrome.dtx unless the level says otherwise).
+    {
+        const LTConsoleVar* v = c ? c->Find("EnvMap") : 0;
+        const char* pMap = v ? v->m_sValue.c_str() : "";
+        LTWorldSetChrome(F("EnvMapEnable", 0.0f) != 0.0f, pMap,
+                         F("EnvPanSpeed", 0.0005f), F("EnvScale", 1.0f));
+        // LT_CHROMETRACE=1 -- the chrome state whenever it changes.
+        if (getenv("LT_CHROMETRACE"))
+        {
+            static std::string s_sWas;
+            char aNow[512];
+            snprintf(aNow, sizeof aNow, "EnvMapEnable %.0f map '%s' pan %g scale %g",
+                     F("EnvMapEnable", 0.0f), pMap, F("EnvPanSpeed", 0.0005f), F("EnvScale", 1.0f));
+            if (s_sWas != aNow) { s_sWas = aNow; printf("[CHROME] %s\n", aNow); fflush(stdout); }
+        }
+    }
     LTFogState w, sky;
     if (!s_bOff)
     {
@@ -1143,6 +1185,7 @@ public:
         // generated stub answered LTFALSE, so COMMAND_ID_FORWARD was never on
         // and the player could not walk regardless of the physics under it.
         IsCommandOn         = LTHost_IsCommandOn;
+        SetInputState       = LTHost_SetInputState;
         SetListener         = LTHost_SetListener;
         GetListener         = LTHost_GetListener;
         GetAxisOffsets      = LTHost_GetAxisOffsets;
@@ -4011,6 +4054,8 @@ int main(int argc, char** argv)
                     // added and re-aged them in Update, the engine now moves
                     // and ages them by the frame's time (5dh).
                     LTScene_UpdateParticles(LTGetClock()->GetFrameTime());
+                    // ...and every sprite clock, the level's included (5em).
+                    LTScene_UpdateSprites(LTGetClock()->GetFrameTime());
 
                     // ⚠️ AND PostUpdate, WHICH THE ENGINE NEVER CALLED. The
                     // donor runs it after every Update (clientshell.cpp:450,

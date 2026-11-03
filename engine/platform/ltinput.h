@@ -152,6 +152,9 @@ bool LTInput_ProcIsHostDefault(void* p);
 void LTCommand_Set(int nCommand, bool bOn);
 bool LTCommand_IsOn(int nCommand);
 void LTCommand_Clear();
+// ILTClient::SetInputState: off, the game sees no command held and no mouse
+// movement (key events still arrive); on, what is still held is on again.
+void LTCommand_SetInputState(bool bOn);
 
 // ⚠️ THE EDGE, AND IT IS A SEPARATE THING FROM THE STATE.
 //

@@ -106,6 +106,8 @@ namespace
         return (HCLASS)g_Objects.FindClass(pName);
     }
 
+    extern float g_fServerTime;
+
     // ⚠️ THE RUNTIME CREATION PATH, AND IT OWES THE SAME HANDSHAKE AS THE
     // WORLD FILE. `CreateObject` is not "allocate and hand back": the engine
     // drives MID_PRECREATE (with PRECREATE_NORMAL, because this one really IS
@@ -154,6 +156,7 @@ namespace
                 return 0;
             }
             g_Objects.Apply(pRec, pStruct);
+            pRec->m_fSprStart = g_fServerTime;      // a sprite starts here (5em)
         }
 
         pObj->EngineMessageFn(MID_INITIALUPDATE, 0, INITIALUPDATE_NORMAL);
@@ -273,6 +276,7 @@ namespace
                 return 0;
             }
             g_Objects.Apply(pRec, pStruct);
+            pRec->m_fSprStart = g_fServerTime;      // a sprite starts here (5em)
         }
 
         pObj->EngineMessageFn(MID_INITIALUPDATE, 0, INITIALUPDATE_NORMAL);
@@ -1358,6 +1362,36 @@ namespace
         return LTTRUE;
     }
 
+    // ⚠️ THE SCALE (5em): kept on the record and drawn -- a server sprite's
+    // size, a server model's (ModItem pickups 18x, ProjectileFX ModelScale
+    // 10x/20x, a Body copying its character's). Both were stubs: the game's
+    // GetObjectScale got its uninitialised vector back (Body.cpp:523).
+    // LT_NOSERVERSCALE=1 = the stubs' answer (old; says so).
+    bool LTHost_NoServerScale()
+    {
+        static const bool b = []() {
+            const bool v = (getenv("LT_NOSERVERSCALE") != 0);
+            if (v) { printf("[SERVER] LT_NOSERVERSCALE=1 -- server ScaleObject/GetObjectScale left as stubs (old)\n"); fflush(stdout); }
+            return v; }();
+        return b;
+    }
+
+    void LTHost_ScaleObject(HOBJECT h, LTVector* pScale)
+    {
+        SRec* p = CLTServerObjects::FromHandle(h);
+        if (!p || !pScale) return;
+        p->m_Scale[0] = pScale->x; p->m_Scale[1] = pScale->y; p->m_Scale[2] = pScale->z;
+    }
+
+    LTRESULT LTHost_GetObjectScale(HOBJECT h, LTVector* pScale)
+    {
+        if (!pScale) return LT_INVALIDPARAMS;
+        SRec* p = CLTServerObjects::FromHandle(h);
+        if (!p) { pScale->Init(1.0f, 1.0f, 1.0f); return LT_ERROR; }
+        pScale->Init(p->m_Scale[0], p->m_Scale[1], p->m_Scale[2]);
+        return LT_OK;
+    }
+
     LTRESULT LTHost_SetObjectUserFlags(HOBJECT h, uint32 flags)
     {
         SRec* p = CLTServerObjects::FromHandle(h);
@@ -1525,6 +1559,31 @@ namespace
             return LTHost_PolyTextureFlags((unsigned int)hPoly, pFlags);
         }
 
+        // ⚠️ OFT_Flags2 IS HOW A SPAWNED PROP ASKS TO BE ADDITIVE OR MULTIPLY
+        // (Prop.cpp:376 reads, ORs its m_dwFlags2 in and writes back). Both
+        // were stubs, so the read handed back the caller's garbage (5em).
+        // OFT_Flags is the record's flags, as ILTServer::Get/SetObjectFlags.
+        LTRESULT GetObjectFlags(const HOBJECT hObj, const ObjFlagType flagType, uint32& dwFlags) override
+        {
+            LTIMPL("ILTCommon::GetObjectFlags");
+            SRec* p = CLTServerObjects::FromHandle(hObj);
+            dwFlags = 0;
+            if (!p) return LT_ERROR;
+            if (flagType == OFT_Flags)  { dwFlags = p->m_Flags;  return LT_OK; }
+            if (flagType == OFT_Flags2) { dwFlags = p->m_Flags2; return LT_OK; }
+            return LT_ERROR;
+        }
+
+        LTRESULT SetObjectFlags(HOBJECT hObj, const ObjFlagType flagType, uint32 dwFlags) override
+        {
+            LTIMPL("ILTCommon::SetObjectFlags");
+            SRec* p = CLTServerObjects::FromHandle(hObj);
+            if (!p) return LT_ERROR;
+            if (flagType == OFT_Flags)  { p->m_Flags  = dwFlags; return LT_OK; }
+            if (flagType == OFT_Flags2) { p->m_Flags2 = dwFlags; return LT_OK; }
+            return LT_ERROR;
+        }
+
         LTRESULT SetObjectFilenames(HOBJECT hObj, ObjectCreateStruct* pStruct) override
         {
             LTIMPL("ILTCommon::SetObjectFilenames");
@@ -1535,7 +1594,7 @@ namespace
             // struct and fills only what it means to change, so treating empty
             // as "no model" would erase the model of every object that only
             // wanted to change a skin.
-            if (pStruct->m_Filename[0]) p->m_sFilename = pStruct->m_Filename;
+            if (pStruct->m_Filename[0]) { p->m_sFilename = pStruct->m_Filename; p->m_fSprStart = g_fServerTime; }
 
             bool bAnySkin = false;
             for (int k = 0; k < MAX_MODEL_TEXTURES; ++k)
@@ -1645,6 +1704,56 @@ namespace
     {
         const float f = g_fServerTime - fStart;
         return f > 0.0f ? f : 0.0f;
+    }
+
+    // ⚠️ AND WHAT THE BLEND-IN FADES FROM (HANDOVER 5ek). The blend above
+    // held the new animation's first frame, so every change of animation was
+    // a cut -- a character drawing its gun or stopping a walk jumped up to
+    // 24 units of summed node movement in one frame. The original fades: its
+    // trk_SetCurAnim copies the tracker's current frame to m_Prev and the
+    // transform maker slerps m_Prev -> the new frame 0 by the share of the
+    // blend done (donor animtracker.cpp, transformmaker.cpp InitTransform).
+    // "The current frame" is the key the old animation was heading for
+    // (m_Cur), or its first frame while it was itself still blending in.
+    // Called where the MAIN animation changes, after the new clock is chosen.
+    // LT_NOANIMXFADE=1 = hold the new first frame as before (says so).
+    static bool LTHost_CrossFadeOff()
+    {
+        static const bool b = []() {
+            const bool v = (getenv("LT_NOANIMXFADE") != 0);
+            if (v) { printf("[ANIM] LT_NOANIMXFADE=1 -- a blend-in holds the new first frame, no cross-fade (old)\n"); fflush(stdout); }
+            return v; }();
+        return b;
+    }
+
+    static void LTHost_OpenCrossFade(SRec* p, int nPrev, float fPrevStart, float fNewStart)
+    {
+        p->m_nBlendAnim = -1;
+        if (LTHost_CrossFadeOff() || nPrev < 0 || fNewStart <= g_fServerTime) return;
+        const CLTABCModel* pModel = LTScene_ModelForFile(p->m_sFilename.c_str());
+        if (!pModel || (size_t)nPrev >= pModel->GetAnims().size()) return;
+        unsigned k0 = 0, k1 = 0;
+        float f = 0.0f;
+        LTModelDraw::PoseKeys(*pModel, (unsigned)nPrev, LTHost_AnimElapsed(fPrevStart),
+                              p->m_bAnimLooping, &k0, &k1, &f);
+        p->m_nBlendAnim = nPrev;
+        p->m_nBlendKey  = (f > 0.0f) ? k1 : k0;
+        p->m_fBlendSec  = fNewStart - g_fServerTime;
+    }
+
+    // The fade NOW, for a pose of animation nAnim: false when there is none.
+    static bool LTHost_CrossFadeOf(const SRec* p, int nAnim, LTModelDraw::BlendFrom* pOut)
+    {
+        if (p->m_nBlendAnim < 0 || nAnim != p->m_nAnim || p->m_fBlendSec <= 0.0f) return false;
+        const float fLeft = p->m_fAnimStart - g_fServerTime;
+        if (fLeft <= 0.0f) return false;
+        float w = 1.0f - fLeft / p->m_fBlendSec;
+        if (w >= 1.0f) return false;
+        if (w < 0.0f) w = 0.0f;
+        pOut->m_nAnim   = (unsigned)p->m_nBlendAnim;
+        pOut->m_nKey    = p->m_nBlendKey;
+        pOut->m_fWeight = w;
+        return true;
     }
 
     // Per tracker (the record itself for the main one): how far its model
@@ -1976,7 +2085,11 @@ namespace
             // MS_PLAYDONE for it -- so not restarting would leave a state
             // machine waiting on an animation that finished long ago.
             const float fStart = LTHost_AnimStartAfterBlend(t->m_pRec, Anim(t), n);
-            if (t->m_bMain) { t->m_pRec->m_nAnim = n; t->m_pRec->m_fAnimStart = fStart; }
+            if (t->m_bMain)
+            {
+                LTHost_OpenCrossFade(t->m_pRec, t->m_pRec->m_nAnim, t->m_pRec->m_fAnimStart, fStart);
+                t->m_pRec->m_nAnim = n; t->m_pRec->m_fAnimStart = fStart;
+            }
             else            { t->m_nAnim = n; t->m_fStart = fStart; }
             return LT_OK;
         }
@@ -2084,7 +2197,7 @@ namespace
             LTTrackerState* t = State(pTracker);
             if (!t) return LT_ERROR;
             const float fStart = g_fServerTime - curTime / 1000.0f;
-            if (t->m_bMain) t->m_pRec->m_fAnimStart = fStart;
+            if (t->m_bMain) { t->m_pRec->m_fAnimStart = fStart; t->m_pRec->m_nBlendAnim = -1; }
             else            t->m_fStart = fStart;
             // ⚠️ Moving the time skips the keys in between, as the donor's
             // trk_SetCurTime does (see LTHost_KeysDeliveredToNow). Body::Load
@@ -2279,7 +2392,7 @@ namespace
         SRec* p = CLTServerObjects::FromHandle(h);
         if (!p) return LT_ERROR;
 
-        if (pFilename) p->m_sFilename = pFilename;
+        if (pFilename) { p->m_sFilename = pFilename; p->m_nBlendAnim = -1; }
         if (pSkinName)
         {
             // ⚠️ Skin 0 REPLACED, not appended -- the game calls this whenever
@@ -2887,7 +3000,11 @@ namespace
         // the TIME: Body::Save writes GetCurAnimTime and Body::Load sets it
         // back, trusting the engine with WHICH animation. Without it every
         // body came back standing in its reference pose (user report).
-        const unsigned int nVersion = 9;
+        // ⚠️ VERSION 10 (5em) appends, per object, FLAG2 and the SCALE: the
+        // game sets both once (a Prop's Additive in InitialUpdate, a pickup's
+        // ScaleObject) and a loaded object gets no InitialUpdate to set them
+        // again.
+        const unsigned int nVersion = 10;
         fwrite(&nVersion, sizeof(nVersion), 1, pF);
         const long nCountAt = ftell(pF);
         unsigned int nSaved = 0;
@@ -3026,6 +3143,13 @@ namespace
                 fwrite(&nAnim, sizeof(nAnim), 1, pF);
                 fwrite(&bLoop, 1, 1, pF);
                 fwrite(&fElapsed, sizeof(fElapsed), 1, pF);
+            }
+            // ---- version 10 ----------------------------------------------- //
+            // Scale 0 = "not known" (m_bLookUnknown), never a real scale.
+            {
+                const float kZero[3] = { 0.0f, 0.0f, 0.0f };
+                fwrite(&pRec->m_Flags2, sizeof(pRec->m_Flags2), 1, pF);
+                fwrite(pRec->m_bLookUnknown ? kZero : pRec->m_Scale, sizeof(float), 3, pF);
             }
 
             fwrite(&nBytes, sizeof(nBytes), 1, pF);
@@ -3171,10 +3295,13 @@ namespace
         // ⚠️ VERSION 8 IS STILL READ (5dd): version 9 only appends the
         // animation to each record, so an older save loads as before -- its
         // bodies stand until the game sets an animation.
-        if (nVersion < 5 || nVersion > 9)
+        // ⚠️ VERSION 9 IS STILL READ (5em): version 10 only appends FLAG2 and
+        // the scale, so a version-9 save loads with what it had before --
+        // normal blend, scale 1, until the game sets them.
+        if (nVersion < 5 || nVersion > 10)
         {
             fclose(pF);
-            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 9\n",
+            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 10\n",
                    sPath.c_str(), nVersion);
             fflush(stdout);
             return LT_ERROR;
@@ -3268,6 +3395,10 @@ namespace
             int           nAnim;
             unsigned char nAnimLoop;
             float         fAnimElapsed;
+            // ⚠️ VERSION 10: FLAG2 and the scale (5em).
+            bool          bHasFlags2Scale;
+            unsigned int  dwFlags2;
+            float         scale[3];
             std::vector<unsigned char> blob;
         };
 
@@ -3296,6 +3427,9 @@ namespace
             r.nAnim = -1;
             r.nAnimLoop = 0;
             r.fAnimElapsed = 0.0f;
+            r.bHasFlags2Scale = false;
+            r.dwFlags2 = 0;
+            r.scale[0] = r.scale[1] = r.scale[2] = 1.0f;
             if (fread(&nClass, sizeof(nClass), 1, pF) != 1) { bTruncated = true; break; }
             if (nClass >= sizeof(szClass))                  { bTruncated = true; break; }
             if (nClass && fread(szClass, 1, nClass, pF) != nClass) { bTruncated = true; break; }
@@ -3353,6 +3487,12 @@ namespace
                     if (fread(&r.nAnimLoop, 1, 1, pF) != 1)                         { bTruncated = true; break; }
                     if (fread(&r.fAnimElapsed, sizeof(float), 1, pF) != 1)          { bTruncated = true; break; }
                     r.bHasAnim = true;
+                }
+                if (nVersion >= 10)
+                {
+                    if (fread(&r.dwFlags2, sizeof(r.dwFlags2), 1, pF) != 1)         { bTruncated = true; break; }
+                    if (fread(r.scale, sizeof(float), 3, pF) != 3)                  { bTruncated = true; break; }
+                    r.bHasFlags2Scale = true;
                 }
             }
             if (fread(&nBytes, sizeof(nBytes), 1, pF) != 1) { bTruncated = true; break; }
@@ -3615,6 +3755,15 @@ namespace
                 return b; }();
             if (r.bHasColor && !s_bNoColor)
                 for (int k = 0; k < 4; ++k) pTarget->m_Color[k] = r.color[k];
+            // Version 10 (5em): FLAG2 and the scale, the same way. An older
+            // save -- or a v10 record that says "unknown" -- leaves the look
+            // unknown, and such a SPRITE is not drawn (m_bLookUnknown).
+            if (r.bHasFlags2Scale && r.scale[0] > 0.0f)
+            {
+                pTarget->m_Flags2 = r.dwFlags2;
+                for (int k = 0; k < 3; ++k) pTarget->m_Scale[k] = r.scale[k];
+            }
+            else pTarget->m_bLookUnknown = true;
 
             // Version 9 (5dd): the main animation, before the object loads --
             // Body::Load then sets its saved time on it (SetCurAnimTime), as it
@@ -4612,7 +4761,7 @@ namespace
             SRec* p = CLTServerObjects::FromHandle(hObj);
             if (!p) return LT_ERROR;
 
-            if (pFilename && pFilename[0]) p->m_sFilename = pFilename;
+            if (pFilename && pFilename[0]) { p->m_sFilename = pFilename; p->m_nBlendAnim = -1; p->m_fSprStart = g_fServerTime; }
             if (pSkinName && pSkinName[0])
             {
                 p->m_Skins.clear();
@@ -4672,7 +4821,12 @@ namespace
             // ⚠️ THE CLOCK RESTARTS ONLY ON A CHANGE. The game re-sends the
             // same animation every update while a state holds; restarting on
             // each call would freeze every character on its first frame.
-            if (n != p->m_nAnim) p->m_fAnimStart = LTHost_AnimStartAfterBlend(p, p->m_nAnim, n);
+            if (n != p->m_nAnim)
+            {
+                const float fStart = LTHost_AnimStartAfterBlend(p, p->m_nAnim, n);
+                LTHost_OpenCrossFade(p, p->m_nAnim, p->m_fAnimStart, fStart);
+                p->m_fAnimStart = fStart;
+            }
             p->m_nAnim = n;
         }
 
@@ -5147,6 +5301,11 @@ namespace
                 GetObjectColor  = LTHost_GetObjectColor;
                 SetObjectColor  = LTHost_SetObjectColor;
             }
+            if (!LTHost_NoServerScale())
+            {
+                ScaleObject     = LTHost_ScaleObject;
+                GetObjectScale  = LTHost_GetObjectScale;
+            }
 
             // The function-pointer half of the object queries.
             GetObjectClass         = LTHost_GetObjectClass;
@@ -5512,7 +5671,7 @@ namespace
     // and the port drew her without it.
     //
     // ⚠️ PLACED ON DEMAND, from the parent's CURRENT pose -- the same model,
-    // the same keyframe rule (LTModelDraw::KeyframeAt), the same origin
+    // the same keyframe rule (LTModelDraw::PoseKeys, 5ek), the same origin
     // offset and the same node control the renderer uses for the parent. A
     // second placement rule is how an attachment ends up a frame behind, or
     // beside, the head it belongs to.
@@ -5691,9 +5850,11 @@ namespace
         const int nAnim = LTHost_DrawAnim(P);
         if (nAnim >= 0 && (size_t)nAnim < pModel->GetAnims().size())
         {
-            const unsigned kf = LTModelDraw::KeyframeAt(*pModel, (unsigned)nAnim,
-                                                        LTHost_AnimElapsed(P->m_fAnimStart),
-                                                        P->m_bAnimLooping);
+            // Between two keys, the renderer's rule (5ek).
+            unsigned kf = 0, kf1 = 0;
+            float fFrac = 0.0f;
+            LTModelDraw::PoseKeys(*pModel, (unsigned)nAnim, LTHost_AnimElapsed(P->m_fAnimStart),
+                                  P->m_bAnimLooping, &kf, &kf1, &fFrac);
             SockTramp tr; tr.fn = 0; tr.hObj = 0; tr.user = 0;
             if (void* hClient = LTReplicate_Find((void*)P))
             {
@@ -5711,15 +5872,16 @@ namespace
                 if ((size_t)dl[l].m_nAnim >= pModel->GetAnims().size()) continue;
                 LTModelDraw::Layer y;
                 y.m_nAnim      = (unsigned)dl[l].m_nAnim;
-                y.m_nKeyframe  = LTModelDraw::KeyframeAt(*pModel, (unsigned)dl[l].m_nAnim,
-                                                         dl[l].m_fAnimTime, dl[l].m_bLooping);
+                LTModelDraw::SetLayerTime(y, *pModel, dl[l].m_fAnimTime, dl[l].m_bLooping);
                 y.m_nWeightSet = dl[l].m_nWeightSet;
                 layers.push_back(y);
             }
-            bPose = LTModelDraw::BuildPose(*pModel, (unsigned)nAnim, kf, pose,
-                                           tr.fn ? SockTrampoline : 0, tr.fn ? &tr : 0,
-                                           layers.empty() ? 0 : &layers[0],
-                                           (unsigned)layers.size());
+            LTModelDraw::BlendFrom from;
+            const bool bFade = LTHost_CrossFadeOf(P, nAnim, &from);
+            bPose = LTModelDraw::BuildPoseSpan(*pModel, (unsigned)nAnim, kf, kf1, fFrac, pose,
+                                               tr.fn ? SockTrampoline : 0, tr.fn ? &tr : 0,
+                                               layers.empty() ? 0 : &layers[0],
+                                               (unsigned)layers.size(), bFade ? &from : 0);
         }
         if (!bPose && !LTModelDraw::BuildBindPose(*pModel, pose)) return false;
         return true;
@@ -5948,11 +6110,25 @@ namespace
                 if (k) out.sSkins += ";";
                 out.sSkins += p->m_Skins[k];
             }
-            for (int k = 0; k < 3; ++k) { out.m_Pos[k] = p->m_Pos[k]; out.m_Scale[k] = 1.0f; }
+            // The record's scale (5em; ScaleObject used to be a stub).
+            for (int k = 0; k < 3; ++k)
+            {
+                out.m_Pos[k] = p->m_Pos[k];
+                out.m_Scale[k] = (!LTHost_NoServerScale() && p->m_Scale[k] > 0.0f) ? p->m_Scale[k] : 1.0f;
+            }
             for (int k = 0; k < 4; ++k) out.m_Quat[k] = p->m_Rot[k];
             out.m_nAnim      = LTHost_DrawAnim(p);
             out.m_fAnimTime  = LTHost_AnimElapsed(p->m_fAnimStart);
             out.m_bLooping   = p->m_bAnimLooping;
+            {
+                LTModelDraw::BlendFrom from;
+                if (LTHost_CrossFadeOf(p, out.m_nAnim, &from))
+                {
+                    out.m_nBlendAnim   = (int)from.m_nAnim;
+                    out.m_nBlendKey    = from.m_nKey;
+                    out.m_fBlendWeight = from.m_fWeight;
+                }
+            }
             LTHost_LayersFor(p, out.m_Layers);
 
             // ⚠️ ITS COLOUR, ALPHA AND FLAG_NOLIGHT (HANDOVER 5eb) -- the
@@ -5960,7 +6136,7 @@ namespace
             // SetObjectColor bytes. Every model drawn from here was white and
             // opaque whatever the game set: a Controller FADE, a spawned
             // Prop's Alpha, a Body copying its character's colour. FLAG2 is
-            // not kept on the server record, so the blend stays normal.
+            // kept since 5em: a spawned Prop's Additive / Multiply.
             // LT_NOSERVERMODELCOLOR=1 = old (says so).
             static const bool s_bNoColour = []() {
                 const bool b = (getenv("LT_NOSERVERMODELCOLOR") != 0);
@@ -5971,6 +6147,9 @@ namespace
                 if (LTDynamicBlendEnabled()) out.m_fAlpha = p->m_Color[3] / 255.0f;
                 for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k] / 255.0f;
                 out.m_bNoLight = (p->m_Flags & FLAG_NOLIGHT) != 0;
+                out.m_bChrome  = (p->m_Flags & FLAG_ENVIRONMENTMAP) != 0;  // 5en
+                if (LTDynamicBlendEnabled())
+                    out.m_nBlendOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
             }
 
             // ⚠️ THE GAME'S NODE CONTROL lives on the CLIENT mirror of this
@@ -6007,6 +6186,72 @@ namespace
                     printf("[DYN] %-24s %-44s at (%.0f %.0f %.0f) anim %d |q| %.4f\n",
                            p->m_pClass->m_ClassName, p->m_sFilename.c_str(),
                            p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], p->m_nAnim, ql);
+                    fflush(stdout);
+                }
+            }
+            return true;
+        }
+
+        // ⚠️ SPRITES THE SERVER MADE (5em) -- a security camera's light
+        // (SecurityCamera.cpp:420, attached to its "Light" socket, additive,
+        // green / yellow / red by SetObjectFilenames), a mark on a moving
+        // brush (ClientWeaponSFX.cpp:239), an objective sprite, a spawned
+        // ScaleSprite. In LT2 each reaches the client as an OT_SPRITE and is
+        // drawn there; here none was drawn at all -- M02S01's nine cameras had
+        // no light. Drawn from the record, as the models above: its file, the
+        // frame since it started (or last changed file), colour and alpha,
+        // FLAG2 blend, scale, the sprite flags, the parent's socket. A sprite
+        // the WORLD FILE placed is pass 3's, as a placed prop is.
+        // LT_NOSERVERSPRITES=1 = none drawn (old; says so).
+        unsigned int SpriteCount() const override
+        {
+            static const bool s_bOff = []() {
+                const bool b = (getenv("LT_NOSERVERSPRITES") != 0);
+                if (b) { printf("[SERVER] LT_NOSERVERSPRITES=1 -- sprites the server made are not drawn (old)\n"); fflush(stdout); }
+                return b; }();
+            return (s_bOff || !LTSpritesEnabled()) ? 0u : g_Objects.ObjectCount();
+        }
+
+        bool GetSprite(unsigned int i, LTDynamicSprite& out) const override
+        {
+            SRec* p = g_Objects.RecordAt(i);
+            if (!p || !g_Objects.IsLive(p) || !p->m_pGame || p->m_Type != OT_SPRITE) return false;
+            if (p->m_bFromWorld || p->m_sFilename.empty() || p->m_bLookUnknown) return false;
+            const bool bPortal = LTWorldPortalPass();
+            if (!(p->m_Flags & (bPortal ? (FLAG_VISIBLE | FLAG_PORTALVISIBLE) : FLAG_VISIBLE))) return false;
+            {
+                float ap[3], aq[4];
+                if (PlaceAttached(p, ap, aq))
+                {
+                    for (int k = 0; k < 3; ++k) p->m_Pos[k] = ap[k];
+                    for (int k = 0; k < 4; ++k) p->m_Rot[k] = aq[k];
+                }
+            }
+            out = LTDynamicSprite();
+            out.m_Draw.m_sSprite  = LTScene_SpriteFrame(p->m_sFilename, LTHost_AnimElapsed(p->m_fSprStart) * 1000.0);
+            out.m_Draw.m_fScaleX  = p->m_Scale[0] > 0.0f ? p->m_Scale[0] : 1.0f;
+            out.m_Draw.m_fScaleY  = p->m_Scale[1] > 0.0f ? p->m_Scale[1] : 1.0f;
+            for (int k = 0; k < 3; ++k) out.m_Draw.m_Colour[k] = p->m_Color[k] / 255.0f;
+            out.m_Draw.m_fAlpha   = p->m_Color[3] / 255.0f;
+            out.m_Draw.m_nBlendOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
+            out.m_Draw.m_bGlow    = (p->m_Flags & FLAG_GLOWSPRITE) != 0;
+            out.m_Draw.m_bZBias   = (p->m_Flags & FLAG_SPRITEBIAS) != 0;
+            out.m_Draw.m_bRotatable = LTRotatableSpritesEnabled() && (p->m_Flags & FLAG_ROTATEABLESPRITE) != 0;
+            for (int k = 0; k < 4; ++k) out.m_Draw.m_Quat[k] = p->m_Rot[k];
+            out.m_bNoZ            = (p->m_Flags & FLAG_SPRITE_NOZ) != 0;
+            out.m_bReallyClose    = false;      // a server object is never in camera space
+            for (int k = 0; k < 3; ++k) out.m_Pos[k] = p->m_Pos[k];
+            if (getenv("LT_SERVERSPRITETRACE"))
+            {
+                static std::map<const void*, std::string> s_Said;
+                std::string& sWas = s_Said[p];
+                if (sWas != p->m_sFilename)
+                {
+                    sWas = p->m_sFilename;
+                    printf("[SERVER] sprite %s '%s' %s at (%.0f %.0f %.0f) scale %.3f rgba %u %u %u %u flags 0x%x flags2 0x%x%s\n",
+                           p->m_pClass ? p->m_pClass->m_ClassName : "?", p->m_sName.c_str(), p->m_sFilename.c_str(),
+                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], p->m_Scale[0], p->m_Color[0], p->m_Color[1],
+                           p->m_Color[2], p->m_Color[3], p->m_Flags, p->m_Flags2, AttachOfChild(p) ? " attached" : "");
                     fflush(stdout);
                 }
             }

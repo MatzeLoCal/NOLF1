@@ -34,6 +34,7 @@
 #include <vector>
 #include <map>
 #include <unordered_set>
+#include <unordered_map>
 
 class ILTServer;
 struct ClassDef;
@@ -180,6 +181,25 @@ public:
         // beam is authored at 0 and drew as a solid wedge while this was a stub.
         unsigned char   m_Color[4];
 
+        // ⚠️ FLAG2_* AND THE SCALE (5em) -- LT2's m_Flags2 and m_Scale, from the
+        // create struct (Apply), ILTCommon::SetObjectFlags(OFT_Flags2) and
+        // ILTServer::ScaleObject; saved from version 10. Both were dropped: a
+        // security camera's ADDITIVE light, a spawned Prop's Additive, a mod
+        // pickup at 18x and a projectile model at 20x all lost them.
+        unsigned int    m_Flags2 = 0;
+        float           m_Scale[3] = { 1.0f, 1.0f, 1.0f };
+
+        // A SPRITE's clock start, server seconds -- the client tracker the
+        // original starts when the object (or a new file) reaches it (5em).
+        float           m_fSprStart = 0.0f;
+
+        // ⚠️ RESTORED FROM A SAVE THAT DID NOT KEEP FLAG2 AND THE SCALE
+        // (version 9 and older, or a version-10 record that inherited this):
+        // a SPRITE whose look is unknown is not drawn -- a security camera's
+        // light would come back 13x too big and opaque. Written to a v10
+        // save as scale 0 so it survives a re-save (5em).
+        bool            m_bLookUnknown = false;
+
         // ⚠️ WHAT THE OBJECT IS DRAWN AS, kept so the CLIENT can be told. The
         // record carried a position and a type but never the model, which was
         // enough while nothing outside the server looked at it. Object
@@ -207,6 +227,14 @@ public:
         // When m_nAnim last CHANGED, in server seconds. The pose is chosen by
         // elapsed time, so without this every character would sit on frame 0.
         float           m_fAnimStart;
+
+        // ⚠️ THE CROSS-FADE INTO m_nAnim (HANDOVER 5ek): while m_fAnimStart is
+        // still ahead (the blend-in), the pose fades from this animation's
+        // key to m_nAnim's first frame -- the original tracker's m_Prev.
+        // -1 = nothing to fade from. m_fBlendSec = the blend's whole length.
+        int             m_nBlendAnim;
+        unsigned int    m_nBlendKey;
+        float           m_fBlendSec;
 
         // ⚠️ CREATED FROM THE WORLD FILE, as opposed to spawned by game code.
         // The world renderer already draws world-file objects that name their
@@ -341,12 +369,15 @@ public:
     // speaker after a skipped/finished cinematic removed the AI, and its next
     // MID_UPDATE called IsPlayingDialogue on freed memory (M12S02, HANDOVER
     // 5av). Owners are notified in SweepDead, before ANY dead record is
-    // destroyed; BreakLink is silent, as the contract says.
+    // destroyed; BreakLink is silent, as the contract says. A pair may be
+    // linked more than once, and BreakLink takes one away (the shipped
+    // engine, 5eo).
     bool                CreateLink(Record* pOwner, Record* pLinked);
     void                BreakLink(Record* pOwner, Record* pLinked);
-    unsigned int        LinkCount() const { return (unsigned int)m_Links.size(); }
-    // Every link, (owner, linked) -- saved with the game (save v8, 5cu).
-    const std::vector<std::pair<Record*, Record*> >& Links() const { return m_Links; }
+    unsigned int        LinkCount() const { return (unsigned int)m_nLiveLinks; }
+    // Every link, (owner, linked), in the order made -- saved with the game
+    // (save v8, 5cu). Squeezes the broken ones out first.
+    const std::vector<std::pair<Record*, Record*> >& Links() { CompactLinks(true); return m_Links; }
 
     // ⚠️ WHICH CLASSES EXIST AND WHICH ONES TICK, counted per class. "The
     // keyframer does not run" is three different claims -- it was never
@@ -456,7 +487,15 @@ private:
     // cutscene (~2,000 objects, dozens of AIs awake) ran at ~3 frames a
     // second (HANDOVER 5bw).
     std::unordered_set<const Record*> m_Members;
-    std::vector<std::pair<Record*, Record*> > m_Links;     // (owner, linked)
+    // (owner, linked) in the order made; a broken link is a (0, 0) hole until
+    // CompactLinks. m_LinkIdx: each record's positions in it, as owner or as
+    // linked -- a record finds its own links without walking all of them (5eo).
+    std::vector<std::pair<Record*, Record*> > m_Links;
+    std::unordered_map<const Record*, std::vector<size_t> > m_LinkIdx;
+    size_t              m_nLiveLinks = 0, m_nDeadLinks = 0;
+    void                KillLink(size_t k);
+    void                CompactLinks(bool bForce);
+    void                ClearLinks();
 };
 
 // ⚠️ MID_ACTIVATING -- "this object is becoming active". Sent ONCE to every

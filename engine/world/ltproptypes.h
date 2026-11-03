@@ -114,6 +114,10 @@ public:
         // 166-174). A missing MoveToFloor reads 0 -- CButeMgr::GetInt's
         // default -- and a missing Scale is taken as 1,1,1.
         bool        m_bMoveToFloor;
+
+        // `Chrome = 1` (PropTypeMgr.cpp PTMGR_CHROME): FLAG_ENVIRONMENTMAP on
+        // the prop (PropType.cpp:181) -- 12 entries (HANDOVER 5en).
+        bool        m_bChrome = false;
         float       m_Scale[3];
 
         Entry() : m_bChromakey(false), m_fAlpha(1.0f),

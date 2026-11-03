@@ -147,6 +147,25 @@ void LTMetal_DrawTris(const float* pMVP, unsigned int nTexture,
                       float fConstAlpha = 1.0f, bool bTexAlpha = true,
                       int nBlendOp = 0);
 
+// ⚠️ THE WORLD'S ENVIRONMENT MAP (HANDOVER 5el; LT3DTexture::m_pEnvMap): an
+// opaque world run with a second texture at a second UV pair -- colour =
+// min(1, base + (bBaseAlpha ? base.a : 1) * env) * vertex colour, then fog,
+// as lt3d.cpp computes it. Falls back to a plain LTMetal_DrawTris when the
+// pipeline or the env texture is missing.
+struct LTMetalEnvVert
+{
+    float m_Pos[3];
+    float m_UV[2];
+    float m_RGB[3];
+    float m_UV2[2];
+};
+// bChrome (5en): the model-chrome combine, lerp(env, base, base.a), instead
+// of the world's min(1, base + base.a * env).
+void LTMetal_DrawEnvTris(const float* pMVP, unsigned int nTexture, unsigned int nEnvTexture,
+                         const LTMetalEnvVert* pVerts, int nVerts,
+                         bool bAlphaTest, float fAlphaRef, bool bBaseAlpha,
+                         bool bChrome = false);
+
 // ⚠️ VERTICES THAT LIVE ON THE GPU (HANDOVER 5bu): the static world, recorded
 // once per level. A buffer is made once and drawn from every frame; the draw
 // is LTMetal_DrawTris in every other respect, through the same encode. Returns

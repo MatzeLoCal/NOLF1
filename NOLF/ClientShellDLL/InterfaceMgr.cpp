@@ -2237,7 +2237,18 @@ LTBOOL CInterfaceMgr::OnCommandOn(int command)
 
 		case COMMAND_ID_MESSAGE :
 		{
+			// PORT-BEHAVIOUR: in a single-player game the message line opens
+			// in spectator mode too, so mpclip can be typed again to turn it
+			// off -- spectator mode is only ever mpclip there, and the only
+			// other way out (edit mode, ObjEditMgr.cpp) is #ifndef _FINAL.
+			// Multiplayer keeps the original rule. Authorised by the project
+			// owner, 2026-11-03 (with mpclip). See DEVIATIONS.md E-014.
+#if 0
 			if (m_eGameState == GS_PLAYING && !g_pGameClientShell->IsSpectatorMode())
+#else
+			if (m_eGameState == GS_PLAYING &&
+				(!g_pGameClientShell->IsSpectatorMode() || !g_pGameClientShell->IsMultiplayerGame()))
+#endif
 			{
 				if (m_AmmoChooser.IsOpen())
 				{

@@ -514,19 +514,55 @@ bool CLTScene::SetObjectFilenames(LTSceneObject* p, const char* pFilename,
                                   const std::vector<std::string>& skins)
 {
     if (!IsValid(p)) return false;
-    if (pFilename && pFilename[0] && p->m_nType == OT_MODEL)
+    // ⚠️ A SPRITE TAKES ITS NEW FILE TOO, and starts it from frame 0 -- the
+    // donor re-inits the tracker (setupobject.cpp spr_InitTracker). Only
+    // models were handled: the marker over a character (CharacterFX.cpp
+    // 2743/2786) and a reused scale effect (BaseScaleFX.cpp:118) kept the old
+    // picture (5em). LT_NOSPRITEFILES=1 = ignored again (old; says so).
+    static const bool s_bOldSpriteFiles = []() {
+        const bool b = (getenv("LT_NOSPRITEFILES") != 0);
+        if (b) { printf("[LT3D] LT_NOSPRITEFILES=1 -- a client sprite keeps its first file (old)\n"); fflush(stdout); }
+        return b; }();
+    if (pFilename && pFilename[0] && p->m_nType == OT_SPRITE && !s_bOldSpriteFiles)
     {
         p->m_sFilename = pFilename;
+        p->m_fSprMs = 0.0;
+    }
+    if (pFilename && pFilename[0] && p->m_nType == OT_MODEL)
+    {
+        // ⚠️ A DIFFERENT MODEL STARTS ITS ANIMATION AGAIN, CLOCK AND ALL. The
+        // donor binds the new model and re-inits its trackers -- animation 0,
+        // time 0 -- and leaves a model set to itself alone (setupobject.cpp
+        // ModelExtraInit). Here only the index went to 0 and the start time
+        // was the OLD model's, so the game's SetModelAnimation(0) right after
+        // (WeaponModel.cpp:1271) changed nothing and the new model posed as if
+        // it had been playing all along. That is the M01S01 intro's floating
+        // scope: the weapon is disabled for the cinematic, the start point's
+        // "changeweapon delisle" swaps the hidden fists for the carbine, and
+        // CreateMods places the freshly made, visible scope ONCE from Select
+        // long finished -- the gun raised, the scope in view -- instead of
+        // Select's first key, the gun below the screen (HANDOVER 5ep).
+        // LT_OLDMODELSWAP=1 = the old rule (says so).
+        static const bool s_bOldSwap = []() {
+            const bool b = (getenv("LT_OLDMODELSWAP") != 0);
+            if (b) { printf("[LT3D] LT_OLDMODELSWAP=1 -- a model swap keeps the old animation clock (old)\n"); fflush(stdout); }
+            return b; }();
+        const CLTABCModel* pOld = p->m_pModel;
+        p->m_sFilename = pFilename;
         p->m_pModel = LoadModel(p->m_sFilename);
-        // The game sets the animation right after (WeaponModel.cpp:1283);
-        // start from the first one so the object is never left pointing past
-        // the end of a model with fewer animations.
-        p->m_nAnim = (p->m_pModel && !p->m_pModel->GetAnims().empty()) ? 0 : -1;
-        p->m_fKeysUpToMs = -1.0f;
+        if (s_bOldSwap || p->m_pModel != pOld)
+        {
+            // Start from the first animation so the object is never left
+            // pointing past the end of a model with fewer animations.
+            p->m_nAnim = (p->m_pModel && !p->m_pModel->GetAnims().empty()) ? 0 : -1;
+            p->m_fKeysUpToMs = -1.0f;
+            if (!s_bOldSwap) p->m_fAnimStart = LTGetClock()->GetTime();
+        }
     }
     if (!skins.empty())
     {
         p->m_SkinNames = skins;
+        p->m_fSprMs = 0.0;          // a sprite skin starts again (5em)
         p->m_Skins.clear();
         for (size_t i = 0; i < skins.size(); ++i)
         {
@@ -583,7 +619,6 @@ bool CLTScene::IsValid(const LTSceneObject* pObj) const
 // animation
 // ----------------------------------------------------------------------- //
 
-namespace { unsigned int KeyframeAt(const LTABCAnim& a, float fElapsed, bool bLoop); }
 
 // ⚠️ GIVE AN EXISTING OBJECT A MODEL -- because a model can arrive LATE.
 //
@@ -735,39 +770,8 @@ bool CLTScene::SetLooping(LTSceneObject* pObj, bool bLoop)
     return true;
 }
 
-namespace
-{
-    // Which keyframe an animation is showing at `fElapsed` seconds.
-    //
-    // ⚠️ Keyframes carry their own times in MILLISECONDS and are NOT evenly
-    // spaced -- an exporter drops frames where nothing moves. Dividing elapsed
-    // time by a frame count would run the animation at the wrong speed and
-    // stutter wherever the spacing changes, so the times are searched.
-    //
-    // ⚠️ Nearest keyframe, no interpolation between them. That is a real
-    // limitation, not an oversight: interpolating requires slerping every
-    // node's rotation, and doing it wrong looks like correct animation with
-    // subtly broken joints. It is stated here so the next person knows it is
-    // still to do.
-    unsigned int KeyframeAt(const LTABCAnim& a, float fElapsed, bool bLoop)
-    {
-        unsigned int n = (unsigned int)a.m_Keyframes.size();
-        if (n <= 1) return 0;
-
-        unsigned int nLast = a.m_Keyframes[n - 1].m_nTime;
-        if (nLast == 0) return 0;
-
-        float fMs = fElapsed * 1000.0f;
-        if (fMs < 0.0f) fMs = 0.0f;
-
-        if (bLoop) fMs = (float)fmod(fMs, (float)nLast);
-        else if (fMs >= (float)nLast) return n - 1;
-
-        for (unsigned int i = n; i-- > 0; )
-            if ((float)a.m_Keyframes[i].m_nTime <= fMs) return i;
-        return 0;
-    }
-}
+// (The scene's own keyframe search lived here until 5ek: every pose now takes
+// its two keys from LTModelDraw::PoseKeys, the renderer's and the server's rule.)
 
 static void QuatFromOrthonormal(const float* m, float* q);
 
@@ -854,10 +858,14 @@ bool CLTScene::GetSocketTransform(const LTSceneObject* pObj, int nSocket,
     bool bHavePose = false;
     if (pObj->m_nAnim >= 0 && (size_t)pObj->m_nAnim < pObj->m_pModel->GetAnims().size())
     {
-        const LTABCAnim& a = pObj->m_pModel->GetAnims()[pObj->m_nAnim];
+        // Between two keys, the renderer's rule (5ek).
         float fElapsed = LTGetClock()->GetTime() - pObj->m_fAnimStart;
-        unsigned int kf = KeyframeAt(a, fElapsed, pObj->m_bLooping);
-        bHavePose = LTModelDraw::BuildPose(*pObj->m_pModel, (unsigned)pObj->m_nAnim, kf, pose);
+        unsigned int kf = 0, kf1 = 0;
+        float fFrac = 0.0f;
+        LTModelDraw::PoseKeys(*pObj->m_pModel, (unsigned)pObj->m_nAnim, fElapsed,
+                              pObj->m_bLooping, &kf, &kf1, &fFrac);
+        bHavePose = LTModelDraw::BuildPoseSpan(*pObj->m_pModel, (unsigned)pObj->m_nAnim,
+                                               kf, kf1, fFrac, pose, 0, 0, 0, 0);
     }
     if (!bHavePose) bHavePose = LTModelDraw::BuildBindPose(*pObj->m_pModel, pose);
 
@@ -1258,10 +1266,13 @@ int CLTScene::RenderObjects(LTSceneObject* pCamera,
         if (pObj->m_nAnim >= 0
             && (size_t)pObj->m_nAnim < pObj->m_pModel->GetAnims().size())
         {
-            const LTABCAnim& a = pObj->m_pModel->GetAnims()[pObj->m_nAnim];
             float fElapsed = LTGetClock()->GetTime() - pObj->m_fAnimStart;
-            unsigned int kf = KeyframeAt(a, fElapsed, pObj->m_bLooping);
-            if (LTModelDraw::BuildPose(*pObj->m_pModel, (unsigned)pObj->m_nAnim, kf, pose))
+            unsigned int kf = 0, kf1 = 0;
+            float fFrac = 0.0f;
+            LTModelDraw::PoseKeys(*pObj->m_pModel, (unsigned)pObj->m_nAnim, fElapsed,
+                                  pObj->m_bLooping, &kf, &kf1, &fFrac);
+            if (LTModelDraw::BuildPoseSpan(*pObj->m_pModel, (unsigned)pObj->m_nAnim,
+                                           kf, kf1, fFrac, pose, 0, 0, 0, 0))
                 pPose = &pose;
         }
 
@@ -1806,6 +1817,28 @@ void LTScene_TeleportTo(void* hObj, const float* pPos3)
                pPos3[0], pPos3[1], pPos3[2]);
 }
 
+// A mover with FLAG_GOTHRUWORLD goes where it asks: no world, no world
+// models, never standing on anything (donor moveobject.cpp:167 and
+// MaybeCollide:1037). The mpclip cheat's spectator flight is this (5eq).
+// Not a teleport -- it is an ordinary move and is not counted as one.
+void LTScene_MoveThrough(void* hObj, const float* pPos3)
+{
+    LTSceneObject* p = Obj((HLOCALOBJ)hObj);
+    if (!p || !pPos3) return;
+    g_pLastMover = hObj;
+    for (int k = 0; k < 3; ++k) p->m_Pos[k] = pPos3[k];
+    p->m_bOnGround = false;
+}
+
+bool LTScene_OldGoThruWorld()
+{
+    static const bool b = []() {
+        const bool bOld = (getenv("LT_OLDGOTHRUWORLD") != 0);
+        if (bOld) { printf("[PHYS] LT_OLDGOTHRUWORLD=1 -- client moves collide whatever FLAG_GOTHRUWORLD says (old)\n"); fflush(stdout); }
+        return bOld; }();
+    return b;
+}
+
 // ⚠️ RIDING LIFTS AND PLATFORMS (HANDOVER 5bl). In the donor a solid world
 // model that moves on the client is handed to the game (IClientShell::
 // OnObjectMove), and CMoveMgr answers with ILTClientPhysics::MovePushObjects
@@ -1826,6 +1859,9 @@ bool LTScene_CarryOnMovers(void* hObj)
     if (s_bOff) return false;
     LTSceneObject* p = Obj((HLOCALOBJ)hObj);
     if (!p || !LTWorldCollide_Ready() || !LTServerBrush_MovedCount()) return false;
+    // Nothing carries an object that goes through the world: it stands on
+    // nothing (LTScene_MoveThrough, 5eq).
+    if ((p->m_Flags & FLAG_GOTHRUWORLD) && !LTScene_OldGoThruWorld()) return false;
 
     const float r = Radius(p->m_Dims);
     const float fFeet = SphereFeet(p->m_Dims, r);
@@ -2809,6 +2845,22 @@ static void SC_FreeParticle(LTSceneParticleSystem* ps, LTSceneParticle* q)
     delete q;
 }
 
+// ⚠️ THE FRAME A SPRITE OBJECT OR POLYGRID SHOWS after fMs of its own clock
+// (5em): a multi-frame `.spr`'s frame DTX by the donor's rule
+// (CLTSprite::FrameAtMs); anything else -- a still, a `.dtx`, animation off --
+// its own name, so a still is drawn exactly as before.
+static std::string SC_SpriteFrame(const std::string& sName, double fMs)
+{
+    if (!LTSpriteAnimEnabled() || sName.size() < 4 ||
+        strcasecmp(sName.c_str() + sName.size() - 4, ".spr") != 0) return sName;
+    const CLTSprite* pS = g_Scene.LoadSprite(sName);
+    if (!pS || pS->GetNumFrames() < 2 || pS->GetFPS() == 0) return sName;
+    const char* pF = pS->GetFrame(pS->FrameAtMs(fMs));
+    return (pF && pF[0]) ? std::string(pF) : sName;
+}
+
+std::string LTScene_SpriteFrame(const std::string& sName, double fMs) { return SC_SpriteFrame(sName, fMs); }
+
 // The texture a system draws with NOW: an animated sprite's current frame
 // by the donor's integer rule (sprite.cpp spr_UpdateTracker: ms per frame =
 // 1000 / fps, the loop that many ms per frame long), else its own name (5dm).
@@ -2841,11 +2893,7 @@ static LTRESULT SC_SetupParticleSystem(HLOCALOBJ hObj, char* pTextureName, float
     ps->m_fSprMs  = 0.0f;
     if (ps->m_sTexture.size() > 4 && strcasecmp(ps->m_sTexture.c_str() + ps->m_sTexture.size() - 4, ".spr") == 0)
     {
-        static const bool s_bStill = []() {
-            const bool b = (getenv("LT_NOSPRANIM") != 0);
-            if (b) { printf("[PART] LT_NOSPRANIM=1 -- particle sprites show frame 0 only (old)\n"); fflush(stdout); }
-            return b; }();
-        const CLTSprite* pS = s_bStill ? 0 : g_Scene.LoadSprite(ps->m_sTexture);
+        const CLTSprite* pS = LTSpriteAnimEnabled() ? g_Scene.LoadSprite(ps->m_sTexture) : 0;
         if (pS && pS->GetNumFrames() > 1 && pS->GetFPS() > 0) ps->m_pSprite = pS;
     }
     if (getenv("LT_PARTTRACE"))
@@ -2986,6 +3034,27 @@ void* LTScene_AddParticle(void* hObj, const float* pPos, const float* pVel,
     LTSceneParticleSystem* ps = SC_PartSys((HLOCALOBJ)hObj);
     if (!ps) return 0;
     return (void*)(LTParticle*)SC_NewParticle(ps, pPos, pVel, pColor, fLifetime);
+}
+
+// ⚠️ EVERY SPRITE CLOCK, ONCE PER CLIENT FRAME (5em) -- the donor's
+// UpdateAnimations (every OT_SPRITE, seen or not) and UpdatePolyGrids (a grid
+// only while it is drawn or FLAG_UPDATEUNSEEN), plus the level's clock, which
+// the world-file sprites and `.spr` surfaces read (LTWorldSpriteClock).
+void LTScene_UpdateSprites(float fDt)
+{
+    if (!(fDt > 0.0f)) return;
+    LTWorldSetSpriteClock(LTWorldSpriteClock() + fDt);
+    const double fMs = fDt * 1000.0;
+    const std::vector<LTSceneObject*>& v = g_Scene.Objects();
+    for (size_t i = 0; i < v.size(); ++i)
+    {
+        LTSceneObject* p = v[i];
+        if (!p) continue;
+        if (p->m_nType == OT_SPRITE || p->m_nType == OT_MODEL) p->m_fSprMs += fMs;
+        else if (p->m_nType == OT_POLYGRID && p->m_pPolyGrid
+                 && (p->m_Flags & (FLAG_WASDRAWN | FLAG_UPDATEUNSEEN)))
+            p->m_pPolyGrid->m_fSprMs += fMs;
+    }
 }
 
 // The donor's ps_UpdateParticles, less PS_BOUNCE's floor probe (a particle
@@ -3129,6 +3198,7 @@ static LTRESULT SC_SetPolyGridTexture(HLOCALOBJ hObj, char* pFilename)
     LTScenePolyGrid* pg = SC_PolyGrid(hObj);
     if (!pg) return LT_ERROR;
     pg->m_sSprite = pFilename ? pFilename : "";
+    pg->m_fSprMs  = 0.0;            // a new sprite starts at frame 0 (5em)
     return LT_OK;
 }
 
@@ -3587,7 +3657,7 @@ public:
         out.m_H = pg->m_H;
         out.m_pData  = (const signed char*)&pg->m_Data[0];
         out.m_pTable = pg->m_Table;
-        out.m_sSprite = pg->m_sSprite;
+        out.m_sSprite = SC_SpriteFrame(pg->m_sSprite, pg->m_fSprMs);     // its frame now (5em)
         out.m_xPan = pg->m_xPan; out.m_yPan = pg->m_yPan;
         out.m_xScale = pg->m_xScale; out.m_yScale = pg->m_yScale;
         for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k];
@@ -3596,15 +3666,20 @@ public:
         return true;
     }
 
-    unsigned int SpriteCount() const override { return (unsigned)m_Sprites.size(); }
+    // The client's sprites, then the SERVER's (5em -- LTServerDynamicObjects).
+    unsigned int SpriteCount() const override
+    {
+        return (unsigned)m_Sprites.size() + (m_pServer ? m_pServer->SpriteCount() : 0u);
+    }
 
     bool GetSprite(unsigned int i, LTDynamicSprite& out) const override
     {
-        if (i >= m_Sprites.size()) return false;
+        if (i >= m_Sprites.size())
+            return m_pServer ? m_pServer->GetSprite(i - (unsigned)m_Sprites.size(), out) : false;
         const LTSceneObject* p = m_Sprites[i];
         // In a mirror: never FLAG2_PORTALINVISIBLE (the player-view FX, 5df).
         if (LTWorldPortalPass() && (p->m_Flags2 & FLAG2_PORTALINVISIBLE)) return false;
-        out.m_Draw.m_sSprite  = p->m_sFilename;
+        out.m_Draw.m_sSprite  = SC_SpriteFrame(p->m_sFilename, p->m_fSprMs);   // its frame now (5em)
         out.m_Draw.m_fScaleX  = p->m_Scale[0] > 0.0f ? p->m_Scale[0] : 1.0f;
         out.m_Draw.m_fScaleY  = p->m_Scale[1] > 0.0f ? p->m_Scale[1] : 1.0f;
         for (int k = 0; k < 3; ++k) out.m_Draw.m_Colour[k] = p->m_Color[k];
@@ -3614,6 +3689,20 @@ public:
         out.m_Draw.m_bZBias   = (p->m_Flags & FLAG_SPRITEBIAS) != 0;
         out.m_bNoZ            = (p->m_Flags & FLAG_SPRITE_NOZ) != 0;
         out.m_bReallyClose    = (p->m_Flags & FLAG_REALLYCLOSE) != 0;
+        // FLAG_ROTATEABLESPRITE (5em): flat in its own plane -- blood on a
+        // wall, a footprint, a rain ring, a mark, an impact puff aligned to
+        // the surface. LT_NOROTSPRITES=1 = facing the camera like every other
+        // sprite (old; says so).
+        // ⚠️ NOT A REALLYCLOSE ONE: the only such is the lighter's spinning
+        // glow (FX.txt PVLighterSprite: Rotate, FaceCamera), whose rotation
+        // the game aims from its CAMERA-SPACE position at the camera's WORLD
+        // position (BaseScaleFX.cpp UpdateRotation) -- an arbitrary plane in
+        // camera space, drawn here as a half-screen orange band. What the
+        // original showed is not known; it stays as it was (facing the
+        // camera, 2 units out, under the sprite near cut: not drawn). TODO.
+        out.m_Draw.m_bRotatable = LTRotatableSpritesEnabled() && (p->m_Flags & FLAG_ROTATEABLESPRITE) != 0
+                               && !out.m_bReallyClose;
+        for (int k = 0; k < 4; ++k) out.m_Draw.m_Quat[k] = p->m_Quat[k];
         if (!out.m_bReallyClose)
         {
             for (int k = 0; k < 3; ++k) out.m_Pos[k] = p->m_Pos[k];
@@ -3649,8 +3738,12 @@ public:
 
         out.sModel = p->m_sFilename;
         out.sSkins.clear();
+        // ⚠️ A `.spr` SKIN IS HANDED OVER AS ITS FRAME OF THE MOMENT (5em) --
+        // the donor's model sprite trackers (clientmgr.cpp UpdateAnimations).
+        // The renderer loads a skin as a DTX, so `Torch.spr` (the lighter's
+        // flame) and `AK47\Spr\Flash.spr` (its muzzle flash) loaded nothing.
         for (size_t k = 0; k < p->m_SkinNames.size(); ++k)
-        { if (k) out.sSkins += ";"; out.sSkins += p->m_SkinNames[k]; }
+        { if (k) out.sSkins += ";"; out.sSkins += SC_SpriteFrame(p->m_SkinNames[k], p->m_fSprMs); }
         for (int k = 0; k < 3; ++k) out.m_Scale[k] = p->m_Scale[k] > 0.0f ? p->m_Scale[k] : 1.0f;
         out.m_nAnim     = p->m_nAnim;
         out.m_fAnimTime = LTGetClock()->GetTime() - p->m_fAnimStart;
@@ -3668,6 +3761,7 @@ public:
             out.m_nBlendOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
         }
         out.m_bNoLight = (p->m_Flags & FLAG_NOLIGHT) != 0;
+        out.m_bChrome  = (p->m_Flags & FLAG_ENVIRONMENTMAP) != 0;      // 5en
         for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k];
 
         if (!out.m_bReallyClose)

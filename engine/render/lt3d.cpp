@@ -64,6 +64,8 @@ namespace
         v.m_R = Lerp(a.m_R, b.m_R, t);
         v.m_G = Lerp(a.m_G, b.m_G, t);
         v.m_B = Lerp(a.m_B, b.m_B, t);
+        v.m_U2 = Lerp(a.m_U2, b.m_U2, t);
+        v.m_V2 = Lerp(a.m_V2, b.m_V2, t);
         return v;
     }
 
@@ -76,6 +78,7 @@ namespace
         float uOverW, vOverW;
         float rOverW, gOverW, bOverW;
         float r, g, b;              // the raw colour, for affine shading
+        float u2OverW, v2OverW;     // the env map's coordinates (5el)
     };
 
     Screen ToScreen(const LT3DVert& v, int w, int h)
@@ -91,6 +94,8 @@ namespace
         s.gOverW = v.m_G * invW;
         s.bOverW = v.m_B * invW;
         s.r = v.m_R; s.g = v.m_G; s.b = v.m_B;
+        s.u2OverW = v.m_U2 * invW;
+        s.v2OverW = v.m_V2 * invW;
         return s;
     }
 
@@ -537,6 +542,33 @@ namespace
                         }
                         const float fInv = 1.0f / (float)nTaps;
                         for (int k = 0; k < 4; ++k) acc[k] *= fInv;
+                    }
+
+                    // ⚠️ THE ENVIRONMENT MAP (5el; LT3DTexture::m_pEnvMap):
+                    // min(1, base + base.a * env), and THEN the light, as the
+                    // original's texture pass and light pass compose. One
+                    // bilinear sample of the env map's top level -- they are
+                    // 64x64 and blurred, and D3D filtered them too.
+                    // ...or MODEL CHROME (5en): lerp(chrome, base, base.a),
+                    // the original's chrome pass with the skin blended over it.
+                    const LT3DTexture* pEnv = t.m_pChrome ? t.m_pChrome
+                                            : (t.m_bEnvMap ? pTex->m_pEnvMap : 0);
+                    if (pEnv && pEnv->m_pRGBA && pEnv->m_Width > 0 && pEnv->m_Height > 0)
+                    {
+                        const float u2 = (l0 * p0->u2OverW + l1 * p1->u2OverW + l2 * p2->u2OverW) * w;
+                        const float v2 = (l0 * p0->v2OverW + l1 * p1->v2OverW + l2 * p2->v2OverW) * w;
+                        float e[4];
+                        SampleLevel(pEnv->m_pRGBA, pEnv->m_Width, pEnv->m_Height, u2, v2,
+                                    t.m_bBilinear, e);
+                        const float a = pTex->m_bEnvBaseAlpha ? acc[3] : 1.0f;
+                        if (t.m_pChrome)
+                            for (int k = 0; k < 3; ++k) acc[k] = e[k] + a * (acc[k] - e[k]);
+                        else
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                acc[k] += a * e[k];
+                                if (acc[k] > 1.0f) acc[k] = 1.0f;
+                            }
                     }
 
                     sr *= acc[0];

@@ -175,6 +175,7 @@ bool CLTPropTypes::Load(CLTFileMgr* pFileMgr)
         else if (QuotedValue(sLine, "Filename", v)) cur.m_sFilename = v;
         else if (QuotedValue(sLine, "Skin",     v)) cur.m_sSkin = v;
         else if (IntValue(sLine, "Chromakey", nInt))  cur.m_bChromakey = (nInt != 0);
+        else if (IntValue(sLine, "Chrome", nInt))     cur.m_bChrome = (nInt != 0);     // 5en
         // ⚠️ `Alpha` is a FLOAT here (0.999), so IntValue's digit test accepts
         // it and atof reads it. Using IntValue would truncate every 0.999 to 0
         // and mark all 301 entries translucent.

@@ -233,6 +233,12 @@ struct LTSceneObject
     // Reset for every object when the client leaves a world (the game removes
     // all its effects there). See skeleton_host.cpp kLTMsg_SFX.
     bool                        m_bSFXDelivered = false;
+
+    // OT_SPRITE, and an OT_MODEL's `.spr` skins (5em): ms since its sprite
+    // started -- the donor's SpriteTracker, started (SC_PLAY | SC_LOOP) when
+    // the object is made or given a new file or skins, advanced every frame
+    // (clientmgr.cpp UpdateAnimations).
+    double                      m_fSprMs = 0.0;
 };
 
 // ⚠️ A POLYGRID -- water surfaces, the plasma in a tank (ILTClient
@@ -252,6 +258,10 @@ struct LTScenePolyGrid
     float               m_Table[256][4];        // PGColor: r g b 0..255, a 0..255
     std::string         m_sSprite, m_sEnvMap;
     float               m_xPan = 0.0f, m_yPan = 0.0f, m_xScale = 1.0f, m_yScale = 1.0f;
+    // The surface sprite's clock in ms (5em): restarted by SetPolyGridTexture,
+    // advanced only while the grid is drawn or FLAG_UPDATEUNSEEN, as the
+    // donor's UpdatePolyGrids does.
+    double              m_fSprMs = 0.0;
 };
 
 
@@ -430,6 +440,14 @@ void*           LTScene_AddParticle(void* hObj, const float* pPos, const float* 
 // Moves and ages every particle system by fDt seconds -- once per client
 // frame, after the shell's Update, where the donor's UpdateObjects runs (5dh).
 void            LTScene_UpdateParticles(float fDt);
+// Advances every sprite clock by fDt seconds (5em): each OT_SPRITE's, each
+// drawn PolyGrid's and the level's (LTWorldSetSpriteClock). Once per client
+// frame, beside LTScene_UpdateParticles.
+void            LTScene_UpdateSprites(float fDt);
+// The frame a sprite shows fMs after it started (5em): a multi-frame `.spr`'s
+// frame DTX by the donor's rule, anything else its own name. The server's
+// sprites ask through this too, so there is one sprite cache.
+std::string     LTScene_SpriteFrame(const std::string& sName, double fMs);
 // The next OT_PARTICLESYSTEM created gets this rate (particles/second) -- set
 // around the delivery of a ParticleSystem effect, 0 clears (E-009, 5dj).
 void            LTScene_SetPendingParticleRate(float fRate);
@@ -458,6 +476,10 @@ bool  LTScene_MoveWithCollision(void* hObj, const float* pWant3, bool* pbGround)
 // Carries the object by the motion of a moving brush it stands on (lifts).
 bool  LTScene_CarryOnMovers(void* hObj);
 void  LTScene_TeleportTo(void* hObj, const float* pPos3);
+// An ordinary move for an object with FLAG_GOTHRUWORLD: placed, no collision.
+void  LTScene_MoveThrough(void* hObj, const float* pPos3);
+// LT_OLDGOTHRUWORLD=1: client moves collide whatever the flags (old; says so).
+bool  LTScene_OldGoThruWorld();
 // ⚠️ The handle that means "the level itself". GetStandingOn must report this
 // when an object rests on world geometry -- see the implementation.
 void* LTScene_WorldObject();

@@ -36,6 +36,8 @@
 #include "ltworldvis.h"
 #include "lt3d.h"
 #include "ltabc.h"
+
+class CLTSprite;
 #include "ltproptypes.h"
 
 class CLTFileMgr;
@@ -97,6 +99,23 @@ inline bool LTIsTranslucentDraw(float fAlpha, int nBlendOp)
 // instrument as LT_NOMODELBLEND.
 bool LTSpritesEnabled();
 
+// ⚠️ THE SPRITE CLOCK (HANDOVER 5em): seconds since the level began. The host
+// advances it by the game's frame time (LTScene_UpdateSprites) and Load puts it
+// back to 0. Sprites the WORLD FILE places and `.spr` world surfaces show the
+// frame for this time -- in the original each is a tracker started with the
+// level. Nothing else advances it, so a tool or test that never does renders
+// frame 0, exactly as before.
+void   LTWorldSetSpriteClock(double fSeconds);
+double LTWorldSpriteClock();
+
+// Do sprites animate? LT_NOSPRANIM=1 = every sprite on its frame 0 (old):
+// particles, sprite objects, `.spr` surfaces, PolyGrids. Says so.
+bool   LTSpriteAnimEnabled();
+
+// Are FLAG_ROTATEABLESPRITE sprites drawn flat, in their own plane (5em)?
+// LT_NOROTSPRITES=1 = facing the camera like the rest (old; says so).
+bool   LTRotatableSpritesEnabled();
+
 // Is the sky pass drawn? LT_NOSKY=1 skips it, so a frame shows the level
 // alone -- the only way to ask whether a suspect area is a surface or the sky.
 bool LTSkyEnabled();
@@ -115,6 +134,25 @@ bool LTObjectsEnabled();
 // (absent = on). LT_NOMIRRORS=1 = never (says so). Both renderers ask this.
 void LTWorldSetMirrors(bool bOn);
 bool LTMirrorsEnabled();
+
+// ⚠️ THE WORLD'S ENVIRONMENT MAPS (HANDOVER 5el): drawn when the game's
+// "Environment Map" option is on -- console EnvMapWorld (d3d.ren's default 1),
+// pushed in by the host each frame with DetailTextureScale, which the original
+// multiplies the env coordinates by (autoexec 1.0, d3d.ren default 0.2).
+// LT_NOENVMAP=1 = never, as before 5el (says so). Both renderers ask this.
+void  LTWorldSetEnvMaps(bool bOn, float fScale);
+bool  LTEnvMapsEnabled();
+float LTEnvMapScale();
+
+// ⚠️ MODEL CHROME (HANDOVER 5en): the game's "Chrome" option -- console
+// EnvMapEnable (d3d.ren default 0; the user's config 1) -- and the level's
+// chrome map, the console line `EnvMap <dtx>` the game runs at every level
+// start (GameClientShell.cpp, default Tex\Chrome.dtx), with EnvPanSpeed
+// (0.0005) and EnvScale (1). Pushed by the host each frame. A model is chrome
+// when its object carries FLAG_ENVIRONMENTMAP (LTDynamicModel::m_bChrome).
+// LT_NOCHROME=1 = never, as before 5en (says so).
+void        LTWorldSetChrome(bool bOn, const char* pEnvMap, float fPanSpeed, float fScale);
+bool        LTChromeEnabled();
 
 // ⚠️ TRUE WHILE A MIRROR'S REFLECTION IS BEING DRAWN (HANDOVER 5df). The
 // object lists ask it, because LT2 draws a different set in a "portal":
@@ -207,9 +245,17 @@ struct LTSpriteDraw
     // mounted on for the depth test. 5,019 ask for it.
     bool        m_bZBias;
 
+    // ⚠️ FLAG_ROTATEABLESPRITE (5em): the quad lies in the object's OWN plane --
+    // its rotation's right and up -- instead of facing the camera. A bullet
+    // mark is one, aligned to the wall it hit (MarkSFX.cpp, ClientWeaponSFX.cpp).
+    // m_Quat is that rotation, world space.
+    bool        m_bRotatable;
+    float       m_Quat[4];
+
     LTSpriteDraw() : m_fScaleX(0.5f), m_fScaleY(0.5f), m_fAlpha(1.0f),
-                     m_nBlendOp(0), m_bGlow(false), m_bZBias(false)
-    { m_Colour[0] = m_Colour[1] = m_Colour[2] = 1.0f; }
+                     m_nBlendOp(0), m_bGlow(false), m_bZBias(false), m_bRotatable(false)
+    { m_Colour[0] = m_Colour[1] = m_Colour[2] = 1.0f;
+      m_Quat[0] = m_Quat[1] = m_Quat[2] = 0.0f; m_Quat[3] = 1.0f; }
 };
 
 // ⚠️ How a moving brush -- a door -- tells the renderer where it is now. The
@@ -255,6 +301,7 @@ struct LTDynamicModel
     // hand it to Get(), and a garbage m_pfnNode would be called.
     LTDynamicModel()
         : m_nAnim(-1), m_fAnimTime(0.0f), m_bLooping(false),
+          m_nBlendAnim(-1), m_nBlendKey(0), m_fBlendWeight(1.0f),
           m_pfnNode(0), m_hNodeObj(0), m_pNodeUser(0), m_bReallyClose(false),
           m_fAlpha(1.0f), m_nBlendOp(0), m_bNoLight(false)
     {
@@ -271,6 +318,13 @@ struct LTDynamicModel
     int         m_nAnim;        // -1 = bind pose
     float       m_fAnimTime;    // seconds since that animation started
     bool        m_bLooping;
+
+    // ⚠️ THE CROSS-FADE INTO m_nAnim, while its blend-in runs (HANDOVER 5ek;
+    // LTModelDraw::BlendFrom): fade from this animation's key, the new pose
+    // weighted m_fBlendWeight. m_nBlendAnim -1 = no fade.
+    int         m_nBlendAnim;
+    unsigned    m_nBlendKey;
+    float       m_fBlendWeight;
 
     // ⚠️ THE GAME'S NODE CONTROL for this object, if it installed one
     // (ILTClient::ModelNodeControl on the CLIENT mirror). Null when none.
@@ -304,6 +358,11 @@ struct LTDynamicModel
     // popup's letter was lit by the dim room instead of shown white.
     bool        m_bNoLight;
     float       m_Colour[3];    // SetObjectColor r, g, b
+
+    // ⚠️ FLAG_ENVIRONMENTMAP (HANDOVER 5en): the object asks for chrome --
+    // a view weapon whose Weapons.txt says EnvironmentMap 1 (WeaponModel.cpp
+    // 1261), a chrome Prop or PropType, a vehicle. Drawn only when opaque.
+    bool        m_bChrome = false;
 };
 
 // Is FLAG_NOLIGHT honoured for game-spawned models? LT_LITNOLIGHT=1 lights
@@ -464,6 +523,10 @@ public:
     // The polygon the following triangles belong to (its index in the
     // model) -- the static recorder keeps it for visibility (5ea).
     virtual void BeginPoly(size_t /*q*/) {}
+    // ⚠️ AN ENVIRONMENT-MAPPED POLYGON (5el) -- its coordinates follow the
+    // eye, so the static recorder takes it OUT (returns true and keeps q)
+    // and the frame draws it; every other sink returns false and gets it.
+    virtual bool DeferEnvPoly(size_t /*q*/) { return false; }
 };
 
 // ⚠️ LINEAR DEPTH FOG, as the level asks for it (HANDOVER 5bo). Filled by
@@ -696,12 +759,18 @@ private:
         bool        m_bOK = false, m_bChromakey = false;
         float       m_fAlpha = 1.0f;
         int         m_nBlendOp = 0;
+        bool        m_bChrome = false;      // FLAG_ENVIRONMENTMAP (5en)
     };
+    // ⚠️ A WORLD-FILE PROP ASKS FOR CHROME (5en): a Prop's `Chrome` property
+    // (Prop.cpp:266), a PropType's attribute entry (PropType.cpp:181).
+    bool                ObjectChromeFile(size_t i) const;
+    bool                ObjectChrome(size_t i) const;
     struct ObjSpriteRes
     {
         bool         m_bSprite = false;
         bool         m_bFileOn = true;      // Visible and StartOn, as the file says
         LTSpriteDraw m_Draw;
+        const CLTSprite* m_pAnim = nullptr; // its .spr when that animates (5em)
     };
     bool                ResolveObjectModelFile(size_t i, std::string& sModel, std::string& sSkin,
                                                bool* pbChromakey, float* pfAlpha, int* pnBlendOp) const;
@@ -733,7 +802,45 @@ private:
         // Read only for GetObjectAlphaTexture's entries, which set it: the
         // texture's alpha channel as a constant 0..1, or -1 when it varies.
         float                       m_fChanAlpha;
+
+        // ⚠️ AN ANIMATED `.spr` SURFACE'S ALIAS (5em): m_Tex is rewritten to
+        // the current frame's every frame, and on the GPU it borrows that
+        // frame's handle -- so it is never uploaded as a texture of its own.
+        bool                        m_bAnimAlias = false;
     };
+
+    // ⚠️ THE ANIMATED `.spr` SURFACES (5em) -- 486 polygons of the shipped
+    // worlds: TV static, monitors, the gamester engine. Each alias with ALL its
+    // frames' textures, loaded with it so the GPU upload loop has them before
+    // they are first shown. UpdateAnimatedSurfaces points the alias at the
+    // frame for LTWorldSpriteClock(); the static GPU world keeps its runs keyed
+    // by the alias, so it needs no rebuild.
+    struct AnimSurf
+    {
+        CachedTex*                       m_pAlias;
+        std::vector<const LT3DTexture*>  m_Frames;
+        const CLTSprite*                 m_pSprite;
+        bool                             m_bBlend;
+        const LT3DTexture*               m_pCur;
+    };
+    std::vector<AnimSurf>               m_AnimSurf;
+    void                UpdateAnimatedSurfaces();
+
+    // ⚠️ MODEL CHROME (5en): fills `out` for the camera at pEye3 with up
+    // pUp3 and forward pFwd3 -- false when the option is off or the chrome
+    // map is missing. Loading the map is also what puts it in m_Textures
+    // before the GPU upload loop (the Metal preload asks first).
+    bool                ChromeFor(const float* pEye3, const float* pFwd3, const float* pUp3,
+                                  LTModelDraw::LTModelChrome& out);
+    static void         SetAnimSurfFrame(AnimSurf& a, double fMs);
+
+    // ⚠️ THE FRAME A SPRITE SHOWS NOW (5em): a multi-frame `.spr`'s frame DTX
+    // for LTWorldSpriteClock(), by the donor's rule; anything else (a still,
+    // a `.dtx`, animation off) its own name, so a still's cache keys and
+    // pixels are exactly what they were. The sprites are read once and kept.
+    std::string         SpriteFrameNow(const std::string& sSpr) const;
+    const CLTSprite*    SpriteInfo(const std::string& sSpr) const;
+    mutable std::map<std::string, CLTSprite*>   m_SprInfo;
 
     // ⚠️ A model can carry SEVERAL skins. The object's `Skin` property is one
     // string holding a ";"-separated list, one entry per texture index its
@@ -997,7 +1104,10 @@ private:
         std::vector<unsigned int>   m_TriPoly;          // each triangle's polygon (5ea)
         unsigned int                m_nIdxFirst = 0, m_nIdxCount = 0;   // this view's (5ea)
     };
-    struct StaticModel { std::vector<StaticRun> m_Runs; unsigned int m_nTris = 0; };
+    // m_EnvPolys: the env-mapped polygons the recorder left out (5el),
+    // drawn every frame from the eye.
+    struct StaticModel { std::vector<StaticRun> m_Runs; unsigned int m_nTris = 0;
+                         std::vector<int> m_EnvPolys; };
     struct StaticWorld
     {
         bool                        m_bValid  = false;
@@ -1089,6 +1199,14 @@ private:
     // While the GPU's static world is recorded, mirror polygons always go
     // under their stand-in, so they become runs of their own.
     bool                                    m_bRecordingStatic = false;
+    // ⚠️ THE ENVIRONMENT MAPS (HANDOVER 5el): while true, DrawModel gives an
+    // env-mapped polygon its reflection coordinates (LT3DVert::m_U2/m_V2)
+    // from m_EnvEye -- the eye in the space of the model being drawn. Set by
+    // pass 2 of both renderers around their world loops, and nowhere else.
+    bool                                    m_bEnvActive = false;
+    float                                   m_EnvEye[3] = { 0, 0, 0 };
+    // The eye in a model's own space: the inverse of its rigid Local.
+    static void EyeInModel(const float* pEye3, const float* pLocal16, float* pOut3);
     // Set only while pass 4 draws the mirrors' own textures over their
     // reflections -- the ordinary blended walk never draws a mirror.
     bool                                    m_bMirrorOverlay = false;

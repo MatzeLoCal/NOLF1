@@ -121,11 +121,40 @@ namespace LTModelDraw
         unsigned int    m_nAnim;
         unsigned int    m_nKeyframe;
         int             m_nWeightSet;   // index into the model's weight sets
+        // ⚠️ BETWEEN TWO KEYS (HANDOVER 5ek): the key after m_nKeyframe and
+        // how far toward it. The defaults show m_nKeyframe exactly.
+        unsigned int    m_nKey1 = 0;
+        float           m_fFrac = 0.0f;
     };
     bool    BuildPose(const CLTABCModel& model, unsigned int nAnim,
                       unsigned int nKeyframe, LTModelPose& out,
                       NodeHook pHook, void* pHookUser,
                       const Layer* pLayers, unsigned int nLayers);
+
+    // ⚠️ THE SAME, BETWEEN TWO KEYS of the main animation (HANDOVER 5ek):
+    // nKey0 -> nKey1 by fFrac, from PoseKeys. Every CHARACTER pose goes
+    // through here -- the draw, the server's sockets and hit nodes, the
+    // client's sockets, the menu -- so an attachment sits on the same
+    // in-between pose as the hand that holds it.
+    //
+    // ⚠️ AND THE CROSS-FADE INTO IT, when `pFrom` is given: the original
+    // engine does not cut from one animation to the next. For the new
+    // animation's blend-in time (m_InterpolationMS, 200 ms on most) its
+    // tracker slerps every node FROM the old animation's key TO the new
+    // first frame, by the share of the blend done (donor animtracker.cpp
+    // trk_SetCurAnim copies m_Cur to m_Prev; transformmaker.cpp InitTransform
+    // blends them). m_fWeight is that share: 0 = all the old key, toward 1.
+    struct BlendFrom
+    {
+        unsigned int    m_nAnim;        // the animation faded FROM
+        unsigned int    m_nKey;         // its key at the switch
+        float           m_fWeight;      // the NEW pose's weight, [0, 1)
+    };
+    bool    BuildPoseSpan(const CLTABCModel& model, unsigned int nAnim,
+                          unsigned int nKey0, unsigned int nKey1, float fFrac,
+                          LTModelPose& out, NodeHook pHook, void* pHookUser,
+                          const Layer* pLayers, unsigned int nLayers,
+                          const BlendFrom* pFrom = 0);
 
     // The model's rest hierarchy, straight from the node matrices. Used when
     // there is no animation to play.
@@ -264,8 +293,8 @@ namespace LTModelDraw
 
     // ⚠️ BETWEEN TWO KEYS (HANDOVER 5cg). The donor's tracker interpolates
     // (slerp the rotations, lerp the positions by the time between the keys);
-    // KeyframeAt and BuildPose show the LAST key, which is what every
-    // character in this port still does. KeyframeSpan gives the two keys and
+    // KeyframeAt and BuildPose show the LAST key (every character did until
+    // 5ek; see PoseKeys below). KeyframeSpan gives the two keys and
     // the fraction for `fSeconds` (wrapped when looping, held at the end
     // otherwise); BuildPoseBetween poses there. Used by the level's animated
     // props -- a globe that turns 41 degrees per key cannot step.
@@ -275,6 +304,20 @@ namespace LTModelDraw
     bool BuildPoseBetween(const CLTABCModel& model, unsigned int nAnim,
                           unsigned int nKey0, unsigned int nKey1, float fFrac,
                           LTModelPose& out);
+
+    // ⚠️ THE TIME -> KEYS RULE FOR EVERY CHARACTER (HANDOVER 5ek): KeyframeSpan
+    // -- the donor's tracker (animtracker.cpp trk_UpdatePositionInterpolant)
+    // slerps and lerps between the key before and the key after. Before 5ek
+    // characters showed the LAST key and stepped (a run cycle of 10-20 keys
+    // a second visibly juddered). LT_NOKEYLERP=1 = the last key again, for
+    // characters, attachments, sockets, hit nodes and menu models (says so;
+    // level props keep 5cg's interpolation either way).
+    void PoseKeys(const CLTABCModel& model, unsigned int nAnim,
+                  float fSeconds, bool bLooping,
+                  unsigned int* pK0, unsigned int* pK1, float* pFrac);
+    // A layer's keys for `fSeconds` into its animation, by the same rule.
+    void SetLayerTime(Layer& L, const CLTABCModel& model,
+                      float fSeconds, bool bLooping);
 
     // ⚠️ THE POSITION-SKINNING RULE, for the same reason -- it has an oracle.
     //
@@ -314,6 +357,21 @@ namespace LTModelDraw
         float   m_Color[kMaxLights][3];     // 0..1, attenuated
     };
 
+    // ⚠️ MODEL CHROME (HANDOVER 5en) -- d3d.ren's per-vertex rule (0x10003ae0,
+    // its constants from the per-frame setup at 0x1002d314):
+    //     u = 0.5 + 0.5/EnvScale * (N . camRight) + camPos.x * EnvPanSpeed
+    //     v = 0.5 + 0.5/EnvScale * (N . camUp)    + camPos.z * EnvPanSpeed
+    // N the vertex's world normal (the one the light uses), written to each
+    // corner's m_U2/m_V2. The software path draws with LT3DTarget::m_pChrome
+    // set; a sink is told by its owner (the Metal batcher's SetChrome).
+    struct LTModelChrome
+    {
+        const LT3DTexture*  m_pEnv;
+        float               m_Right[3], m_Up[3];
+        float               m_Scale;            // 0.5 / EnvScale
+        float               m_PanU, m_PanV;     // 0.5 + camPos.x/z * EnvPanSpeed
+    };
+
     LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
                           const float* pMVP, const float* pNormalMatrix,
                           const LT3DTexture* pSkins, int nSkins,
@@ -322,7 +380,8 @@ namespace LTModelDraw
                           ISink* pSink = 0,
                           bool bMirrorU = false,
                           const LTModelLighting* pLighting = 0,
-                          int nMirrorModel = -1);
+                          int nMirrorModel = -1,
+                          const LTModelChrome* pChrome = 0);
 
     // ⚠️ `nMirrorModel` -- WHETHER THIS MODEL'S SPACE IS MIRRORED IN X, per
     // call: -1 = MirrorX() (the default every older caller gets), 0 = no,

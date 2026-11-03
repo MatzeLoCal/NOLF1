@@ -133,6 +133,10 @@ namespace
             ++m_nTris;
         }
         virtual void BeginPoly(size_t q) { m_nPoly = (unsigned int)q; }
+        // ⚠️ An env-mapped polygon is not baked: its coordinates follow the
+        // eye. Kept, and drawn by the frame (5el).
+        virtual bool DeferEnvPoly(size_t q) { m_EnvPolys.push_back((int)q); return true; }
+        std::vector<int> m_EnvPolys;
         std::map<const LT3DTexture*, std::vector<LTMetalVert> > m_Runs;
         std::map<const LT3DTexture*, std::vector<unsigned int> > m_RunPoly;   // per triangle (5ea)
         unsigned int m_nPoly = 0;
@@ -170,6 +174,27 @@ namespace
                          const LT3DVert* pV)
         {
             if (!pTex) return;
+
+            // ⚠️ AN ENVIRONMENT-MAPPED TRIANGLE (5el), while the pass has them
+            // on: its own run, with the second UV pair DrawModel computed.
+            // ...or a CHROME model's (5en), while its owner has set the chrome
+            // map: the same vertex, its own runs, the lerp combine.
+            const bool bChrome = m_pChrome && !m_bOrdered;
+            if ((m_bEnv && pTex->m_pEnvMap && !m_bOrdered) || bChrome)
+            {
+                std::vector<LTMetalEnvVert>& r = bChrome ? m_ChromeRuns[pTex] : m_EnvRuns[pTex];
+                for (int i = 0; i < 3; ++i)
+                {
+                    LTMetalVert b; ToMetalVert(pW[i], pV[i], b);
+                    LTMetalEnvVert e;
+                    memcpy(e.m_Pos, b.m_Pos, sizeof e.m_Pos);
+                    memcpy(e.m_UV,  b.m_UV,  sizeof e.m_UV);
+                    memcpy(e.m_RGB, b.m_RGB, sizeof e.m_RGB);
+                    e.m_UV2[0] = pV[i].m_U2; e.m_UV2[1] = pV[i].m_V2;
+                    r.push_back(e);
+                }
+                return;
+            }
 
             std::vector<LTMetalVert>* pOut;
             if (m_bOrdered)
@@ -212,7 +237,42 @@ namespace
                 Emit(it->first, it->second.m_Verts);
                 it->second.m_Verts.clear();
             }
+            for (std::map<const LT3DTexture*, std::vector<LTMetalEnvVert> >::iterator it = m_EnvRuns.begin();
+                 it != m_EnvRuns.end(); ++it)
+            {
+                if (it->second.empty()) continue;
+                const LT3DTexture* pTex = it->first;
+                std::map<const LT3DTexture*, unsigned int>::const_iterator hb = handles.find(pTex);
+                std::map<const LT3DTexture*, unsigned int>::const_iterator he = handles.find(pTex->m_pEnvMap);
+                if (hb != handles.end() && hb->second != 0)
+                    LTMetal_DrawEnvTris(m_pMVP, hb->second, he != handles.end() ? he->second : 0u,
+                                        &it->second[0], (int)it->second.size(),
+                                        pTex->m_bAlphaTest, pTex->m_fAlphaRef, pTex->m_bEnvBaseAlpha);
+                it->second.clear();
+            }
+            for (std::map<const LT3DTexture*, std::vector<LTMetalEnvVert> >::iterator it = m_ChromeRuns.begin();
+                 it != m_ChromeRuns.end(); ++it)
+            {
+                if (it->second.empty()) continue;
+                const LT3DTexture* pTex = it->first;
+                std::map<const LT3DTexture*, unsigned int>::const_iterator hb = handles.find(pTex);
+                std::map<const LT3DTexture*, unsigned int>::const_iterator he = handles.find(m_pChromeEnv);
+                if (hb != handles.end() && hb->second != 0)
+                    LTMetal_DrawEnvTris(m_pMVP, hb->second, he != handles.end() ? he->second : 0u,
+                                        &it->second[0], (int)it->second.size(),
+                                        pTex->m_bAlphaTest, pTex->m_fAlphaRef, pTex->m_bEnvBaseAlpha, true);
+                it->second.clear();
+            }
         }
+
+        // ⚠️ MODEL CHROME (5en): set to the chrome map around one chrome
+        // model's Draw, null after; its triangles go to m_ChromeRuns. The
+        // map is one per frame, so the flush draws them all with it.
+        void SetChrome(const LT3DTexture* p) { m_pChrome = p; if (p) m_pChromeEnv = p; }
+
+        // ⚠️ THE ENVIRONMENT MAPS (5el): set to CLTWorldScene::m_bEnvActive
+        // around pass 2; off, an env-mapped triangle is an ordinary one.
+        void SetEnv(bool b) { m_bEnv = b; }
 
     private:
         void Emit(const LT3DTexture* pTex, std::vector<LTMetalVert>& verts)
@@ -250,6 +310,11 @@ namespace
         const LT3DTexture*       m_pCur;
         std::vector<LTMetalVert> m_Cur;
         const std::map<const LT3DTexture*, unsigned int>* m_pHandles;
+        bool m_bEnv = false;
+        std::map<const LT3DTexture*, std::vector<LTMetalEnvVert> > m_EnvRuns;
+        const LT3DTexture* m_pChrome = 0;
+        const LT3DTexture* m_pChromeEnv = 0;
+        std::map<const LT3DTexture*, std::vector<LTMetalEnvVert> > m_ChromeRuns;
     };
 
     // LT_PASSTIME=1 -- CPU time of each part of a Metal frame, averaged and
@@ -349,6 +414,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
 {
     if (!m_bLoaded) return false;
     CPassTimer pt;                  // LT_PASSTIME=1
+    UpdateAnimatedSurfaces();       // `.spr` surfaces to the frame of the moment (5em)
 
     // The camera's up -- reflected inside a mirror's pass (HANDOVER 5de).
     const float up[3] = { m_CamUp[0], m_CamUp[1], m_CamUp[2] };
@@ -432,6 +498,13 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         // ...and every alpha step of every particle texture (5dh), for the
         // same reason again: a particle fades through them frame by frame.
         PreloadParticleTextures(pDyn);
+        // ...and the chrome map (5en), first asked for in pass 3b.
+        if (LTChromeEnabled())
+        {
+            const float f[3] = { 0.0f, 0.0f, 1.0f }, u[3] = { 0.0f, 1.0f, 0.0f };
+            LTModelDraw::LTModelChrome c;
+            ChromeFor(pEye3, f, u, c);
+        }
     }
     pt.Mark(CPassTimer::kPre);
 
@@ -471,6 +544,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             DrawModel(rt, I, sm[i], tex, rst, 0, &rec);
             StaticModel& out = m_Static.m_Models[i];
             out.m_nTris = rec.m_nTris;
+            out.m_EnvPolys = rec.m_EnvPolys;
             for (std::map<const LT3DTexture*, std::vector<LTMetalVert> >::iterator it = rec.m_Runs.begin();
                  it != rec.m_Runs.end(); ++it)
             {
@@ -495,7 +569,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
          it != m_Textures.end(); ++it)
     {
         CachedTex* pC = it->second;
-        if (!pC->m_bValid) continue;
+        if (!pC->m_bValid || pC->m_bAnimAlias) continue;     // an alias borrows its frame's (5em)
         if (m_MetalTex.find(&pC->m_Tex) != m_MetalTex.end()) continue;
 
         const unsigned char* pLv[LT3DTexture::kMaxMips];
@@ -521,6 +595,14 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         }
         m_MetalTex[&pC->m_Tex] = LTMetal_CreateTexture(pLv, w, h, n,
                                                        pC->m_Tex.m_bAlphaTest, pC->m_Tex.m_fAlphaRef);
+    }
+    // ⚠️ AN ANIMATED `.spr` SURFACE DRAWS WITH ITS CURRENT FRAME'S HANDLE (5em).
+    // The static world's runs are keyed by the alias, so pointing the alias at
+    // the frame is the whole animation -- no rebuild, no upload per frame.
+    for (size_t i = 0; i < m_AnimSurf.size(); ++i)
+    {
+        std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(m_AnimSurf[i].m_pCur);
+        m_MetalTex[&m_AnimSurf[i].m_pAlias->m_Tex] = (h != m_MetalTex.end()) ? h->second : 0u;
     }
     pt.Mark(CPassTimer::kUpload);
 
@@ -674,6 +756,13 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     }
     { float t[16]; ToMetalClip(MVP, t); memcpy(MVP, t, sizeof(MVP)); }
 
+    // Model chrome for this camera (5en), as the software pass: opaque models
+    // only, and through the CPU path -- vs_skin has no chrome term.
+    LTModelDraw::LTModelChrome chrome;
+    const bool bChromeOK = ChromeFor(pEye3, camF, camU, chrome);
+    auto chromeOf = [&](const LTDynamicModel& d) -> const LTModelDraw::LTModelChrome* {
+        return (bChromeOK && d.m_bChrome && !LTIsTranslucentDraw(d.m_fAlpha, d.m_nBlendOp)) ? &chrome : 0; };
+
     // ⚠️ The SAME nudge the software path applies to separate world models, and
     // a plain matrix precisely so that "the same" holds by construction rather
     // than by two implementations agreeing. See LTBuildModelDepthBias.
@@ -812,10 +901,48 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             }
         }
         flushPending();
+
+        // ⚠️ THE ENVIRONMENT-MAPPED POLYGONS (5el) the recorder left out:
+        // drawn every frame through DrawModel -- the same surface rules --
+        // with their coordinates from the eye, model by model. With the
+        // option off they are ordinary triangles through the same path.
+        const bool bEnvOn = LTEnvMapsEnabled();
+        m_bEnvActive = bEnvOn;
+        batch.SetEnv(bEnvOn);
+        for (size_t i = 0; i < mdl.size() && i < m_Static.m_Models.size(); ++i)
+        {
+            const StaticModel& sm = m_Static.m_Models[i];
+            if (sm.m_EnvPolys.empty() || &mdl[i] == m_pSky) continue;
+            if (!Drawable(mdl[i], pXform)) continue;
+            { float a; if (ModelObjectAlpha(mdl[i], pXform, &a)) continue; }    // pass 4 (5cf)
+            const LTWorldModelHeader& M = mdl[i];
+            std::vector<const LT3DTexture*> tex(M.m_Textures.size(), (const LT3DTexture*)0);
+            for (size_t k = 0; k < M.m_Textures.size(); ++k)
+                tex[k] = GetTexture(M.m_Textures[k]);
+            const float* pM = LTIsMainWorldBSP(M) ? MVP : MVPBias;
+            float Local[16], ModelMVP[16];
+            for (int k = 0; k < 3; ++k) m_EnvEye[k] = pEye3[k];
+            if (pXform && pXform->GetModelTransform(M.m_sName, Local))
+            {
+                if (!ModelVisibleNow(M)) continue;
+                EyeInModel(pEye3, Local, m_EnvEye);
+                LT3D::Multiply(pM, Local, ModelMVP);
+                pM = ModelMVP;
+            }
+            batch.SetMVP(pM);
+            DrawModel(dummy, pM, M, tex, st, &sm.m_EnvPolys, &batch, kPassOpaque);
+            batch.Flush(m_MetalTex);
+        }
+        batch.SetEnv(false);
+        m_bEnvActive = false;
+        batch.SetMVP(MVP);
     }
     else
     {
     batch.SetMVP(MVP);
+    // ⚠️ THE ENVIRONMENT MAPS (5el) for this walk -- see m_bEnvActive.
+    m_bEnvActive = LTEnvMapsEnabled();
+    batch.SetEnv(m_bEnvActive);
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         if (&mdl[i] == m_pSky) continue;
@@ -833,8 +960,10 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         const float* pVP  = bMain ? MVP : MVPBias;
 
         float Local[16], ModelMVP[16];
+        for (int k = 0; k < 3; ++k) m_EnvEye[k] = pEye3[k];
         if (pXform && pXform->GetModelTransform(M.m_sName, Local))
         {
+            EyeInModel(pEye3, Local, m_EnvEye);
             // ⚠️ A moving brush needs its OWN matrix, so its run is flushed
             // before and after rather than merged with the static geometry.
             batch.Flush(m_MetalTex);
@@ -865,6 +994,8 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         }
     }
     batch.Flush(m_MetalTex);
+    batch.SetEnv(false);
+    m_bEnvActive = false;
     }   // LT_WORLDSTATIC=0
 
     // ...and the reflections of mirrors on a model pass 2 skipped (5de) --
@@ -1250,10 +1381,17 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             // not the other (HANDOVER §5e lists the first four, §5i the
             // fifth). The argument for the value lives at the software call
             // site in ltworldrender.cpp; this must not re-derive it.
-            if (!gpuDraw(pM, ObjMVP, World, PropPose(i, pM), 0, LTPropMirrorModel()))
+            const LTModelDraw::LTModelChrome* pChrome =
+                (bChromeOK && !bTranslucentPass && ObjectChrome(i)) ? &chrome : 0;     // 5en
+            if (pChrome || !gpuDraw(pM, ObjMVP, World, PropPose(i, pM), 0, LTPropMirrorModel()))
+            {
+                batch.SetChrome(pChrome ? pChrome->m_pEnv : 0);
                 LTModelDraw::Draw(dummy, pM->m_Model, ObjMVP, World,
                                   pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins,
-                                  0, false, PropPose(i, pM), &batch, false, 0, LTPropMirrorModel());
+                                  0, false, PropPose(i, pM), &batch, false, 0, LTPropMirrorModel(),
+                                  pChrome);
+                batch.SetChrome(0);
+            }
             batch.Flush(m_MetalTex);
 
             ++st.m_nObjects;
@@ -1327,12 +1465,17 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             }
 
             batch.SetMVP(dd.m_ObjMVP);
-            if (!gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
-                         dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            const LTModelDraw::LTModelChrome* pChrome = chromeOf(d);
+            if (pChrome || !gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
+                                    dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            {
+                batch.SetChrome(pChrome ? pChrome->m_pEnv : 0);
                 LTModelDraw::Draw(dummy, pM->m_Model, dd.m_ObjMVP, dd.m_World,
                               pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins,
                               0, false, dd.m_bPose ? &dd.m_Pose : 0, &batch, false,
-                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0);
+                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0, pChrome);
+                batch.SetChrome(0);
+            }
             pt.SubEnd(CPassTimer::kDynDraw);
             batch.Flush(m_MetalTex);
             pt.SubEnd(CPassTimer::kDynFlush);
@@ -1435,12 +1578,17 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             CachedModel* pM = dd.m_pModel;
             ensureSkins(pM);
             batch.SetMVP(dd.m_ObjMVP);
-            if (!gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
-                         dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            const LTModelDraw::LTModelChrome* pChrome = chromeOf(d);
+            if (pChrome || !gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
+                                    dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            {
+                batch.SetChrome(pChrome ? pChrome->m_pEnv : 0);
                 LTModelDraw::Draw(dummy, pM->m_Model, dd.m_ObjMVP, dd.m_World,
                               pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins,
                               0, false, dd.m_bPose ? &dd.m_Pose : 0, &batch, false,
-                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0);
+                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0, pChrome);
+                batch.SetChrome(0);
+            }
             batch.Flush(m_MetalTex);
             ++st.m_nObjects;
             ++st.m_nDynamic;
@@ -1520,12 +1668,17 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             CachedModel* pM = dd.m_pModel;
             ensureSkins(pM);
             batch.SetMVP(dd.m_ObjMVP);
-            if (!gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
-                         dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            const LTModelDraw::LTModelChrome* pChrome = chromeOf(d);
+            if (pChrome || !gpuDraw(pM, dd.m_ObjMVP, dd.m_World, dd.m_bPose ? &dd.m_Pose : 0,
+                                    dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0))
+            {
+                batch.SetChrome(pChrome ? pChrome->m_pEnv : 0);
                 LTModelDraw::Draw(dummy, pM->m_Model, dd.m_ObjMVP, dd.m_World,
                               pM->m_nSkins ? pM->m_Skins : 0, pM->m_nSkins,
                               0, false, dd.m_bPose ? &dd.m_Pose : 0, &batch, false,
-                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0);
+                              dd.m_bLit ? &dd.m_Light : 0, dd.m_bMirror ? 1 : 0, pChrome);
+                batch.SetChrome(0);
+            }
             batch.Flush(m_MetalTex);
             ++st.m_nDynamic;
         };

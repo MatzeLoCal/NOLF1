@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <vector>
+#include <string>
+#include <stdlib.h>
 // Windows OEM virtual keys -- the punctuation row. Not in compat/windows.h
 // (nothing in the game names them); the values are winuser.h's.
 #ifndef VK_OEM_1
@@ -73,6 +75,11 @@ namespace
     // Same constant as the walk viewer's kMouseGain, deliberately.
     const float kAxisGain = 0.0032f;
     float g_AxisDX = 0.0f, g_AxisDY = 0.0f;
+
+    // ILTClient::SetInputState -- see LTCommand_SetInputState. While false the
+    // game sees no command held and no mouse movement; key events (typed
+    // text) still reach it.
+    bool g_bInputState = true;
 }
 
 // Set by the host so the input layer can tell "the game hooked the window"
@@ -418,9 +425,55 @@ static void LTInput_KeyHoldTick(int nFrame)
     }
 }
 
+// LT_TYPE_AT="<frame>:<text>[;<frame>:<text>...]" -- TYPE TEXT LIKE A PLAYER.
+// The keys above reach OnKeyDown only; typed text (the message line, and with
+// it every cheat code) arrives as WM_CHAR, which only the window produced. One
+// character event per letter at that frame, through the same queue. Open the
+// line first (Say: LT_KEYHOLD="84,f,f+2") and end with Enter (VK 13).
+static void LTInput_TypeTick(int nFrame)
+{
+    static std::vector<std::pair<int, std::string> > s_Texts;
+    static bool s_bParsed = false;
+    if (!s_bParsed)
+    {
+        s_bParsed = true;
+        if (const char* p = getenv("LT_TYPE_AT"))
+        {
+            std::string all(p);
+            size_t from = 0;
+            while (from < all.size())
+            {
+                size_t end = all.find(';', from);
+                if (end == std::string::npos) end = all.size();
+                const std::string one = all.substr(from, end - from);
+                const size_t c = one.find(':');
+                if (c != std::string::npos)
+                    s_Texts.push_back(std::make_pair(atoi(one.c_str()), one.substr(c + 1)));
+                from = end + 1;
+            }
+            fprintf(stderr, "[LTKEYS] %d scripted text(s) to type\n", (int)s_Texts.size());
+        }
+    }
+    for (size_t i = 0; i < s_Texts.size(); ++i)
+    {
+        if (s_Texts[i].first != nFrame) continue;
+        const std::string& s = s_Texts[i].second;
+        for (size_t k = 0; k < s.size(); ++k)
+        {
+            LTInputEvent ev;
+            memset(&ev, 0, sizeof(ev));
+            ev.m_Kind = LTInputEvent::kChar;
+            ev.m_Code = (unsigned char)s[k];
+            LTInput_Push(ev);
+        }
+        fprintf(stderr, "[LTKEYS] frame %d: typed \"%s\"\n", nFrame, s.c_str());
+    }
+}
+
 void LTInput_ScriptTick(int nFrame)
 {
     LTInput_KeyHoldTick(nFrame);
+    LTInput_TypeTick(nFrame);
     if (g_nScriptNext >= g_nScriptKeys) return;
     if (nFrame < (g_nScriptNext + 1) * g_nScriptInterval) return;
 
@@ -531,8 +584,12 @@ void LTInput_AddAxisRadians(float fYaw, float fPitch)
 void LTInput_TakeAxisOffsets(float* p3)
 {
     if (!p3) return;
-    p3[0] = g_AxisDX * kAxisGain;
-    p3[1] = g_AxisDY * kAxisGain;
+    // The donor zeroes the axis offsets while the input state is off
+    // (clientmgr.cpp ProcessAllInput): the mouse does not turn the player
+    // while the message line is open. Taken and discarded, not kept for later.
+    const bool bInput = g_bInputState;
+    p3[0] = bInput ? g_AxisDX * kAxisGain : 0.0f;
+    p3[1] = bInput ? g_AxisDY * kAxisGain : 0.0f;
     p3[2] = 0.0f;
     g_AxisDX = g_AxisDY = 0.0f;
 }
@@ -590,6 +647,12 @@ namespace
     int  g_nHoldFrom = 0;
     int  g_nHoldTo   = 0;        // 0 = no limit
     bool g_bHoldOn   = false;
+
+    // What the devices hold, whatever the input state. g_CmdOn is what the
+    // GAME sees: this, and nothing while the input state is off.
+    bool g_CmdHeld[kMaxCommands] = { false };
+
+    void SetSeen(int nCommand, bool bOn);
 }
 
 void LTCommand_Set(int nCommand, bool bOn)
@@ -600,7 +663,36 @@ void LTCommand_Set(int nCommand, bool bOn)
         if (nCommand > g_nCmdRejectedMax) g_nCmdRejectedMax = nCommand;
         return;
     }
+    g_CmdHeld[nCommand] = bOn;
+    SetSeen(nCommand, bOn && g_bInputState);
+}
 
+// ⚠️ ILTClient::SetInputState WAS A STUB, so typing in the message line (Say)
+// also walked, jumped and fired -- every letter is a bound key. The game
+// turns input off while the line is open (InterfaceMgr.cpp COMMAND_ID_MESSAGE)
+// and on again when it closes. The donor then clears every command each frame
+// and zeroes the mouse (clientmgr.cpp ProcessAllInput), and as it re-reads
+// the devices every frame, a key still held when input comes back is on
+// again. Here: off releases what the game sees (OFF edges), on gives back
+// what is still held (ON edges). HANDOVER 5er. LT_NOINPUTSTATE=1 = the old
+// stub (says so).
+void LTCommand_SetInputState(bool bOn)
+{
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_NOINPUTSTATE") != 0);
+        if (b) { printf("[LTCMD] LT_NOINPUTSTATE=1 -- SetInputState ignored, typing reaches the controls (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOld || bOn == g_bInputState) return;
+    g_bInputState = bOn;
+    for (int i = 0; i < kMaxCommands; ++i) SetSeen(i, bOn && g_CmdHeld[i]);
+    if (!bOn) g_AxisDX = g_AxisDY = 0.0f;
+    if (getenv("LT_CMDTRACE")) { printf("[LTCMD] input state %s\n", bOn ? "ON" : "OFF"); fflush(stdout); }
+}
+
+namespace
+{
+void SetSeen(int nCommand, bool bOn)
+{
     // ⚠️ ONLY A CHANGE IS AN EDGE. A key held down arrives as a repeat on
     // every frame it is held; queueing those would fire DoActivate sixty times
     // a second and change weapon continuously while the key is down.
@@ -619,6 +711,7 @@ void LTCommand_Set(int nCommand, bool bOn)
     {
         ++g_nEdgesLost;
     }
+}
 }
 
 int LTCommand_TakeEdges(LTCommandEdge* pOut, int nMax)

@@ -219,7 +219,8 @@ namespace
                        unsigned int nKeyframe, LTModelPose& out,
                        NodeHook pHook, void* pHookUser,
                        const Layer* pLayers, unsigned int nLayers,
-                       unsigned int nKey1, float fFrac);
+                       unsigned int nKey1, float fFrac,
+                       const BlendFrom* pFrom = 0);
 }
 
 bool BuildPose(const CLTABCModel& model, unsigned int nAnim,
@@ -238,13 +239,24 @@ bool BuildPoseBetween(const CLTABCModel& model, unsigned int nAnim,
     return BuildPoseImpl(model, nAnim, nKey0, out, 0, 0, 0, 0, nKey1, fFrac);
 }
 
+bool BuildPoseSpan(const CLTABCModel& model, unsigned int nAnim,
+                   unsigned int nKey0, unsigned int nKey1, float fFrac,
+                   LTModelPose& out, NodeHook pHook, void* pHookUser,
+                   const Layer* pLayers, unsigned int nLayers,
+                   const BlendFrom* pFrom)
+{
+    return BuildPoseImpl(model, nAnim, nKey0, out, pHook, pHookUser,
+                         pLayers, nLayers, nKey1, fFrac, pFrom);
+}
+
 namespace
 {
 bool BuildPoseImpl(const CLTABCModel& model, unsigned int nAnim,
                    unsigned int nKeyframe, LTModelPose& out,
                    NodeHook pHook, void* pHookUser,
                    const Layer* pLayers, unsigned int nLayers,
-                   unsigned int nKey1, float fFrac)
+                   unsigned int nKey1, float fFrac,
+                   const BlendFrom* pFrom)
 {
     const std::vector<LTABCAnim>& anims = model.GetAnims();
     const std::vector<LTABCNode>& nodes = model.GetNodes();
@@ -253,6 +265,12 @@ bool BuildPoseImpl(const CLTABCModel& model, unsigned int nAnim,
     const LTABCAnim& a = anims[nAnim];
     if (a.m_Transforms.size() != nodes.size()) return false;
     if (nKeyframe >= a.m_Keyframes.size()) return false;
+
+    // The cross-fade's source must be an animation of THIS skeleton; anything
+    // else is dropped rather than read past its end.
+    if (pFrom && (pFrom->m_nAnim >= anims.size() || pFrom->m_fWeight >= 1.0f
+                  || anims[pFrom->m_nAnim].m_Transforms.size() != nodes.size()))
+        pFrom = 0;
 
     // ⚠️ MNODE_ROTATIONONLY -- A BONE TAKES ITS LENGTH FROM ITS OWN SKELETON.
     //
@@ -319,6 +337,20 @@ bool BuildPoseImpl(const CLTABCModel& model, unsigned int nAnim,
             for (int k = 0; k < 3; ++k) pos[k] += (t1.m_Pos[k] - pos[k]) * fFrac;
         }
 
+        // ⚠️ THE CROSS-FADE INTO THIS ANIMATION (HANDOVER 5ek) -- the donor's
+        // InitTransform with m_Prev in another animation: slerp FROM the old
+        // animation's key TO this pose by the share of the blend done, before
+        // the extra trackers are laid on (the main tracker is tracker 0).
+        if (pFrom && pFrom->m_nKey < anims[pFrom->m_nAnim].m_Transforms[n].size())
+        {
+            const LTABCTransform& tf = anims[pFrom->m_nAnim].m_Transforms[n][pFrom->m_nKey];
+            const float w = pFrom->m_fWeight < 0.0f ? 0.0f : pFrom->m_fWeight;
+            float q[4];
+            QuatSlerp(q, tf.m_Quat, quat, w);
+            for (int k = 0; k < 4; ++k) quat[k] = q[k];
+            for (int k = 0; k < 3; ++k) pos[k] = tf.m_Pos[k] + (pos[k] - tf.m_Pos[k]) * w;
+        }
+
         // The extra trackers, in the order they were added (see the header).
         for (unsigned int l = 0; l < nLayers; ++l)
         {
@@ -332,29 +364,42 @@ bool BuildPoseImpl(const CLTABCModel& model, unsigned int nAnim,
 
             const float w = wt[n];
             if (w == 0.0f) continue;
+            // The layer between its two keys (5ek), as the main animation.
+            const bool bBetween = L.m_fFrac > 0.0f && L.m_nKey1 != L.m_nKeyframe
+                               && L.m_nKey1 < la.m_Transforms[n].size();
             // An additive layer AT its own frame 0 adds exactly nothing --
             // skipped rather than multiplied by q0^-1 * q0, whose rounding
             // nudged 52 pixels of every character by 1 level (the twitch
             // tracker sits on `base`, one key, for the whole game).
-            if (w == 2.0f && L.m_nKeyframe == 0) continue;
-            const LTABCTransform& now = la.m_Transforms[n][L.m_nKeyframe];
+            if (w == 2.0f && L.m_nKeyframe == 0 && !bBetween) continue;
+            const LTABCTransform& now0 = la.m_Transforms[n][L.m_nKeyframe];
+            float nowQ[4] = { now0.m_Quat[0], now0.m_Quat[1], now0.m_Quat[2], now0.m_Quat[3] };
+            float nowP[3] = { now0.m_Pos[0], now0.m_Pos[1], now0.m_Pos[2] };
+            if (bBetween)
+            {
+                const LTABCTransform& now1 = la.m_Transforms[n][L.m_nKey1];
+                float q[4];
+                QuatSlerp(q, nowQ, now1.m_Quat, L.m_fFrac);
+                for (int k = 0; k < 4; ++k) nowQ[k] = q[k];
+                for (int k = 0; k < 3; ++k) nowP[k] += (now1.m_Pos[k] - nowP[k]) * L.m_fFrac;
+            }
             if (w == 2.0f)
             {
                 // ADDITIVE -- relative to the layer's own frame 0.
                 const LTABCTransform& base = la.m_Transforms[n][0];
                 const float inv0[4] = { -base.m_Quat[0], -base.m_Quat[1], -base.m_Quat[2], base.m_Quat[3] };
                 float d[4], q[4];
-                QuatMul(d, inv0, now.m_Quat);
+                QuatMul(d, inv0, nowQ);
                 QuatMul(q, quat, d);
                 for (int k = 0; k < 4; ++k) quat[k] = q[k];
-                for (int k = 0; k < 3; ++k) pos[k] += now.m_Pos[k] - base.m_Pos[k];
+                for (int k = 0; k < 3; ++k) pos[k] += nowP[k] - base.m_Pos[k];
             }
             else
             {
                 float q[4];
-                QuatSlerp(q, quat, now.m_Quat, w);
+                QuatSlerp(q, quat, nowQ, w);
                 for (int k = 0; k < 4; ++k) quat[k] = q[k];
-                for (int k = 0; k < 3; ++k) pos[k] += (now.m_Pos[k] - pos[k]) * w;
+                for (int k = 0; k < 3; ++k) pos[k] += (nowP[k] - pos[k]) * w;
             }
         }
 
@@ -604,6 +649,29 @@ void KeyframeSpan(const CLTABCModel& model, unsigned int nAnim,
     *pK0 = k0; *pK1 = k1; *pFrac = f;
 }
 
+// See the header (HANDOVER 5ek).
+void PoseKeys(const CLTABCModel& model, unsigned int nAnim,
+              float fSeconds, bool bLooping,
+              unsigned int* pK0, unsigned int* pK1, float* pFrac)
+{
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_NOKEYLERP") != 0);
+        if (b) { printf("[POSE] LT_NOKEYLERP=1 -- characters show the LAST key, no in-between (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOld)
+    {
+        *pK0 = *pK1 = KeyframeAt(model, nAnim, fSeconds, bLooping);
+        *pFrac = 0.0f;
+        return;
+    }
+    KeyframeSpan(model, nAnim, fSeconds, bLooping, pK0, pK1, pFrac);
+}
+
+void SetLayerTime(Layer& L, const CLTABCModel& model, float fSeconds, bool bLooping)
+{
+    PoseKeys(model, L.m_nAnim, fSeconds, bLooping, &L.m_nKeyframe, &L.m_nKey1, &L.m_fFrac);
+}
+
 // See the header -- the position rule, with its own oracle.
 bool SkinPosition(const CLTABCModel& model, const LTABCVertex& vt,
                   const LTModelPose& pose, float* out3)
@@ -701,9 +769,20 @@ LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
                       int nLod, bool bCull, const LTModelPose* pPose,
                       ISink* pSink, bool bMirrorU,
                       const LTModelLighting* pLighting,
-                      int nMirrorModel)
+                      int nMirrorModel,
+                      const LTModelChrome* pChrome)
 {
     const bool bMirror = (nMirrorModel < 0) ? MirrorX() : (nMirrorModel != 0);
+
+    // Chrome in software: the same target with the chrome map on (5en).
+    LT3DTarget tChrome;
+    const LT3DTarget* pTarget = &target;
+    if (pChrome && pChrome->m_pEnv && !pSink)
+    {
+        tChrome = target;
+        tChrome.m_pChrome = pChrome->m_pEnv;
+        pTarget = &tChrome;
+    }
 
     LTModelDrawStats st;
     st.m_nTriangles = st.m_nPixels = st.m_nCulled = 0;
@@ -754,7 +833,7 @@ LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
             const bool b = getenv("LT_SKINPERCORNER") != 0;
             if (b) { printf("[MODEL] LT_SKINPERCORNER=1 -- every face corner skinned and lit on its own\n"); fflush(stdout); }
             return b; }();
-        struct VCache { float m_Clip[4]; float m_Pos[3]; float m_RGB[3]; };
+        struct VCache { float m_Clip[4]; float m_Pos[3]; float m_RGB[3]; float m_UV2[2]; };
         thread_local std::vector<VCache>       s_V;
         thread_local std::vector<unsigned int> s_Stamp;
         thread_local unsigned int              s_Gen = 0;
@@ -887,6 +966,17 @@ LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
 
                 vc.m_RGB[0] = vc.m_RGB[1] = vc.m_RGB[2] = l;
             }
+
+            // The chrome coordinates from the same world normal (5en).
+            vc.m_UV2[0] = vc.m_UV2[1] = 0.0f;
+            if (pChrome)
+            {
+                float nn[3] = { n[0], n[1], n[2] };
+                const float nl = sqrtf(nn[0]*nn[0] + nn[1]*nn[1] + nn[2]*nn[2]);
+                if (nl > 1e-6f) { nn[0] /= nl; nn[1] /= nl; nn[2] /= nl; }
+                vc.m_UV2[0] = pChrome->m_PanU + pChrome->m_Scale * Dot3(nn, pChrome->m_Right);
+                vc.m_UV2[1] = pChrome->m_PanV + pChrome->m_Scale * Dot3(nn, pChrome->m_Up);
+            }
         };
 
         for (size_t f = 0; f < lod.m_Faces.size(); ++f)
@@ -912,6 +1002,7 @@ LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
                 for (int k = 0; k < 4; ++k) tri[i].m_Clip[k] = pVC->m_Clip[k];
                 for (int k = 0; k < 3; ++k) mpos[i][k] = pVC->m_Pos[k];
                 tri[i].m_R = pVC->m_RGB[0]; tri[i].m_G = pVC->m_RGB[1]; tri[i].m_B = pVC->m_RGB[2];
+                tri[i].m_U2 = pVC->m_UV2[0]; tri[i].m_V2 = pVC->m_UV2[1];
 
                 // ⚠️ UVs come from the FACE, not the vertex. ABC stores them
                 // per face-corner, so one vertex can carry different texture
@@ -951,7 +1042,7 @@ LTModelDrawStats Draw(const LT3DTarget& target, const CLTABCModel& model,
                 LT3D::g_nProbeID = (unsigned)(((p & 0xFFFu) << 20)
                                             | ((f + 1) & 0xFFFFFu));
 
-            int n = LT3D::DrawTriangle(target, pTex, tri[0], tri[1], tri[2], bCull);
+            int n = LT3D::DrawTriangle(*pTarget, pTex, tri[0], tri[1], tri[2], bCull);
             st.m_nPixels += n;
             if (n == 0) ++st.m_nCulled;
 

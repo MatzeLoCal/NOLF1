@@ -80,6 +80,13 @@ public:
     // sprite declaring 0 fps is a still, not a crash.
     unsigned int        FrameAt(float fSeconds) const;
 
+    // ⚠️ THE DONOR'S INTEGER RULE (sprite.cpp spr_UpdateTracker), for a time in
+    // ms since the sprite started: (ms / (1000 / fps)) mod frames, the loop
+    // (1000 / fps) x frames ms long. 15 fps is 66 ms a frame there, not 66.7,
+    // which FrameAt's float rule drifts from by a frame every few seconds.
+    // Every sprite clock the renderer keeps uses this one (5em).
+    unsigned int        FrameAtMs(double fMs) const;
+
 private:
 
     bool                Fail(const char* pWhy);

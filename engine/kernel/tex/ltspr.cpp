@@ -145,3 +145,13 @@ unsigned int CLTSprite::FrameAt(float fSeconds) const
     const unsigned int n = (unsigned int)(fSeconds * (float)m_nFPS);
     return n % (unsigned int)m_Frames.size();
 }
+
+unsigned int CLTSprite::FrameAtMs(double fMs) const
+{
+    if (m_Frames.empty() || m_nFPS == 0 || m_nFPS > 1000) return 0;
+    const unsigned int nPer = 1000u / m_nFPS;
+    const unsigned long long nLen = (unsigned long long)nPer * m_Frames.size();
+    if (!(fMs > 0.0)) return 0;
+    const unsigned long long ms = (unsigned long long)fMs % nLen;
+    return (unsigned int)(ms / nPer) % (unsigned int)m_Frames.size();
+}
