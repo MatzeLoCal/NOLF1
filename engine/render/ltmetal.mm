@@ -12,6 +12,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 
 #include "ltmetal.h"
+#include "lt3d.h"
 #include "ltwindow.h"
 #include "ltcomp.h"
 
@@ -86,7 +87,43 @@ struct VOut {
     // The clip position, interpolated, for a MIRROR (HANDOVER 5de): its
     // reflection is sampled where the pixel is on screen, xy/w.
     float4 clipPos;
+
+    // ⚠️ THE DYNAMIC LIGHTS' VIEW OF THE PIXEL (HANDOVER 5ey): the vertex
+    // position in the draw's own space -- the space the world pass puts the
+    // lights in -- and 1 for a FULLBRIGHT polygon, which takes none (its
+    // colour arrives NEGATED, ToMetalVert, so the vertex layout is unchanged).
+    float3 opos;
+    float  noLight [[flat]];
 };
+
+// d3d.ren's per-texel rule (lt3d.h, LT3DDynLights), per pixel:
+//     light = vertex + scale x min(1, SUM col_i x min(1, sat x max(0, 1 - d^2 invR2_i)))
+// pos.w = 1/R^2, col.w = 1 for FLAG_DONTLIGHTBACKFACING (lit only from the
+// side of the surface the eye sees). MUST MATCH LTMetalDynL in C++.
+struct DynL {
+    int    n;
+    float  sat;
+    float  scale;
+    int    pad;
+    float4 eye;
+    float4 pos[32];
+    float4 col[32];
+};
+
+static float3 DynLightAt(constant DynL& L, float3 p, float3 nrm)
+{
+    float3 acc = float3(0.0);
+    const float fEye = dot(nrm, L.eye.xyz - p);
+    for (int i = 0; i < L.n; ++i)
+    {
+        const float3 d = p - L.pos[i].xyz;
+        float x = 1.0 - dot(d, d) * L.pos[i].w;
+        if (x <= 0.0) continue;
+        if (L.col[i].w != 0.0 && dot(nrm, L.pos[i].xyz - p) * fEye < 0.0) continue;
+        acc += L.col[i].rgb * min(1.0, x * L.sat);
+    }
+    return L.scale * min(acc, float3(1.0));
+}
 
 struct Uniforms {
     float4x4 mvp;
@@ -141,19 +178,25 @@ vertex VOut vs_world(VIn vin [[stage_in]],
     VOut o;
     o.pos = u.mvp * float4(vin.pos, 1.0);
     o.uv  = vin.uv;
-    o.rgb = vin.rgb;
-    o.rgbPersp = vin.rgb;
+    o.rgb = abs(vin.rgb);
+    o.rgbPersp = abs(vin.rgb);
     o.fogZ = o.pos.w;
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
     o.clipPos = o.pos;
+    o.opos = vin.pos;
+    o.noLight = (vin.rgb.r < 0.0 || vin.rgb.g < 0.0 || vin.rgb.b < 0.0) ? 1.0 : 0.0;
     return o;
 }
 
 fragment float4 fs_world(VOut in [[stage_in]],
                          constant Uniforms& u [[buffer(1)]],
+                         constant DynL& dl [[buffer(3)]],
                          texture2d<float> tex [[texture(0)]],
                          sampler smp [[sampler(0)]])
 {
+    // The surface's normal for the back-facing test, here in uniform
+    // control flow (derivatives), before any fragment can be discarded.
+    const float3 nrm = cross(dfdx(in.opos), dfdy(in.opos));
     // ⚠️ A MIRROR (HANDOVER 5de): the reflected scene, rendered by its own
     // pass from the mirrored camera into a target the size of this view, at
     // THIS pixel. Already lit and fogged there, so neither is applied again.
@@ -199,6 +242,7 @@ fragment float4 fs_world(VOut in [[stage_in]],
     // is kept because it is still what LT_AFFINECOLOUR asks for, and because
     // the two must be comparable from one binary; see lt3d.cpp.
     float3 vc = (u.affineColour != 0) ? in.rgb : in.rgbPersp;
+    if (dl.n > 0 && in.noLight == 0.0) vc += DynLightAt(dl, in.opos, nrm);
     float3 c = t.rgb * vc;
     // ⚠️ LINEAR DEPTH FOG, the software rasteriser's rule (lt3d.cpp): before
     // the blend, toward the colour the C++ side chose for this blend mode.
@@ -235,6 +279,8 @@ struct VOutEnv {
     float2 fogXY;
     float3 rgb [[center_no_perspective]];
     float3 rgbPersp;
+    float3 opos;                    // the dynamic lights (5ey), as VOut
+    float  noLight [[flat]];
 };
 
 vertex VOutEnv vs_env(VInEnv vin [[stage_in]],
@@ -244,26 +290,31 @@ vertex VOutEnv vs_env(VInEnv vin [[stage_in]],
     o.pos = u.mvp * float4(vin.pos, 1.0);
     o.uv  = vin.uv;
     o.uv2 = vin.uv2;
-    o.rgb = vin.rgb;
-    o.rgbPersp = vin.rgb;
+    o.rgb = abs(vin.rgb);
+    o.rgbPersp = abs(vin.rgb);
     o.fogZ = o.pos.w;
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
+    o.opos = vin.pos;
+    o.noLight = (vin.rgb.r < 0.0 || vin.rgb.g < 0.0 || vin.rgb.b < 0.0) ? 1.0 : 0.0;
     return o;
 }
 
 fragment float4 fs_env(VOutEnv in [[stage_in]],
                        constant Uniforms& u [[buffer(1)]],
                        constant int& baseAlpha [[buffer(2)]],    // bit 0: base alpha counts; bit 1: chrome (5en)
+                       constant DynL& dl [[buffer(3)]],
                        texture2d<float> tex [[texture(0)]],
                        texture2d<float> env [[texture(1)]],
                        sampler smp [[sampler(0)]])
 {
+    const float3 nrm = cross(dfdx(in.opos), dfdy(in.opos));
     float4 t = tex.sample(smp, in.uv);
     if (u.alphaTest != 0 && t.a < u.alphaRef) discard_fragment();
     const float a = ((baseAlpha & 1) != 0) ? t.a : 1.0;
     const float3 e = env.sample(smp, in.uv2).rgb;
     const float3 b = ((baseAlpha & 2) != 0) ? mix(e, t.rgb, a) : min(t.rgb + a * e, float3(1.0));
     float3 vc = (u.affineColour != 0) ? in.rgb : in.rgbPersp;
+    if (dl.n > 0 && in.noLight == 0.0) vc += DynLightAt(dl, in.opos, nrm);
     float3 c = b * vc;
     if (u.fogOn != 0 && u.fogFar != u.fogNear)
     {
@@ -377,6 +428,8 @@ vertex VOut vs_skin(uint vid [[vertex_id]],
     o.fogZ = o.pos.w;
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
     o.clipPos = o.pos;
+    o.opos = p;
+    o.noLight = 1.0;                // models take their lights per vertex (5ey)
     return o;
 }
 )METAL";
@@ -1226,6 +1279,56 @@ struct SkinEncode
     const void*   m_pU;     size_t m_nUBytes;
 };
 
+// ⚠️ THE DYNAMIC LIGHTS (HANDOVER 5ey) -- MUST MATCH `DynL` IN THE SHADER.
+// Bound at fragment index 3 for every draw, ALWAYS AT ITS FULL SIZE: the
+// shader's argument is the whole struct, and Metal's API validation (on in
+// an Xcode debug run) stops the process on a shorter binding even when n is
+// 0 and nothing past the header is read -- the first version bound only the
+// 32-byte header then, and the game died on its first world draw. Sent again
+// only when the set or the encoder changes; a binding lasts for its encoder.
+namespace
+{
+    struct LTMetalDynL
+    {
+        int   n; float sat; float scale; int pad;
+        float eye[4];
+        float pos[32][4];
+        float col[32][4];
+    };
+    static_assert(sizeof(LTMetalDynL) == 32 + 32 * 16 * 2, "LTMetalDynL must match the MSL DynL");
+    LTMetalDynL g_DynL = { 0, 1.0f, 2.0f, 0, { 0, 0, 0, 0 }, {}, {} };
+    unsigned int g_nDynLSerial = 1, g_nDynLBound = 0;
+    id<MTLRenderCommandEncoder> g_DynLEnc = nil;    // held, so a new encoder never shares its address
+
+    void BindDynLights()
+    {
+        if (g_DynLEnc == g_Enc && g_nDynLBound == g_nDynLSerial) return;
+        [g_Enc setFragmentBytes:&g_DynL length:sizeof(g_DynL) atIndex:3];
+        g_DynLEnc = g_Enc;
+        g_nDynLBound = g_nDynLSerial;
+    }
+}
+
+void LTMetal_SetDynLights(const LT3DDynLights* p)
+{
+    if (!p || p->m_n <= 0)
+    {
+        if (g_DynL.n != 0) { g_DynL.n = 0; ++g_nDynLSerial; }
+        return;
+    }
+    ++g_nDynLSerial;
+    const int n = p->m_n < 32 ? p->m_n : 32;
+    g_DynL.n = n; g_DynL.sat = p->m_fSat; g_DynL.scale = p->m_fScale; g_DynL.pad = 0;
+    for (int k = 0; k < 3; ++k) g_DynL.eye[k] = p->m_Eye[k];
+    g_DynL.eye[3] = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        for (int k = 0; k < 3; ++k) { g_DynL.pos[i][k] = p->m_Pos[i][k]; g_DynL.col[i][k] = p->m_Col[i][k]; }
+        g_DynL.pos[i][3] = p->m_InvR2[i];
+        g_DynL.col[i][3] = p->m_bBackCull[i] ? 1.0f : 0.0f;
+    }
+}
+
 static void EncodeTris(const float* pMVP, unsigned int nTexture,
                        id<MTLBuffer> vb, size_t nOffset, int nVerts,
                        bool bAlphaTest, float fAlphaRef, bool bBlend,
@@ -1339,6 +1442,7 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
         [g_Enc setVertexBuffer:vb offset:nOffset atIndex:0];
     [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+    BindDynLights();
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
     if (ib)
         [g_Enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)nVerts
@@ -1455,6 +1559,7 @@ void LTMetal_DrawEnvTris(const float* pMVP, unsigned int nTexture, unsigned int 
     [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&nBaseAlpha length:sizeof(nBaseAlpha) atIndex:2];
+    BindDynLights();
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
     [g_Enc setFragmentTexture:g_Textures[nEnvTexture] atIndex:1];
     [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];

@@ -9,6 +9,7 @@
 
 #include "lt3d.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdio.h>
@@ -66,6 +67,7 @@ namespace
         v.m_B = Lerp(a.m_B, b.m_B, t);
         v.m_U2 = Lerp(a.m_U2, b.m_U2, t);
         v.m_V2 = Lerp(a.m_V2, b.m_V2, t);
+        for (int i = 0; i < 3; ++i) v.m_P[i] = Lerp(a.m_P[i], b.m_P[i], t);
         return v;
     }
 
@@ -79,6 +81,8 @@ namespace
         float rOverW, gOverW, bOverW;
         float r, g, b;              // the raw colour, for affine shading
         float u2OverW, v2OverW;     // the env map's coordinates (5el)
+        float pOverW[3];            // the position the dynamic lights see (5ey)
+        bool  bNoLight;             // at kLT3DNoLightPos: no dynamic light
     };
 
     Screen ToScreen(const LT3DVert& v, int w, int h)
@@ -96,7 +100,75 @@ namespace
         s.r = v.m_R; s.g = v.m_G; s.b = v.m_B;
         s.u2OverW = v.m_U2 * invW;
         s.v2OverW = v.m_V2 * invW;
+        s.bNoLight = !(v.m_P[0] < 0.5f * kLT3DNoLightPos);
+        for (int i = 0; i < 3; ++i) s.pOverW[i] = s.bNoLight ? 0.0f : v.m_P[i] * invW;
         return s;
+    }
+
+    // ⚠️ THE DYNAMIC LIGHTS THIS TRIANGLE TAKES (5ey): the ones whose sphere
+    // reaches its box, and -- for FLAG_DONTLIGHTBACKFACING -- that sit on the
+    // side of its plane the eye sees, which is the side the original tests
+    // against the polygon's plane. Same-side with the EYE because a visible
+    // triangle is seen from its front: the rule needs no stored normal.
+    struct TriLights
+    {
+        int n;
+        int idx[LT3DDynLights::kMax];
+    };
+
+    void SelectTriLights(const LT3DDynLights& L, const Screen& a, const Screen& b,
+                         const Screen& c, TriLights& out)
+    {
+        out.n = 0;
+        if (a.bNoLight || b.bNoLight || c.bNoLight) return;
+        float P[3][3];
+        const Screen* s[3] = { &a, &b, &c };
+        for (int i = 0; i < 3; ++i)
+            for (int k = 0; k < 3; ++k) P[i][k] = s[i]->pOverW[k] / s[i]->invW;
+        float mn[3], mx[3];
+        for (int k = 0; k < 3; ++k)
+        {
+            mn[k] = std::min(P[0][k], std::min(P[1][k], P[2][k]));
+            mx[k] = std::max(P[0][k], std::max(P[1][k], P[2][k]));
+        }
+        const float e1[3] = { P[1][0]-P[0][0], P[1][1]-P[0][1], P[1][2]-P[0][2] };
+        const float e2[3] = { P[2][0]-P[0][0], P[2][1]-P[0][1], P[2][2]-P[0][2] };
+        const float nrm[3] = { e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0] };
+        const float fEye = nrm[0]*(L.m_Eye[0]-P[0][0]) + nrm[1]*(L.m_Eye[1]-P[0][1]) + nrm[2]*(L.m_Eye[2]-P[0][2]);
+        for (int i = 0; i < L.m_n && i < LT3DDynLights::kMax; ++i)
+        {
+            const float* q = L.m_Pos[i];
+            float d2 = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float d = (q[k] < mn[k]) ? (mn[k] - q[k]) : ((q[k] > mx[k]) ? (q[k] - mx[k]) : 0.0f);
+                d2 += d * d;
+            }
+            if (d2 * L.m_InvR2[i] >= 1.0f) continue;
+            if (L.m_bBackCull[i])
+            {
+                const float fL = nrm[0]*(q[0]-P[0][0]) + nrm[1]*(q[1]-P[0][1]) + nrm[2]*(q[2]-P[0][2]);
+                if (fL * fEye < 0.0f) continue;
+            }
+            out.idx[out.n++] = i;
+        }
+    }
+
+    // d3d.ren's per-texel sum, at one point (lt3d.h, LT3DDynLights).
+    inline void DynLightAt(const LT3DDynLights& L, const TriLights& T, const float* p, float* rgb)
+    {
+        float acc[3] = { 0.0f, 0.0f, 0.0f };
+        for (int j = 0; j < T.n; ++j)
+        {
+            const int i = T.idx[j];
+            const float dx = p[0] - L.m_Pos[i][0], dy = p[1] - L.m_Pos[i][1], dz = p[2] - L.m_Pos[i][2];
+            float x = 1.0f - (dx*dx + dy*dy + dz*dz) * L.m_InvR2[i];
+            if (x <= 0.0f) continue;
+            x *= L.m_fSat;
+            if (x > 1.0f) x = 1.0f;
+            for (int k = 0; k < 3; ++k) acc[k] += L.m_Col[i][k] * x;
+        }
+        for (int k = 0; k < 3; ++k) rgb[k] = L.m_fScale * (acc[k] > 1.0f ? 1.0f : acc[k]);
     }
 
     // One texture sample from one mip level, into a 0..1 RGBA quadruple.
@@ -208,6 +280,14 @@ namespace
         }
 
         float fInvArea = 1.0f / fArea;
+
+        TriLights tl; tl.n = 0;
+        if (t.m_pDynLights && t.m_pDynLights->m_n > 0)
+        {
+            SelectTriLights(*t.m_pDynLights, a, b, c, tl);
+            ++LT3D::g_nDynTriTests;
+            if (tl.n > 0) ++LT3D::g_nDynTriLit;
+        }
 
         // Bounding box, clamped to the target and to the pixel centres that
         // can actually be covered.
@@ -367,6 +447,15 @@ namespace
                     r = (l0 * p0->rOverW + l1 * p1->rOverW + l2 * p2->rOverW) * w;
                     g = (l0 * p0->gOverW + l1 * p1->gOverW + l2 * p2->gOverW) * w;
                     b = (l0 * p0->bOverW + l1 * p1->bOverW + l2 * p2->bOverW) * w;
+                }
+
+                if (tl.n > 0)
+                {
+                    float P[3], dl[3];
+                    for (int k = 0; k < 3; ++k)
+                        P[k] = (l0 * p0->pOverW[k] + l1 * p1->pOverW[k] + l2 * p2->pOverW[k]) * w;
+                    DynLightAt(*t.m_pDynLights, tl, P, dl);
+                    r += dl[0]; g += dl[1]; b += dl[2];
                 }
 
                 float sr = r, sg = g, sb = b;
@@ -722,6 +811,7 @@ namespace LT3D
 // is what actually switches it off.
 unsigned g_nProbeID = 0;
 bool     g_bProbeHold = false;
+unsigned g_nDynTriTests = 0, g_nDynTriLit = 0;
 
 void Identity(float* m)
 {

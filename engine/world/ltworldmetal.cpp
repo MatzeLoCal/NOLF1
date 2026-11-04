@@ -115,6 +115,12 @@ namespace
         o.m_Pos[0] = pW[0]; o.m_Pos[1] = pW[1]; o.m_Pos[2] = pW[2];
         o.m_UV[0]  = v.m_U; o.m_UV[1] = v.m_V;
         o.m_RGB[0] = v.m_R; o.m_RGB[1] = v.m_G; o.m_RGB[2] = v.m_B;
+        // ⚠️ NO DYNAMIC LIGHT HERE (5ey) -- a fullbright polygon, or anything
+        // but a world polygon -- goes out NEGATED; vs_world takes abs() and
+        // flags the pixel. The vertex keeps its layout. The light reads the
+        // vertex's own position (pW), so only the flag has to travel.
+        if (!(v.m_P[0] < 0.5f * kLT3DNoLightPos))
+            for (int k = 0; k < 3; ++k) o.m_RGB[k] = -(o.m_RGB[k] > 1.0e-6f ? o.m_RGB[k] : 1.0e-6f);
     }
 
     // ⚠️ RECORDS ONE WORLD MODEL'S TRIANGLES, per texture, in the order the
@@ -779,6 +785,12 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     LT3D::Multiply(MVP, Bias, MVPBias);
 
     // ---- pass 2: the world --------------------------------------------- //
+    // ⚠️ THE DYNAMIC LIGHTS (5ey) for this pass only: world space for the
+    // static world, each moving brush's own space while it draws, none after.
+    GatherDynLights(pDyn, pEye3);
+    LT3DDynLights dlWorld, dlModel;
+    const bool bDynWorld = DynLightsIn(0, pEye3, dlWorld);
+    LTMetal_SetDynLights(bDynWorld ? &dlWorld : 0);
     if (s_bStatic && m_Static.m_bValid)
     {
         // ⚠️ THE BATCHER'S ORDER, REPLAYED, which is what keeps this pixel-
@@ -877,8 +889,10 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                 flushPending();
                 pt.Moved(1);
                 LT3D::Multiply(pVP, Local, ModelMVP);
+                LTMetal_SetDynLights(DynLightsIn(Local, pEye3, dlModel) ? &dlModel : 0);
                 for (size_t r = 0; r < sm.m_Runs.size(); ++r)
                     drawRun(ModelMVP, sm.m_Runs[r].m_pTex, sm.m_Runs[r].m_nFirst, sm.m_Runs[r].m_nCount, false);
+                LTMetal_SetDynLights(bDynWorld ? &dlWorld : 0);
             }
             else if (!bMain)
             {
@@ -922,16 +936,20 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             const float* pM = LTIsMainWorldBSP(M) ? MVP : MVPBias;
             float Local[16], ModelMVP[16];
             for (int k = 0; k < 3; ++k) m_EnvEye[k] = pEye3[k];
+            bool bMoved = false;
             if (pXform && pXform->GetModelTransform(M.m_sName, Local))
             {
                 if (!ModelVisibleNow(M)) continue;
                 EyeInModel(pEye3, Local, m_EnvEye);
                 LT3D::Multiply(pM, Local, ModelMVP);
                 pM = ModelMVP;
+                bMoved = true;
+                LTMetal_SetDynLights(DynLightsIn(Local, pEye3, dlModel) ? &dlModel : 0);
             }
             batch.SetMVP(pM);
             DrawModel(dummy, pM, M, tex, st, &sm.m_EnvPolys, &batch, kPassOpaque);
             batch.Flush(m_MetalTex);
+            if (bMoved) LTMetal_SetDynLights(bDynWorld ? &dlWorld : 0);
         }
         batch.SetEnv(false);
         m_bEnvActive = false;
@@ -969,8 +987,10 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             batch.Flush(m_MetalTex);
             LT3D::Multiply(pVP, Local, ModelMVP);
             batch.SetMVP(ModelMVP);
+            LTMetal_SetDynLights(DynLightsIn(Local, pEye3, dlModel) ? &dlModel : 0);
             DrawModel(dummy, ModelMVP, M, tex, st, 0, &batch);
             batch.Flush(m_MetalTex);
+            LTMetal_SetDynLights(bDynWorld ? &dlWorld : 0);
             batch.SetMVP(MVP);
         }
         else
@@ -997,6 +1017,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     batch.SetEnv(false);
     m_bEnvActive = false;
     }   // LT_WORLDSTATIC=0
+    LTMetal_SetDynLights(0);        // pass 2 only (5ey)
 
     // ...and the reflections of mirrors on a model pass 2 skipped (5de) --
     // the software pass's rule (ltworldrender.cpp).

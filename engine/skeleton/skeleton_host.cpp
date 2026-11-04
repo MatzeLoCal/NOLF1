@@ -3177,6 +3177,19 @@ int main(int argc, char** argv)
                     CLTWorldScene::SetModelAdd(rgb);
                 printf("ModelAdd: %s\n", pStr ? pStr : "(unreadable)");
             }
+            // ⚠️ `LightSaturate` and `Saturate` -- the dynamic lights' scale
+            // and the MODULATE2X their lightmap is drawn with (HANDOVER 5ey).
+            // d3d.ren registers them 1.0 and 0; the shipped config says 0.5
+            // and 1, which together give a light its own colour at its centre.
+            {
+                float fSat = 1.0f; bool bSaturate = false;
+                if (LTConsoleVar* pV = LTGetConsole()->Find("LightSaturate"))
+                    if (const char* pStr = LTGetConsole()->GetString(pV)) fSat = (float)atof(pStr);
+                if (LTConsoleVar* pV = LTGetConsole()->Find("Saturate"))
+                    if (const char* pStr = LTGetConsole()->GetString(pV)) bSaturate = atof(pStr) != 0.0;
+                CLTWorldScene::SetDynLightConsts(fSat, bSaturate);
+                printf("dynamic lights: LightSaturate %.2f, Saturate %d\n", fSat, bSaturate ? 1 : 0);
+            }
         }
 
         // ClientRes, once the trees exist -- it is read THROUGH them, so the

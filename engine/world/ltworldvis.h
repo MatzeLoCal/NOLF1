@@ -56,6 +56,14 @@ public:
     // The leaf a point is in, or -1 outside the level.
     int                 LeafAt(const float* pPos3) const;
 
+    // ⚠️ THE SERVER'S VIEW LEAF (HANDOVER 5ex) -- lithtech.exe 0x45aea0, the
+    // query that wakes objects: the LAST node on the way down that owns a
+    // leaf, whichever side the walk leaves by (front is d >= -0.0001). So a
+    // viewpoint inside a wall or out past the roofs still has a leaf; -1 only
+    // when no node on the path owns one. LeafAt's "outside" read as "sees
+    // everything" and woke every AI in the level.
+    int                 LeafOnPath(const float* pPos3) const;
+
     // Fixes the viewpoint for BoxVisible. -1 (outside every leaf) and a leaf
     // with no list both mean EVERYTHING is visible -- the shipped engine's
     // own fallback. Decoded once per leaf and portal state, then cached.

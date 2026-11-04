@@ -1325,6 +1325,21 @@ static bool ActTrace()
     return b;
 }
 
+// ⚠️ THE VIEW LEAF IS THE SHIPPED QUERY'S (5ex): the last leaf on the way
+// down the VisBSP (lithtech.exe 0x45aea0), not "the leaf the point is
+// inside". The inside test found none for a view in a wall, over a roof or
+// on a mpclip flight, and none means EVERYTHING is seen -- every AI in the
+// level woke and heard the fight at the hotel gate. LT_OLDVIEWLEAF=1 = the
+// inside test (says so).
+static int ViewLeaf(const CLTWorldVis* pVis, const float* pView3)
+{
+    static const bool s_bOld = []() {
+        const bool b = (getenv("LT_OLDVIEWLEAF") != 0);
+        if (b) { printf("[ACT] LT_OLDVIEWLEAF=1 -- a view outside every leaf sees (and wakes) everything\n"); fflush(stdout); }
+        return b; }();
+    return s_bOld ? pVis->LeafAt(pView3) : pVis->LeafOnPath(pView3);
+}
+
 void CLTServerObjects::SetActivity(Record* p, unsigned char nInactive, const char* pWhy)
 {
     if (!p || !p->m_pGame || p->m_bDead) return;
@@ -1399,8 +1414,11 @@ static void BoxOf(const CLTServerObjects::Record* p, float* mn, float* mx)
     }
 }
 
-void CLTServerObjects::ActivationPass(const float* pView3, bool bAutoActivate, float fFrameTime)
+void CLTServerObjects::ActivationPass(const float* pView3, bool bAutoActivate, float fFrameTime,
+                                      bool bPlayerView)
 {
+    if (!pView3) m_nLastViewLeaf = -1;     // a new level, no view in it yet
+
     // LT_ACTTRACE=1 also lists the AIs (AI_* classes) every 300 frames:
     // asleep or awake, and where -- "who came running" is a position change.
     if (ActTrace() && pView3)
@@ -1418,9 +1436,9 @@ void CLTServerObjects::ActivationPass(const float* pView3, bool bAutoActivate, f
                 printf("[ACTPOS] f%u %-14s %-6s (%.0f %.0f %.0f)\n", nFrame, p->m_sName.c_str(),
                        p->m_nInactive ? "asleep" : "awake", p->m_Pos[0], p->m_Pos[1], p->m_Pos[2]);
             }
-            printf("[ACTSUM] f%u view (%.0f %.0f %.0f) leaf %d sees %u leaves; AIs awake %u asleep %u\n",
-                   nFrame, pView3[0], pView3[1], pView3[2], LTGetWorldVis()->LeafAt(pView3),
-                   LTGetWorldVis()->VisibleLeafCount(), nAwake, nAsleep);
+            printf("[ACTSUM] f%u view (%.0f %.0f %.0f) leaf %d (inside-test %d) sees %u leaves; AIs awake %u asleep %u\n",
+                   nFrame, pView3[0], pView3[1], pView3[2], ViewLeaf(LTGetWorldVis(), pView3),
+                   LTGetWorldVis()->LeafAt(pView3), LTGetWorldVis()->VisibleLeafCount(), nAwake, nAsleep);
             fflush(stdout);
         }
     }
@@ -1428,9 +1446,39 @@ void CLTServerObjects::ActivationPass(const float* pView3, bool bAutoActivate, f
     if (!pView3 || !AutoDeactivateOn()) return;
 
     CLTWorldVis* pVis = LTGetWorldVis();
-    if (bAutoActivate)
+
+    // ⚠️ THE PLAYER OUTSIDE THE LEVEL KEEPS THE LEAF IT LEFT (5ex, DEVIATIONS
+    // E-015). Over the roofs no node owns a leaf, and no leaf is the shipped
+    // fallback "everything is seen": one mpclip flight woke all 66 AIs of
+    // M01S02 and the hotel heard the fight at the gate. Only mpclip (the
+    // port's own cheat, E-014) takes the player there -- and the fall back
+    // down after switching it off, which is why this asks whose view it is
+    // rather than whether mpclip is on. A cinematic camera out in the void
+    // keeps the shipped rule. LT_MPCLIPWAKES=1 = the shipped rule for the
+    // player too (says so).
+    int nViewLeaf = ViewLeaf(pVis, pView3);
+    bool bHeld = false;
+    if (nViewLeaf >= 0) m_nLastViewLeaf = nViewLeaf;
+    else if (bPlayerView)
     {
-        pVis->SetViewLeaf(pVis->LeafAt(pView3));
+        static const bool s_bWakes = []() {
+            const bool b = (getenv("LT_MPCLIPWAKES") != 0);
+            if (b) { printf("[ACT] LT_MPCLIPWAKES=1 -- the player outside the level (mpclip) wakes every AI (shipped rule)\n"); fflush(stdout); }
+            return b; }();
+        if (!s_bWakes) { nViewLeaf = m_nLastViewLeaf; bHeld = true; }
+    }
+    static bool s_bWasHeld = false;
+    if (ActTrace() && bHeld != s_bWasHeld)
+    {
+        printf("[ACT] player's view %s the level -- %s\n", bHeld ? "left" : "back in",
+               bHeld ? (nViewLeaf >= 0 ? "holding its last leaf" : "no leaf yet, nothing wakes") : "own leaf again");
+        fflush(stdout);
+    }
+    s_bWasHeld = bHeld;
+
+    if (bAutoActivate && !(bHeld && nViewLeaf < 0))
+    {
+        pVis->SetViewLeaf(nViewLeaf);
         for (size_t i = 0; i < m_Objects.size(); ++i)
         {
             Record* p = m_Objects[i];
@@ -1460,7 +1508,7 @@ void CLTServerObjects::PingFrom(const Record* pFrom, float fFrameTime)
 {
     if (!pFrom || !AutoDeactivateOn()) return;
     CLTWorldVis* pVis = LTGetWorldVis();
-    pVis->SetViewLeaf(pVis->LeafAt(pFrom->m_Pos));
+    pVis->SetViewLeaf(ViewLeaf(pVis, pFrom->m_Pos));
     for (size_t i = 0; i < m_Objects.size(); ++i)
     {
         Record* p = m_Objects[i];

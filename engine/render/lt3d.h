@@ -241,6 +241,10 @@ struct LT3DTarget
     // (as for world env maps); otherwise it reads 1 and no chrome shows.
     const struct LT3DTexture* m_pChrome;
 
+    // ⚠️ THE DYNAMIC LIGHTS ON THIS DRAW (HANDOVER 5ey) -- set by the world
+    // pass alone, in the space of the vertices' m_P; null everywhere else.
+    const struct LT3DDynLights* m_pDynLights;
+
     // ⚠️ A CONSTRUCTOR, for the reason LT3DTexture has one: every existing
     // caller assigns the four fields above and nothing else, and an
     // uninitialised flag here would change how the game's own frames shade.
@@ -250,9 +254,43 @@ struct LT3DTarget
           m_bTrilinear(false), m_pProbeID(0), m_pProbeTex(0), m_pProbeUV(0),
           m_pProbeMip(0), m_bFog(false), m_fFogNear(0.0f), m_fFogFar(1.0f),
           m_fFogKX(0.0f), m_fFogKY(0.0f), m_fFarW(0.0f), m_bEnvMap(false),
-          m_pChrome(0)
+          m_pChrome(0), m_pDynLights(0)
     { m_FogRGB[0] = m_FogRGB[1] = m_FogRGB[2] = 0.0f; }
 };
+
+// ⚠️ DYNAMIC LIGHTS ON THE WORLD (HANDOVER 5ey) -- d3d.ren's rule, read out
+// of GOTY's renderer (no source of it survives). Each frame every visible
+// OT_LIGHT is linked to the visible polygons within its reach (0x10040cc0 ->
+// 0x10040938; FLAG_ONLYLIGHTOBJECTS keeps it off the world, and
+// FLAG_DONTLIGHTBACKFACING off a polygon whose plane faces away from it), and
+// the polygon's light is built into a lightmap texel by texel (0x1006afa0):
+//
+//     texel += colour x T[ (1 - d^2/R^2) x 63 ],   T[i] = min(1, S x i/63)
+//
+// S the console's LightSaturate (NOLF's autoexec: 0.5), the sum saturating at
+// 255, the lightmap then drawn MODULATE2X (Saturate 1). No angle term: a
+// light 1 unit from a wall lights it as much as one facing it. So per pixel:
+//
+//     light = vertex light + m_fScale x min(1, SUM colour_i x min(1, S x x_i))
+//
+// with x_i = max(0, 1 - d_i^2 / R_i^2) -- evaluated per pixel here, where
+// d3d.ren used LMDynamicSize (16) units per texel and filtered.
+struct LT3DDynLights
+{
+    enum { kMax = 32 };
+    int   m_n = 0;
+    float m_fSat = 1.0f;            // LightSaturate (S)
+    float m_fScale = 2.0f;          // 2 under Saturate's MODULATE2X, else 1
+    float m_Eye[3] = { 0, 0, 0 };   // the eye, in this space: the back-facing test
+    float m_Pos[kMax][3];
+    float m_InvR2[kMax];            // 1 / radius^2
+    float m_Col[kMax][3];           // 0..1
+    int   m_bBackCull[kMax];        // FLAG_DONTLIGHTBACKFACING
+};
+
+// A vertex position no light reaches -- LT3DVert::m_P's default and what a
+// FULLBRIGHT polygon gets (SURF_BRIGHT takes no light, dynamic or baked).
+static const float kLT3DNoLightPos = 1.0e30f;
 
 // A vertex after the model/view/projection transform, still in CLIP space.
 // The rasteriser does the perspective divide itself, because it has to clip
@@ -266,6 +304,10 @@ struct LT3DVert
     // the texture has an LT3DTexture::m_pEnvMap. Set by the world pass from
     // the eye and the polygon's plane, as the original does per vertex.
     float m_U2 = 0.0f, m_V2 = 0.0f;
+    // ⚠️ THE VERTEX'S OWN POSITION, for the dynamic lights (5ey) -- in the
+    // space LT3DTarget::m_pDynLights is in. Only the world pass sets it; the
+    // default is beyond any light's reach.
+    float m_P[3] = { kLT3DNoLightPos, kLT3DNoLightPos, kLT3DNoLightPos };
 };
 
 // A texture to sample. Nearest-neighbour, wrapping.
@@ -467,6 +509,11 @@ struct LT3DTexture
 
 namespace LT3D
 {
+
+// The dynamic-light instrument (5ey, LT_DYNLIGHTTRACE): triangles that had a
+// light set, and those of them a light reached. The world pass resets them.
+extern unsigned g_nDynTriTests, g_nDynTriLit;
+
     // ⚠️ WHAT THE PROBE STAMPS. The caller sets this before each DrawTriangle
     // and the rasteriser copies it into LT3DTarget::m_pProbeID at every pixel
     // that wins. A global rather than an argument because DrawTriangle's

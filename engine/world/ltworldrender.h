@@ -135,6 +135,10 @@ bool LTObjectsEnabled();
 void LTWorldSetMirrors(bool bOn);
 bool LTMirrorsEnabled();
 
+// ⚠️ DYNAMIC LIGHTS (HANDOVER 5ey): OT_LIGHT objects are made and light the
+// world and models. LT_NODYNLIGHTS=1 = neither (old; announces itself).
+bool LTDynLightsEnabled();
+
 // ⚠️ THE WORLD'S ENVIRONMENT MAPS (HANDOVER 5el): drawn when the game's
 // "Environment Map" option is on -- console EnvMapWorld (d3d.ren's default 1),
 // pushed in by the host each frame with DetailTextureScale, which the original
@@ -393,6 +397,19 @@ struct LTDynamicSprite
     LTDynamicSprite() : m_bReallyClose(false), m_bNoZ(false) { m_Pos[0] = m_Pos[1] = m_Pos[2] = 0.0f; }
 };
 
+// ⚠️ A DYNAMIC LIGHT (HANDOVER 5ey) -- an OT_LIGHT the game made: the lit
+// lighter, a muzzle flash, an explosion, a ClientLightFX lamp. World space;
+// colour 0..1 as SetLightColor takes it. FLAG_ONLYLIGHTWORLD keeps it off
+// models, FLAG_ONLYLIGHTOBJECTS off the world, FLAG_DONTLIGHTBACKFACING off a
+// surface that faces away from it.
+struct LTDynamicLight
+{
+    float           m_Pos[3];
+    float           m_Color[3];
+    float           m_fRadius;
+    unsigned int    m_Flags;
+};
+
 class ILTWorldDynamicObjects
 {
 public:
@@ -413,6 +430,10 @@ public:
     // The game's PARTICLE SYSTEMS (5dh) -- smoke, steam, sparks, trails.
     virtual unsigned int ParticleSystemCount() const { return 0; }
     virtual bool         GetParticleSystem(unsigned int /*i*/, struct LTDynamicParticles& /*out*/) const { return false; }
+
+    // The visible OT_LIGHTs (5ey), if the source has any. Default: none.
+    virtual unsigned int LightCount() const { return 0; }
+    virtual bool         GetLight(unsigned int /*i*/, LTDynamicLight& /*out*/) const { return false; }
 };
 
 // ⚠️ ONE POLYGRID AS THE RENDERER SEES IT -- see LTScenePolyGrid
@@ -655,6 +676,12 @@ public:
     // "50 50 50", which is the default here; the host sets it from the console
     // so a user's own value wins. See BuildModelLights.
     static void         SetModelAdd(const float* pRGB255);
+
+    // ⚠️ THE CONSOLE'S `LightSaturate` and `Saturate` (5ey) -- the dynamic
+    // lights' scale S and the MODULATE2X their lightmap is drawn with (d3d.ren
+    // defaults 1 and 1; NOLF's autoexec.cfg says LightSaturate 0.5). The host
+    // sets them from the console.
+    static void         SetDynLightConsts(float fLightSaturate, bool bSaturate);
 
     // The PropTypes attribute file this scene resolved its props against.
     const CLTPropTypes& GetPropTypes() const { return m_PropTypes; }
@@ -1071,6 +1098,16 @@ private:
     std::vector<ModelLight>                 m_ModelLights;
     float                                   m_WorldAmbient[3];  // 0..255
 
+    // ⚠️ THIS FRAME'S DYNAMIC LIGHTS (5ey), world space, from the dynamic
+    // objects at the start of Render. DynLightsIn hands the world pass the
+    // ones that light the world, in one model's own space (pLocal = its
+    // model -> world matrix, null for the static world); ComputeModelLighting
+    // adds the ones that light objects.
+    void                GatherDynLights(const ILTWorldDynamicObjects* pDyn, const float* pEye3);
+    bool                DynLightsIn(const float* pLocal, const float* pEye3,
+                                    struct LT3DDynLights& out) const;
+    std::vector<LTDynamicLight>             m_FrameLights;
+
     CLTFileMgr*                             m_pFileMgr;
     CLTWorld                                m_World;
     CLTPropTypes                            m_PropTypes;
@@ -1271,6 +1308,9 @@ public:
     bool         GetPolyGrid(unsigned int i, LTDynamicPolyGrid& out) const override;
     unsigned int ParticleSystemCount() const override { return m_p->ParticleSystemCount(); }
     bool         GetParticleSystem(unsigned int i, LTDynamicParticles& out) const override;
+    // Lights are not culled by the view: one out of sight still lights a wall in it.
+    unsigned int LightCount() const override          { return m_p->LightCount(); }
+    bool         GetLight(unsigned int i, LTDynamicLight& out) const override { return m_p->GetLight(i, out); }
 private:
     CLTWorldScene&                  m_S;
     const ILTWorldDynamicObjects*   m_p;

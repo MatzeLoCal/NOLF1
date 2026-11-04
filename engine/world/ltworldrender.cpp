@@ -1642,12 +1642,38 @@ void CLTWorldScene::DrawSpriteQuad(const LT3DTarget& t, const float* pMVP,
     // shrink would make every flare balloon as it approached the eye; the
     // pair together leave the picture identical and only change which side of
     // the depth test the sprite lands on.
+    //
+    // ⚠️ THE SHRINK INCLUDES WHERE IT SITS, NOT ONLY ITS SIZE (5ew). The
+    // donor rebuilds every corner as eye + right*x*f + up*y*f + fwd*(z+bias):
+    // the sideways offset from the eye shrinks by the same f as the quad.
+    // Sliding the centre along the view axis alone kept x and y, so the
+    // sprite projected at x/(z-20) instead of x/z -- pushed out from the
+    // screen centre, 1.5x at 60 units. A keypad's glow hung beside the keypad
+    // and a candle's flame beside its wick; only one dead ahead looked right.
+    // LT_OLDSPRITEBIAS=1 restores the slide (says so).
     if (sd.m_bZBias && !sd.m_bRotatable)
     {
+        static const bool s_bOld = []() {
+            const bool b = (getenv("LT_OLDSPRITEBIAS") != 0);
+            if (b) { printf("[LT3D] LT_OLDSPRITEBIAS=1 -- biased sprites slide along the view axis, off their spot\n"); fflush(stdout); }
+            return b; }();
         float fBias = -20.0f;
         if (fZ + fBias < kNearZ) fBias = kNearZ - fZ;
         fScaleBias = 1.0f + fBias / fZ;
-        for (int k = 0; k < 3; ++k) c[k] += pFwd3[k] * fBias;
+        if (s_bOld)
+            for (int k = 0; k < 3; ++k) c[k] += pFwd3[k] * fBias;
+        else
+        {
+            float x = 0.0f, y = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                x += (pPos3[k] - pEye3[k]) * pRight3[k];
+                y += (pPos3[k] - pEye3[k]) * pUp3[k];
+            }
+            for (int k = 0; k < 3; ++k)
+                c[k] = pEye3[k] + pRight3[k] * x * fScaleBias + pUp3[k] * y * fScaleBias
+                     + pFwd3[k] * (fZ + fBias);
+        }
         fSizeX *= fScaleBias;
         fSizeY *= fScaleBias;
     }
@@ -2734,6 +2760,112 @@ namespace
     }
 }
 
+// ---- DYNAMIC LIGHTS -- d3d.ren's rule (HANDOVER 5ey, lt3d.h LT3DDynLights) - //
+namespace
+{
+    float g_fDynSat   = 0.5f;       // NOLF's autoexec.cfg "LightSaturate" "0.5"
+    float g_fDynScale = 2.0f;       // "Saturate" "1": the lightmap is MODULATE2X
+
+    // LT_NODYNLIGHTS=1 -- no OT_LIGHT lights anything (old: the client refused
+    // to make them at all, ltscene.cpp). Announces itself.
+    bool DynLightsOff()
+    {
+        static const bool b = (getenv("LT_NODYNLIGHTS") != 0);
+        static const bool bSaid = (b ? (printf("[DYNLIGHT] LT_NODYNLIGHTS=1 -- dynamic lights light nothing (old)\n"),
+                                        fflush(stdout), true) : true);
+        (void)bSaid;
+        return b;
+    }
+}
+
+bool LTDynLightsEnabled() { return !DynLightsOff(); }
+
+void CLTWorldScene::SetDynLightConsts(float fLightSaturate, bool bSaturate)
+{
+    g_fDynSat = (fLightSaturate > 0.0f) ? fLightSaturate : 0.0f;
+    g_fDynScale = bSaturate ? 2.0f : 1.0f;
+}
+
+void CLTWorldScene::GatherDynLights(const ILTWorldDynamicObjects* pDyn, const float* pEye3)
+{
+    m_FrameLights.clear();
+    if (!pDyn || DynLightsOff()) return;
+    const unsigned int n = pDyn->LightCount();
+    for (unsigned int i = 0; i < n; ++i)
+    {
+        LTDynamicLight L;
+        if (!pDyn->GetLight(i, L)) continue;
+        if (!(L.m_fRadius > 0.0f)) continue;
+        if (!(L.m_Color[0] > 0.002f || L.m_Color[1] > 0.002f || L.m_Color[2] > 0.002f)) continue;
+        m_FrameLights.push_back(L);
+    }
+    // ⚠️ LT_DYNLIGHTAT="x,y,z,r" -- an INSTRUMENT: one white test light,
+    // FLAG_VISIBLE only, at a fixed world point. Announces itself.
+    if (const char* pAt = getenv("LT_DYNLIGHTAT"))
+    {
+        static bool s_bSaid = false;
+        LTDynamicLight L;
+        if (sscanf(pAt, "%f,%f,%f,%f", &L.m_Pos[0], &L.m_Pos[1], &L.m_Pos[2], &L.m_fRadius) == 4)
+        {
+            L.m_Color[0] = L.m_Color[1] = L.m_Color[2] = 1.0f;
+            L.m_Flags = FLAG_VISIBLE;
+            m_FrameLights.push_back(L);
+            if (!s_bSaid) { s_bSaid = true; printf("[DYNLIGHT] LT_DYNLIGHTAT -- a test light at (%.0f %.0f %.0f) r %.0f\n",
+                                                   L.m_Pos[0], L.m_Pos[1], L.m_Pos[2], L.m_fRadius); fflush(stdout); }
+        }
+    }
+    // The nearest first: a draw takes at most LT3DDynLights::kMax of them.
+    if (pEye3 && m_FrameLights.size() > 1)
+        std::sort(m_FrameLights.begin(), m_FrameLights.end(),
+                  [pEye3](const LTDynamicLight& a, const LTDynamicLight& b) {
+                      float da = 0, db = 0;
+                      for (int k = 0; k < 3; ++k)
+                      { const float x = a.m_Pos[k] - pEye3[k], y = b.m_Pos[k] - pEye3[k]; da += x*x; db += y*y; }
+                      return da < db; });
+    static const bool s_bTrace = (getenv("LT_DYNLIGHTTRACE") != 0);
+    if (s_bTrace)
+    {
+        static size_t s_nLast = (size_t)-1;
+        if (m_FrameLights.size() != s_nLast)
+        {
+            s_nLast = m_FrameLights.size();
+            printf("[DYNLIGHT] %zu light(s), eye (%.0f %.0f %.0f)\n", m_FrameLights.size(),
+                   pEye3 ? pEye3[0] : 0.0f, pEye3 ? pEye3[1] : 0.0f, pEye3 ? pEye3[2] : 0.0f);
+            for (size_t i = 0; i < m_FrameLights.size() && i < 8; ++i)
+                printf("[DYNLIGHT]    at (%.0f %.0f %.0f) r %.0f col %.2f %.2f %.2f flags 0x%x\n",
+                       m_FrameLights[i].m_Pos[0], m_FrameLights[i].m_Pos[1], m_FrameLights[i].m_Pos[2],
+                       m_FrameLights[i].m_fRadius, m_FrameLights[i].m_Color[0], m_FrameLights[i].m_Color[1],
+                       m_FrameLights[i].m_Color[2], m_FrameLights[i].m_Flags);
+            fflush(stdout);
+        }
+    }
+}
+
+bool CLTWorldScene::DynLightsIn(const float* pLocal, const float* pEye3, LT3DDynLights& out) const
+{
+    out.m_n = 0;
+    out.m_fSat = g_fDynSat;
+    out.m_fScale = g_fDynScale;
+    if (m_FrameLights.empty()) return false;
+    if (pEye3)
+    {
+        if (pLocal) EyeInModel(pEye3, pLocal, out.m_Eye);
+        else for (int k = 0; k < 3; ++k) out.m_Eye[k] = pEye3[k];
+    }
+    for (size_t i = 0; i < m_FrameLights.size() && out.m_n < LT3DDynLights::kMax; ++i)
+    {
+        const LTDynamicLight& L = m_FrameLights[i];
+        if (L.m_Flags & FLAG_ONLYLIGHTOBJECTS) continue;
+        const int j = out.m_n++;
+        if (pLocal) EyeInModel(L.m_Pos, pLocal, out.m_Pos[j]);
+        else for (int k = 0; k < 3; ++k) out.m_Pos[j][k] = L.m_Pos[k];
+        out.m_InvR2[j] = 1.0f / (L.m_fRadius * L.m_fRadius);
+        for (int k = 0; k < 3; ++k) out.m_Col[j][k] = L.m_Color[k];
+        out.m_bBackCull[j] = (L.m_Flags & FLAG_DONTLIGHTBACKFACING) ? 1 : 0;
+    }
+    return out.m_n > 0;
+}
+
 void CLTWorldScene::SetModelAdd(const float* pRGB255)
 {
     if (!pRGB255) return;
@@ -2848,6 +2980,30 @@ void CLTWorldScene::ComputeModelLighting(const float* p, LTModelDraw::LTModelLig
         c.push_back(k2);
     }
 
+    // ⚠️ AND THIS FRAME'S DYNAMIC LIGHTS (5ey) -- the lit lighter on Cate's
+    // hands, a muzzle flash on the guard firing it -- sampled the same way as
+    // the level's lights, unless FLAG_ONLYLIGHTWORLD keeps them off models.
+    for (size_t i = 0; i < m_FrameLights.size(); ++i)
+    {
+        const LTDynamicLight& L = m_FrameLights[i];
+        if (L.m_Flags & FLAG_ONLYLIGHTWORLD) continue;
+        float v[3] = { p[0] - L.m_Pos[0], p[1] - L.m_Pos[1], p[2] - L.m_Pos[2] };
+        const float d2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+        if (d2 >= L.m_fRadius * L.m_fRadius) continue;
+        const float d = sqrtf(d2);
+        float att;
+        if (bQuartic) { att = 1.0f - d2 / (L.m_fRadius * L.m_fRadius); att *= att; }
+        else            att = 1.0f - d / L.m_fRadius;
+        if (att <= 0.0f) continue;
+        Cand k2;
+        k2.pL = 0; k2.att = att;
+        for (int k = 0; k < 3; ++k) k2.col[k] = L.m_Color[k] * att;
+        if (d > 1e-4f) { for (int k = 0; k < 3; ++k) k2.dir[k] = v[k] / d; }
+        else           { k2.dir[0] = 0.0f; k2.dir[1] = -1.0f; k2.dir[2] = 0.0f; }
+        k2.lum = k2.col[0] + k2.col[1] + k2.col[2];
+        c.push_back(k2);
+    }
+
     // The strongest first, up to the limit -- the donor's light list does the
     // same with its own maximum.
     for (size_t i = 0; i + 1 < c.size(); ++i)
@@ -2871,7 +3027,7 @@ void CLTWorldScene::ComputeModelLighting(const float* p, LTModelDraw::LTModelLig
         printf("[MODELLIGHT] at (%.0f %.0f %.0f): ambient %.3f %.3f %.3f, %d light(s)\n",
                p[0], p[1], p[2], out.m_Ambient[0], out.m_Ambient[1], out.m_Ambient[2], out.m_nLights);
         for (size_t i = 0; i < c.size() && i < (size_t)out.m_nLights; ++i)
-            printf("[MODELLIGHT]    %-18s att %.3f  -> %.3f %.3f %.3f\n", c[i].pL->m_sName.c_str(),
+            printf("[MODELLIGHT]    %-18s att %.3f  -> %.3f %.3f %.3f\n", c[i].pL ? c[i].pL->m_sName.c_str() : "(dynamic)",
                    c[i].att, c[i].col[0], c[i].col[1], c[i].col[2]);
         fflush(stdout);
     }
@@ -3155,6 +3311,9 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                 const LTWorldPoint& pt = M.m_Points[pv.m_nPoint];
                 LT3D::TransformPoint(pMVP, pt.m_Pos, tri[v].m_Clip);
                 for (int q2 = 0; q2 < 3; ++q2) wpos[v][q2] = pt.m_Pos[q2];
+                // The dynamic lights see the point where it is in the model
+                // (5ey); a FULLBRIGHT surface takes no light of any kind.
+                if (!bBright) for (int q2 = 0; q2 < 3; ++q2) tri[v].m_P[q2] = pt.m_Pos[q2];
                 if (bEnv) EnvCoords(pt.m_Pos, m_EnvEye, envN, fEnvScale, &tri[v].m_U2, &tri[v].m_V2);
 
                 // ⚠️ P and Q carry the TEXEL SCALE in their length -- measured
@@ -4455,6 +4614,12 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     // ⚠️ THE ENVIRONMENT MAPS (5el) for this pass only -- see m_bEnvActive.
     m_bEnvActive = LTEnvMapsEnabled();
     t.m_bEnvMap = m_bEnvActive;
+    // ⚠️ THE DYNAMIC LIGHTS (5ey) for this pass only: world space for the
+    // static world, each moving brush's own space for it.
+    GatherDynLights(pDyn, pEye3);
+    LT3DDynLights dlWorld, dlModel;
+    const bool bDynWorld = DynLightsIn(0, pEye3, dlWorld);
+    LT3D::g_nDynTriTests = LT3D::g_nDynTriLit = 0;
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         if (&mdl[i] == m_pSky) continue;        // drawn already, at infinity
@@ -4481,10 +4646,13 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         {
             EyeInModel(pEye3, Local, m_EnvEye);
             LT3D::Multiply(pVP, Local, ModelMVP);
+            t.m_pDynLights = DynLightsIn(Local, pEye3, dlModel) ? &dlModel : 0;
             DrawModel(t, ModelMVP, M, tex, st);
+            t.m_pDynLights = 0;
         }
         else
         {
+            t.m_pDynLights = bDynWorld ? &dlWorld : 0;
             // ⚠️ FRONT TO BACK, AND THIS IS THE OPTIMISATION THAT THE FRUSTUM
             // CULLING SHOULD HAVE BEEN. Measured on M01S01 at 640x480: triangles
             // cover 4.76x the screen, of which 2.41x is actually SHADED -- so
@@ -4503,10 +4671,23 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             // Sorting is by the polygon's own stored centre, so there is no
             // geometry to recompute -- only a distance and a sort.
             DrawModel(t, pVP, M, tex, st, BuildOrder(M, pEye3));
+            t.m_pDynLights = 0;
         }
     }
     m_bEnvActive = false;
     t.m_bEnvMap = false;
+    static const bool s_bDynTrace = (getenv("LT_DYNLIGHTTRACE") != 0);
+    if (s_bDynTrace && !m_FrameLights.empty())
+    {
+        static unsigned s_nLastLit = (unsigned)-1;
+        if (LT3D::g_nDynTriLit != s_nLastLit)
+        {
+            s_nLastLit = LT3D::g_nDynTriLit;
+            printf("[DYNLIGHT] world pass: %zu light(s), %d for the world; %u triangle(s) tested, %u lit\n",
+                   m_FrameLights.size(), dlWorld.m_n, LT3D::g_nDynTriTests, LT3D::g_nDynTriLit);
+            fflush(stdout);
+        }
+    }
 
     // ...and the reflections of mirrors on a model pass 2 skipped -- one
     // translucent by its object's alpha (5de; see ForEachActiveMirror).

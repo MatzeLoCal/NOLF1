@@ -167,6 +167,11 @@ struct LTSceneObject
 
     float           m_Color[4];         // r, g, b, a -- SetObjectColor
 
+    // ⚠️ AN OT_LIGHT's light (HANDOVER 5ey): SetLightColor (0..1) and
+    // SetLightRadius. Radius 0 lights nothing.
+    float           m_LightColor[3];
+    float           m_fLightRadius;
+
     std::string     m_sFilename;
 
     // Camera state. Meaningful only when m_nType == OT_CAMERA.

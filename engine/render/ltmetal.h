@@ -117,6 +117,12 @@ struct LTMetalVert
     float m_RGB[3];
 };
 
+// ⚠️ THE DYNAMIC LIGHTS (HANDOVER 5ey): every world draw until the next call
+// adds them per pixel (d3d.ren's rule, lt3d.h). The world pass sets them in
+// each world model's own space and clears them (null) when it is done.
+struct LT3DDynLights;
+void LTMetal_SetDynLights(const LT3DDynLights* p);
+
 // Queues triangles that share one texture. `pMVP` is row-major, as everything
 // else in this engine is.
 //

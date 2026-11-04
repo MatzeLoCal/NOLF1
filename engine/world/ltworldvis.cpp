@@ -137,6 +137,24 @@ int CLTWorldVis::LeafAt(const float* p) const
 }
 
 
+int CLTWorldVis::LeafOnPath(const float* p) const
+{
+    if (!IsValid() || !p) return -1;
+    int node = m_nRoot;
+    int nLeaf = -1;
+    for (size_t guard = 0; guard <= m_Nodes.size(); ++guard)
+    {
+        const Node& n = m_Nodes[(size_t)node];
+        if (n.m_nLeaf >= 0) nLeaf = n.m_nLeaf;
+        const float d = n.m_Normal[0]*p[0] + n.m_Normal[1]*p[1] + n.m_Normal[2]*p[2] - n.m_Dist;
+        const int c = n.m_Sides[(d >= -0.0001f) ? 1 : 0];
+        if (c < 0) break;
+        node = c;
+    }
+    return nLeaf;
+}
+
+
 // The walk itself -- lithtech.exe 0x48b8e0 and its recursive half 0x48be40.
 // Iterative here: a node whose sides[0] subtree is being walked keeps its
 // sides[1] bit pending on a stack, exactly the order the recursion reads in.

@@ -324,7 +324,10 @@ public:
     // everything the view position can see is activated, then everything
     // whose countdown ran out and was not seen falls asleep. pView3 null = no
     // client in the world yet: nothing wakes and nothing falls asleep.
-    void                ActivationPass(const float* pView3, bool bAutoActivate, float fFrameTime);
+    // bPlayerView: the view is the player's own, not a cinematic camera's
+    // (5ex) -- outside the level it then keeps the last leaf it was in.
+    void                ActivationPass(const float* pView3, bool bAutoActivate, float fFrameTime,
+                                       bool bPlayerView = false);
 
     // ILTServer::PingObjects -- "activates any objects seen by this object".
     void                PingFrom(const Record* p, float fFrameTime);
@@ -388,6 +391,7 @@ public:
 
 private:
     mutable std::map<std::string, unsigned int> m_Updates;
+    int                 m_nLastViewLeaf = -1;   // ActivationPass, for mpclip (5ex)
 public:
 
     // The record behind an HOBJECT, or null. ⚠️ Does NOT validate that the

@@ -4432,6 +4432,7 @@ namespace
     // camera that the CLIENT owns and moves (GameClientShell.cpp:2455).
     float g_ClientViewPos[3] = { 0.0f, 0.0f, 0.0f };
     bool  g_bClientViewPosSet = false;
+    bool  g_bClientViewIsPlayer = false;   // 5ex: handed over by CPlayerObj, not a Camera
 
     LTRESULT LTHost_SetClientViewPos(HCLIENT hClient, LTVector* pPos)
     {
@@ -4445,6 +4446,13 @@ namespace
         g_ClientViewPos[1] = pPos->y;
         g_ClientViewPos[2] = pPos->z;
         g_bClientViewPosSet = true;
+
+        // ⚠️ WHOSE VIEW (5ex): CPlayerObj hands over its own object position,
+        // read the moment it calls (PlayerObj.cpp:4135); Camera::Update hands
+        // over the camera's. Equal to the player's position = the player's own.
+        const SRec* pP = CLTServerObjects::FromHandle((HOBJECT)LTServerHost_PlayerHandle());
+        g_bClientViewIsPlayer = pP && pP->m_Pos[0] == pPos->x
+                             && pP->m_Pos[1] == pPos->y && pP->m_Pos[2] == pPos->z;
         return LT_OK;
     }
 
@@ -6457,6 +6465,7 @@ namespace
         // ...and no view in it until the player's object reports one: the
         // last level's position means nothing here.
         g_bClientViewPosSet = false;
+        g_bClientViewIsPlayer = false;
 
         // ⚠️ LOADWORLD_LOADWORLDOBJECTS is the game asking for the level's own
         // objects. Without the flag it wants the geometry only -- restoring a
@@ -7286,9 +7295,11 @@ void LTServerHost_Update(float fElapsed)
     // falls asleep (HANDOVER 5cp). Where the shipped engine does it: after
     // the objects, while building the client's update. MID_(DE)ACTIVATING
     // go straight to the objects, so this sits before the sweep.
+    // The player's OWN view outside the level holds its last leaf (5ex) --
+    // only mpclip gets the player there, and the fall after switching it off.
     g_Objects.ActivationPass(g_bClientViewPosSet ? g_ClientViewPos : 0,
                              (g_ClientInfoFlags & CIF_AUTOACTIVATEOBJECTS) != 0,
-                             g_fServerFrameTime);
+                             g_fServerFrameTime, g_bClientViewPosSet && g_bClientViewIsPlayer);
 
     // ⚠️ LAST, AND AFTER THE PUMP. A destructor can send messages, and a
     // message can name an object; sweeping before the pump would deliver to

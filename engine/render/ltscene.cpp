@@ -376,7 +376,13 @@ LTSceneObject* CLTScene::CreateObject(const LTSceneCreateInfo& info)
     // sparks, trails. Refused, CBaseParticleSystemFX::SetupSystem stopped at
     // `if (!m_hObject)` -- not one particle call in a whole M05S01 run with 14
     // Steam objects updating. LT_NOPARTICLES=1 refuses it again.
-    if (info.m_nType != OT_MODEL && info.m_nType != OT_CAMERA &&
+    // ⚠️ OT_LIGHT TOO (2026-11-04, HANDOVER 5ey): the lit lighter, muzzle
+    // flashes, explosions, ClientLightFX lamps. Refused, CDynamicLightFX
+    // stopped at `if (!m_hObject)` and nothing ever lit -- in GOTY M16S01,
+    // baked with no ambient at all, the lighter was the way to see.
+    // LT_NODYNLIGHTS=1 refuses it again.
+    if (info.m_nType == OT_LIGHT && LTDynLightsEnabled()) { /* accepted */ }
+    else if (info.m_nType != OT_MODEL && info.m_nType != OT_CAMERA &&
         info.m_nType != OT_NORMAL && info.m_nType != OT_SPRITE &&
         info.m_nType != OT_CONTAINER &&
         !(info.m_nType == OT_POLYGRID && LTPolyGridEnabled()) &&
@@ -391,6 +397,8 @@ LTSceneObject* CLTScene::CreateObject(const LTSceneCreateInfo& info)
     p->m_Flags2 = info.m_Flags2;
     p->m_UserFlags = 0;
     p->m_Color[0] = p->m_Color[1] = p->m_Color[2] = p->m_Color[3] = 1.0f;
+    p->m_LightColor[0] = p->m_LightColor[1] = p->m_LightColor[2] = 1.0f;
+    p->m_fLightRadius = 0.0f;
     p->m_sFilename = info.m_sFilename;
     p->m_fFovX = p->m_fFovY = 1.5707963f;
 
@@ -2762,6 +2770,40 @@ static LTRESULT SC_SetObjectScale(HLOCALOBJ hObj, LTVector* pScale)
     return LT_OK;
 }
 
+// ⚠️ THE LIGHT OF AN OT_LIGHT (HANDOVER 5ey) -- were generated stubs, so a
+// light the game made had no colour and no reach. 0..1, as the SDK says.
+static void SC_SetLightColor(HLOCALOBJ hObj, float r, float g, float b)
+{
+    LTIMPL("ILTClient::SetLightColor");
+    LTSceneObject* p = Obj(hObj);
+    if (!p) return;
+    p->m_LightColor[0] = r; p->m_LightColor[1] = g; p->m_LightColor[2] = b;
+}
+
+static void SC_GetLightColor(HLOCALOBJ hObj, float* r, float* g, float* b)
+{
+    LTIMPL("ILTClient::GetLightColor");
+    const LTSceneObject* p = Obj(hObj);
+    if (r) *r = p ? p->m_LightColor[0] : 0.0f;
+    if (g) *g = p ? p->m_LightColor[1] : 0.0f;
+    if (b) *b = p ? p->m_LightColor[2] : 0.0f;
+}
+
+static void SC_SetLightRadius(HLOCALOBJ hObj, float fRadius)
+{
+    LTIMPL("ILTClient::SetLightRadius");
+    LTSceneObject* p = Obj(hObj);
+    if (!p) return;
+    p->m_fLightRadius = fRadius > 0.0f ? fRadius : 0.0f;
+}
+
+static float SC_GetLightRadius(HLOCALOBJ hObj)
+{
+    LTIMPL("ILTClient::GetLightRadius");
+    const LTSceneObject* p = Obj(hObj);
+    return p ? p->m_fLightRadius : 0.0f;
+}
+
 static void SC_SetObjectColor(HLOCALOBJ hObj, float r, float g, float b, float a)
 {
     LTIMPL("ILTClient::SetObjectColor");
@@ -3543,6 +3585,7 @@ public:
         m_Sprites.clear();
         m_PolyGrids.clear();
         m_PartSys.clear();
+        m_Lights.clear();
         LT3D::FromQuatPos(pCam->m_Quat, pCam->m_Pos, m_Cam);
         static const bool s_bOff = []() {
             const bool b = (getenv("LT_NOCLIENTMODELS") != 0);
@@ -3575,6 +3618,13 @@ public:
                 if (bDraw) m_PartSys.push_back(p);
                 continue;
             }
+            // A light lights while it is VISIBLE (LightFX.cpp turns one off by
+            // clearing the flag) and has a reach (5ey).
+            if (p->m_nType == OT_LIGHT)
+            {
+                if ((p->m_Flags & FLAG_VISIBLE) && p->m_fLightRadius > 0.0f) m_Lights.push_back(p);
+                continue;
+            }
             // ⚠️ AND FLAG_PORTALVISIBLE (5df): hidden here, drawn in a mirror
             // -- the player's first-person-hidden attachments. Get() decides
             // per pass; only what the MAIN view shows is "in the game view".
@@ -3591,6 +3641,26 @@ public:
     std::vector<LTSceneObject*>     m_Sprites;
     std::vector<LTSceneObject*>     m_PolyGrids;
     std::vector<LTSceneObject*>     m_PartSys;
+    std::vector<LTSceneObject*>     m_Lights;
+
+    // The visible OT_LIGHTs (5ey), in world space as the game placed them.
+    // ⚠️ NO CAMERA-SPACE CASE: bit 6 is FLAG_REALLYCLOSE on a model or a
+    // sprite but FLAG_DONTLIGHTBACKFACING on a LIGHT (ltbasedefs.h). Read as
+    // REALLYCLOSE, every muzzle flash, impact, projectile and the lighter was
+    // put through the camera matrix and lit a wall thousands of units away
+    // -- the player's own P38 flash 2,400 units off (5ey). The game itself
+    // adds the camera's position to a view-weapon light (PVFXMgr.cpp).
+    unsigned int LightCount() const override { return (unsigned)m_Lights.size(); }
+    bool GetLight(unsigned int i, LTDynamicLight& out) const override
+    {
+        if (i >= m_Lights.size()) return false;
+        const LTSceneObject* p = m_Lights[i];
+        for (int k = 0; k < 3; ++k) out.m_Pos[k] = p->m_Pos[k];
+        for (int k = 0; k < 3; ++k) out.m_Color[k] = p->m_LightColor[k];
+        out.m_fRadius = p->m_fLightRadius;
+        out.m_Flags = p->m_Flags;
+        return true;
+    }
     mutable std::vector<LTDynamicParticle> m_PartScratch;
 
     unsigned int ParticleSystemCount() const override { return (unsigned)m_PartSys.size(); }
@@ -4167,6 +4237,10 @@ void LTScene_Wire(ILTClient* p)
     p->SetObjectScale          = SC_SetObjectScale;
     p->SetObjectColor          = SC_SetObjectColor;
     p->GetObjectColor          = SC_GetObjectColor;
+    p->SetLightColor           = SC_SetLightColor;
+    p->GetLightColor           = SC_GetLightColor;
+    p->SetLightRadius          = SC_SetLightRadius;
+    p->GetLightRadius          = SC_GetLightRadius;
 
     p->SetupParticleSystem     = SC_SetupParticleSystem;
     p->SetSoftwarePSColor      = SC_SetSoftwarePSColor;
