@@ -115,7 +115,17 @@ struct LTMetalVert
     float m_Pos[3];
     float m_UV[2];
     float m_RGB[3];
+    // ⚠️ THE LIGHTMAP'S COORDINATES (HANDOVER 5fc) in the atlas
+    // LTMetal_SetLightMap names; negative = no lightmap. The stride grew from
+    // 32 to 40 bytes, and every vertex descriptor of it with it.
+    float m_LM[2] = { -1.0f, -1.0f };
 };
+
+// ⚠️ THE LEVEL'S LIGHTMAP ATLAS (HANDOVER 5fc), a texture from
+// LTMetal_CreateTexture, or 0 for none. Every world draw from then on
+// multiplies a vertex that carries lightmap coordinates by it.
+// fScale: 2 under `Saturate` -- d3d.ren draws lightmaps MODULATE2X then.
+void LTMetal_SetLightMap(unsigned int nTexture, float fScale);
 
 // ⚠️ THE DYNAMIC LIGHTS (HANDOVER 5ey): every world draw until the next call
 // adds them per pixel (d3d.ren's rule, lt3d.h). The world pass sets them in
@@ -164,6 +174,7 @@ struct LTMetalEnvVert
     float m_UV[2];
     float m_RGB[3];
     float m_UV2[2];
+    float m_LM[2] = { -1.0f, -1.0f };     // the lightmap (5fc), as LTMetalVert
 };
 // bChrome (5en): the model-chrome combine, lerp(env, base, base.a), instead
 // of the world's min(1, base + base.a * env).

@@ -676,7 +676,12 @@ bool LTObjectsEnabled()
 // See ltworldrender.h. The console value arrives from the host every frame;
 // the environment switch is the A/B and wins.
 namespace { bool s_bMirrorsConsole = true; bool s_bPortalPass = false; }
-void LTWorldSetMirrors(bool bOn) { s_bMirrorsConsole = bOn; }
+void LTWorldSetMirrors(bool bOn)
+{
+    // Says so whenever it changes (5fa) -- the console can switch it mid-game.
+    if (bOn != s_bMirrorsConsole) { printf("[LT3D] mirrors %s\n", bOn ? "ON" : "OFF"); fflush(stdout); }
+    s_bMirrorsConsole = bOn;
+}
 // LT_NOPORTALRULE=1: a mirror shows only what the main view shows -- no
 // first-person player, FLAG2_PORTALINVISIBLE ignored (old, says so). 5df.
 bool LTWorldPortalPass()
@@ -2241,26 +2246,72 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
                         "PropType objects will use the world's own (unreliable) "
                         "Filename/Skin\n");
 
-    // ---- which model is the sky ----------------------------------------- //
+    // ---- which models are the sky (HANDOVER 5fd) ------------------------ //
     //
     // ⚠️ Read from the world, not assumed from a name. A `SkyPointer` object
-    // carries a `SkyObjectName` string naming the object that is the sky, and
-    // it differs between levels -- "SkyBox" in M01S01, "Clouds1" in M02S01.
-    // Matching on "SkyBox" would work in one and silently fail in the other.
+    // carries a `SkyObjectName` naming the object it puts in the sky, at its
+    // `Index`; a `DemoSkyWorldModel` puts ITSELF there (ltengineobjects.cpp).
+    // ⚠️ AND THERE ARE SEVERAL: the box, then clouds, moon, sun, sky terrain,
+    // trees -- 2 to 7 in most levels. Only the first SkyPointer's model used
+    // to be the sky, so M16S01's real `SkyBox` (index 0) was drawn as level
+    // geometry -- a cube floating below the level -- while its `clouds`
+    // (index 1) were the whole sky, and M02S01's sky was its `Clouds1`.
+    // The engine keeps them in a slot array by index (AddObjectToSky) and
+    // draws the slots in order; a SkyPointer adds its object a frame after a
+    // DemoSkyWorldModel adds itself, so on a shared index the pointer wins.
+    // Names that match no world model (M01S03's `Moon`) add nothing, there
+    // as here. `SkyDims` set the sky box (SetSkyDef; the last one wins).
+    // LT_ONESKY=1 = the first SkyPointer's model alone, from its centre (old).
     {
+        m_SkyModels.clear();
+        m_bSkyDef = false;
         const std::vector<LTWorldObject>& obj = m_World.GetObjects();
-        std::string sSkyName;
-        for (size_t i = 0; i < obj.size() && sSkyName.empty(); ++i)
+        const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+        std::map<int, const LTWorldModelHeader*> slots;
+        static const bool bOneSky = (getenv("LT_ONESKY") != 0);
+        for (int nPass = 0; nPass < 2; ++nPass)         // DemoSky first, pointers after
+            for (size_t i = 0; i < obj.size(); ++i)
+            {
+                const bool bPtr  = (obj[i].m_sType == "SkyPointer");
+                const bool bDemo = (obj[i].m_sType == "DemoSkyWorldModel");
+                if (!(nPass == 0 ? bDemo : bPtr)) continue;
+                if (nPass == 1 && bOneSky && !slots.empty()) break;
+                const LTWorldProperty* pN = obj[i].Find(bPtr ? "SkyObjectName" : "Name");
+                const LTWorldProperty* pI = obj[i].Find("Index");
+                const LTWorldProperty* pD = obj[i].Find("SkyDims");
+                if (pD && pD->m_Vec[0] != 0.0f && pD->m_Vec[1] != 0.0f && pD->m_Vec[2] != 0.0f && !bOneSky)
+                {
+                    float pos[3] = { 0, 0, 0 };
+                    obj[i].GetPos(pos);
+                    const char* kInner[3] = { "InnerPercentX", "InnerPercentY", "InnerPercentZ" };
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const LTWorldProperty* pP = obj[i].Find(kInner[k]);
+                        const float t = pD->m_Vec[k] * (pP ? pP->m_fReal : 0.1f);
+                        m_SkyViewMin[k] = pos[k] - t;
+                        m_SkyViewMax[k] = pos[k] + t;
+                    }
+                    m_bSkyDef = true;
+                }
+                if (bOneSky && bDemo) continue;
+                if (!pN || pN->m_sString.empty()) continue;
+                for (size_t m = 0; m < mdl.size(); ++m)
+                    if (mdl[m].m_sName == pN->m_sString)
+                    { slots[pI ? pI->m_nInt : 0] = &mdl[m]; break; }
+            }
+        for (std::map<int, const LTWorldModelHeader*>::iterator it = slots.begin(); it != slots.end(); ++it)
+            if (!IsSkyModel(it->second)) m_SkyModels.push_back(it->second);
+        m_pSky = m_SkyModels.empty() ? 0 : m_SkyModels[0];
+        if (bOneSky) printf("[LT3D] LT_ONESKY=1 -- the first SkyPointer's model is the whole sky, from its centre (old)\n");
+        if (!m_SkyModels.empty())
         {
-            if (obj[i].m_sType != "SkyPointer") continue;
-            const LTWorldProperty* p = obj[i].Find("SkyObjectName");
-            if (p && !p->m_sString.empty()) sSkyName = p->m_sString;
-        }
-        if (!sSkyName.empty())
-        {
-            const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
-            for (size_t i = 0; i < mdl.size(); ++i)
-                if (mdl[i].m_sName == sSkyName) { m_pSky = &mdl[i]; break; }
+            printf("[LT3D] sky: %zu object(s) --", m_SkyModels.size());
+            for (size_t k = 0; k < m_SkyModels.size(); ++k) printf(" %s", m_SkyModels[k]->m_sName.c_str());
+            if (m_bSkyDef)
+                printf("; seen from (%.0f %.0f %.0f)..(%.0f %.0f %.0f)", m_SkyViewMin[0], m_SkyViewMin[1],
+                       m_SkyViewMin[2], m_SkyViewMax[0], m_SkyViewMax[1], m_SkyViewMax[2]);
+            printf("\n");
+            fflush(stdout);
         }
     }
 
@@ -2275,6 +2326,192 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
 
     BuildMirrors();
 
+    BuildLightMapAtlas();
+
+    return true;
+}
+
+
+// ---- THE SKY (HANDOVER 5fd) -- see ltworldrender.h ------------------------ //
+
+void CLTWorldScene::SkyView(const float* pEye3, float* pPos3, float* pNear, float* pFar) const
+{
+    if (m_bSkyDef)
+    {
+        // d3d_SetupSkyStuff: where the camera is across the world's extents,
+        // at the same fraction of the view box.
+        const LTWorldInfo& wi = m_World.GetWorldInfo();
+        for (int k = 0; k < 3; ++k)
+        {
+            const float e = wi.m_ExtentsMax[k] - wi.m_ExtentsMin[k];
+            const float f = (e > 0.0f) ? (pEye3[k] - wi.m_ExtentsMin[k]) / e : 0.5f;
+            pPos3[k] = m_SkyViewMin[k] + (m_SkyViewMax[k] - m_SkyViewMin[k]) * f;
+        }
+    }
+    else if (m_pSky)
+        for (int k = 0; k < 3; ++k) pPos3[k] = (m_pSky->m_Min[k] + m_pSky->m_Max[k]) * 0.5f;
+    else
+        for (int k = 0; k < 3; ++k) pPos3[k] = 0.0f;
+
+    // Depth range: out past the farthest corner of every sky object.
+    float fFar = 1.0f;
+    for (size_t i = 0; i < m_SkyModels.size(); ++i)
+    {
+        const LTWorldModelHeader& M = *m_SkyModels[i];
+        float d2 = 0.0f;
+        for (int k = 0; k < 3; ++k)
+        {
+            const float a = fabsf(M.m_Min[k] - pPos3[k]), b = fabsf(M.m_Max[k] - pPos3[k]);
+            const float m = a > b ? a : b;
+            d2 += m * m;
+        }
+        const float d = sqrtf(d2);
+        if (d > fFar) fFar = d;
+    }
+    *pFar  = fFar * 2.0f;
+    *pNear = fFar * 0.0005f + 0.1f;
+}
+
+
+void CLTWorldScene::SkyDraws(const ILTWorldModelXform* pXform, std::vector<SkyDraw>& out)
+{
+    out.clear();
+    for (size_t i = 0; i < m_SkyModels.size(); ++i)
+    {
+        const LTWorldModelHeader& M = *m_SkyModels[i];
+        if (!M.m_bBodyParsed || !Drawable(M, pXform)) continue;
+        float fObjAlpha = 1.0f;
+        const bool bObjAlpha = ModelObjectAlpha(M, pXform, &fObjAlpha);
+        if (bObjAlpha && fObjAlpha <= 0.0f) continue;
+
+        SkyDraw d;
+        d.m_pModel = &M;
+        d.m_bHasLocal = pXform && pXform->GetModelTransform(M.m_sName, d.m_Local);
+        d.m_bLast = false;
+        d.m_Tex.assign(M.m_Textures.size(), (const LT3DTexture*)0);
+        if (bObjAlpha)
+        {
+            for (size_t k = 0; k < M.m_Textures.size(); ++k)
+                d.m_Tex[k] = GetObjectAlphaTexture(M.m_Textures[k], fObjAlpha);
+            d.m_ePass = kPassAll; d.m_bOrdered = true;
+            out.push_back(d);
+        }
+        else
+        {
+            for (size_t k = 0; k < M.m_Textures.size(); ++k) d.m_Tex[k] = GetTexture(M.m_Textures[k]);
+            d.m_ePass = kPassOpaque; d.m_bOrdered = false;
+            out.push_back(d);
+            if (HasBlendedSurface(M))
+            {
+                for (size_t k = 0; k < M.m_Textures.size(); ++k) d.m_Tex[k] = GetTexture(M.m_Textures[k], true);
+                d.m_ePass = kPassBlended; d.m_bOrdered = true;
+                out.push_back(d);
+            }
+        }
+        out.back().m_bLast = true;
+    }
+}
+
+
+// ---- THE LIGHTMAPS (HANDOVER 5fc) -- see ltworldrender.h ------------------ //
+
+void CLTWorldScene::BuildLightMapAtlas()
+{
+    m_LMAtlas = LT3DTexture();
+    m_LMAtlasRGBA.clear();
+    m_LMAt.clear();
+    if (m_MetalTex.count(&m_LMAtlas)) m_MetalTex.erase(&m_LMAtlas);
+
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    const std::vector<unsigned short>& tx = m_World.GetLightMapTexels();
+    if (tx.empty() || m_World.GetNumLightMapped() == 0)
+    {
+        printf("[LT3D] lightmaps: none (%s) -- vertex light\n",
+               *m_World.GetLightMapError() ? m_World.GetLightMapError() : "the level has none");
+        fflush(stdout);
+        return;
+    }
+
+    // Shelf packing, tallest first: the maps are at most 32x32 (34 with the
+    // border), so shelves waste little.
+    struct Item { unsigned int m, q, w, h; };
+    std::vector<Item> items;
+    m_LMAt.resize(mdl.size());
+    for (size_t i = 0; i < mdl.size(); ++i)
+    {
+        m_LMAt[i].assign(mdl[i].m_Polys.size(), ~0u);
+        for (size_t q = 0; q < mdl[i].m_Polys.size(); ++q)
+        {
+            const LTWorldPoly& po = mdl[i].m_Polys[q];
+            if (po.m_nLMTexel < 0) continue;
+            Item it = { (unsigned int)i, (unsigned int)q, po.LMWidth() + 2, po.LMHeight() + 2 };
+            items.push_back(it);
+        }
+    }
+    std::stable_sort(items.begin(), items.end(),
+                     [](const Item& a, const Item& b) { return a.h > b.h; });
+    const unsigned int kW = 2048;
+    unsigned int x = 0, y = 0, shelf = 0;
+    std::vector<unsigned int> at(items.size());
+    for (size_t k = 0; k < items.size(); ++k)
+    {
+        if (x + items[k].w > kW) { x = 0; y += shelf; shelf = 0; }
+        at[k] = x | (y << 16);
+        x += items[k].w;
+        if (items[k].h > shelf) shelf = items[k].h;
+    }
+    unsigned int nH = 1;
+    while (nH < y + shelf) nH <<= 1;
+    if (nH > 32768) { printf("[LT3D] lightmaps: atlas too tall (%u) -- vertex light\n", y + shelf); fflush(stdout); return; }
+
+    m_LMAtlasRGBA.assign((size_t)kW * nH * 4, 255);
+    for (size_t k = 0; k < items.size(); ++k)
+    {
+        const LTWorldPoly& po = mdl[items[k].m].m_Polys[items[k].q];
+        const unsigned int ax = at[k] & 0xFFFFu, ay = at[k] >> 16;
+        const int w = (int)po.LMWidth(), h = (int)po.LMHeight();
+        // X1R5G5B5, widened by bit replication; the border repeats the edge.
+        for (int ty = -1; ty <= h; ++ty)
+            for (int tx2 = -1; tx2 <= w; ++tx2)
+            {
+                const int sx = tx2 < 0 ? 0 : (tx2 >= w ? w - 1 : tx2);
+                const int sy = ty  < 0 ? 0 : (ty  >= h ? h - 1 : ty);
+                const unsigned int v = tx[(size_t)po.m_nLMTexel + (size_t)sy * w + sx];
+                const unsigned int r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31;
+                unsigned char* d = &m_LMAtlasRGBA[((size_t)(ay + 1 + ty) * kW + (ax + 1 + tx2)) * 4];
+                d[0] = (unsigned char)((r5 << 3) | (r5 >> 2));
+                d[1] = (unsigned char)((g5 << 3) | (g5 >> 2));
+                d[2] = (unsigned char)((b5 << 3) | (b5 >> 2));
+                d[3] = 255;
+            }
+        m_LMAt[items[k].m][items[k].q] = at[k];
+    }
+    m_LMAtlas.m_pRGBA  = &m_LMAtlasRGBA[0];
+    m_LMAtlas.m_Width  = (int)kW;
+    m_LMAtlas.m_Height = (int)nH;
+    printf("[LT3D] lightmaps: %u polygon(s), %zu texel(s), grid %.0f, atlas %ux%u\n",
+           m_World.GetNumLightMapped(), tx.size(), m_World.GetWorldInfo().m_fLMGridSize, kW, nH);
+    if (m_World.GetNumLightMapClamped())
+        printf("[LT3D]   %u of them reach past their map by over half a texel (clamped)\n",
+               m_World.GetNumLightMapClamped());
+    fflush(stdout);
+}
+
+
+bool CLTWorldScene::LightMapUV(const LTWorldModelHeader& M, size_t q,
+                               const LTWorldPolyVert& pv, float* pU, float* pV) const
+{
+    if (!m_LMAtlas.m_pRGBA) return false;
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    if (mdl.empty() || &M < &mdl[0] || &M > &mdl.back()) return false;
+    const size_t m = (size_t)(&M - &mdl[0]);
+    if (m >= m_LMAt.size() || q >= m_LMAt[m].size()) return false;
+    const unsigned int at = m_LMAt[m][q];
+    if (at == ~0u) return false;
+    // Texel (x, y) of the map is centred at x + 0.5 past its corner; the map's
+    // own (0,0) sits one texel in, past the border.
+    *pU = ((float)(at & 0xFFFFu) + 1.5f + pv.m_LM[0]) / (float)m_LMAtlas.m_Width;
+    *pV = ((float)(at >> 16)     + 1.5f + pv.m_LM[1]) / (float)m_LMAtlas.m_Height;
     return true;
 }
 
@@ -2299,7 +2536,7 @@ void CLTWorldScene::BuildMirrors()
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         const LTWorldModelHeader& M = mdl[i];
-        if (!M.m_bBodyParsed || &M == m_pSky) continue;
+        if (!M.m_bBodyParsed || IsSkyModel(&M)) continue;
         for (size_t q = 0; q < M.m_Polys.size(); ++q)
         {
             const LTWorldPoly& po = M.m_Polys[q];
@@ -2779,6 +3016,20 @@ namespace
 }
 
 bool LTDynLightsEnabled() { return !DynLightsOff(); }
+
+// ⚠️ THE LIGHTMAP IS DRAWN MODULATE2X TOO (HANDOVER 5fc): d3d.ren's lightmap
+// pass (0x10011620) blends SRC = DESTCOLOR, DEST = SRCCOLOR -- 2 x screen x
+// lightmap -- while `Saturate` is set (NOLF's config), and ZERO / SRCCOLOR
+// (x1) when it is not. LT_LMSCALE=<f> overrides it for comparisons; says so.
+float LTLightMapScale()
+{
+    static const char* pE = getenv("LT_LMSCALE");
+    static const float f = pE ? (float)atof(pE) : 0.0f;
+    static const bool bSaid = (pE ? (printf("[LT3D] LT_LMSCALE=%.2f -- lightmaps drawn x%.2f instead of the Saturate rule\n", f, f),
+                                     fflush(stdout), true) : true);
+    (void)bSaid;
+    return pE ? f : g_fDynScale;
+}
 
 void CLTWorldScene::SetDynLightConsts(float fLightSaturate, bool bSaturate)
 {
@@ -3296,6 +3547,9 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         // RGB 255 became 2.0 and saturated the sky to flat white -- the first
         // sky render; at 1/255 (5ej) the two agree, the flag still decides.
         const bool bBright = (sf.m_nFlags & kSURF_BRIGHT) != 0;
+        // A polygon with a lightmap in the atlas (5fc); all its corners then
+        // take one, so a triangle is never half lightmapped.
+        const bool bLM = !bBright && po.m_nLMTexel >= 0 && m_LMAtlas.m_pRGBA;
 
         for (size_t k = 1; k + 1 < po.m_Verts.size(); ++k)
         {
@@ -3353,6 +3607,16 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
                 // exactly 255,255,255.
                 if (bBright)
                 {
+                    tri[v].m_R = tri[v].m_G = tri[v].m_B = 1.0f;
+                }
+                else if (bLM && LightMapUV(M, q, pv, &tri[v].m_LU, &tri[v].m_LV))
+                {
+                    // ⚠️ THE LIGHTMAP IS THE LIGHT (5fc): with lightmaps on --
+                    // the original's default, LightMap 1 -- d3d.ren draws a
+                    // lightmapped polygon as texture x lightmap; the baked
+                    // vertex colour is the fallback for LightMap 0. (In the
+                    // main levels the two agree, median 0.89; GOTY's levels
+                    // baked their vertex light dimmer, M16S01 at half.)
                     tri[v].m_R = tri[v].m_G = tri[v].m_B = 1.0f;
                 }
                 else
@@ -3428,7 +3692,7 @@ bool CLTWorldScene::FloorUnder(float fX, float fZ, float fFromY,
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         const LTWorldModelHeader& M = mdl[i];
-        if (&M == m_pSky || !M.m_bBodyParsed) continue;
+        if (IsSkyModel(&M) || !M.m_bBodyParsed) continue;
         if (!Drawable(M)) continue;
 
         for (size_t q = 0; q < M.m_Polys.size(); ++q)
@@ -3490,7 +3754,7 @@ int CLTWorldScene::SurfaceUnder(float fX, float fZ, float fFromY, float fMaxDrop
     for (size_t i = 0; i < mdl.size(); ++i)
     {
         const LTWorldModelHeader& M = mdl[i];
-        if (&M == m_pSky || !M.m_bBodyParsed) continue;
+        if (IsSkyModel(&M) || !M.m_bBodyParsed) continue;
         if (!Drawable(M)) continue;
 
         for (size_t q = 0; q < M.m_Polys.size(); ++q)
@@ -4197,7 +4461,7 @@ void CLTWorldScene::UpdateVisCull(const float* pEye3, const ILTWorldModelXform* 
             const std::vector<float>& B = m_PolyBox[i];
             std::vector<unsigned char>& V = m_PolyVis[i];
             V.assign(B.size() / 6, 1);
-            if (&mdl[i] == m_pSky) continue;            // at infinity, never culled
+            if (IsSkyModel(&mdl[i])) continue;            // at infinity, never culled
             nAll += V.size();
             if (!m_ModelBox[i].empty() && !pVis->BoxVisibleIn(m_VisView, &m_ModelBox[i][0], &m_ModelBox[i][3]))
             { std::fill(V.begin(), V.end(), (unsigned char)0); continue; }
@@ -4222,7 +4486,7 @@ void CLTWorldScene::UpdateVisCull(const float* pEye3, const ILTWorldModelXform* 
         for (size_t i = 0; i < mdl.size(); ++i)
         {
             float L[16];
-            if (&mdl[i] == m_pSky || m_ModelBox[i].empty()) continue;
+            if (IsSkyModel(&mdl[i]) || m_ModelBox[i].empty()) continue;
             if (!pXform->GetModelTransform(mdl[i].m_sName, L)) continue;
             m_ModelMoving[i] = 1;
             const float* mb = &m_ModelBox[i][0];
@@ -4430,6 +4694,9 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     LT3DTarget t;
     t.m_pRGBA = pRGBA; t.m_pDepth = pDepth;
     t.m_Width = nWidth; t.m_Height = nHeight;
+    // The level's lightmaps (5fc): only world polygons carry their coordinates.
+    t.m_pLightMap = LightMapAtlas();
+    t.m_fLightMapScale = LTLightMapScale();
 
     // ⚠️ LT_UVPROBE -- see LTWorldScene_ProbeDump. Held at id 0 by default, so
     // world geometry and every other model stamp "not the one I asked for".
@@ -4516,27 +4783,20 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     // past the doorway. Then the depth buffer is CLEARED, so world geometry
     // always wins and the sky survives only where nothing was drawn -- exactly
     // the holes the sky-portal surfaces leave behind.
-    if (m_pSky && m_pSky->m_bBodyParsed && LTSkyEnabled())
+    // ⚠️ EVERY SKY OBJECT, one over the other (5fd): the original draws its
+    // sky objects in index order with the depth buffer off, so each later one
+    // covers the earlier; here each keeps its own depth and the buffer is
+    // cleared between them.
+    if (m_pSky && LTSkyEnabled())
     {
-        float smn[3] = { 1e30f, 1e30f, 1e30f }, smx[3] = { -1e30f, -1e30f, -1e30f };
-        for (size_t p = 0; p < m_pSky->m_Points.size(); ++p)
-            for (int k = 0; k < 3; ++k)
-            {
-                float v = m_pSky->m_Points[p].m_Pos[k];
-                if (v < smn[k]) smn[k] = v;
-                if (v > smx[k]) smx[k] = v;
-            }
-
-        float sc[3], sr = 0.0f;
-        for (int k = 0; k < 3; ++k)
-        { sc[k] = (smn[k] + smx[k]) * 0.5f; float d = (smx[k] - smn[k]) * 0.5f; sr += d * d; }
-        sr = sqrtf(sr);
+        float sc[3], fNear, fFar;
+        SkyView(pEye3, sc, &fNear, &fFar);
 
         float dir[3] = { pAt3[0] - pEye3[0], pAt3[1] - pEye3[1], pAt3[2] - pEye3[2] };
         float sat[3] = { sc[0] + dir[0], sc[1] + dir[1], sc[2] + dir[2] };
 
         float SP[16], SV[16], SMVP[16];
-        LT3D::Perspective(fFovY, fAspect, sr * 0.001f + 0.1f, sr * 4.0f, SP);
+        LT3D::Perspective(fFovY, fAspect, fNear, fFar, SP);
         if (MirrorWorld()) for (int k = 0; k < 4; ++k) SP[k] = -SP[k];
         // In a mirror's pass the sky is reflected as well; it is at infinity,
         // so it gets the handedness flip and no near plane (5de).
@@ -4544,17 +4804,24 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
         LT3D::LookAt(sc, sat, up, SV);
         LT3D::Multiply(SP, SV, SMVP);
 
-        std::vector<const LT3DTexture*> stex(m_pSky->m_Textures.size(), (const LT3DTexture*)0);
-        for (size_t k = 0; k < m_pSky->m_Textures.size(); ++k)
-            stex[k] = GetTexture(m_pSky->m_Textures[k]);
-
         // The sky fogs with ITS OWN distances (donor d3d_drawsky.cpp sets
         // D3DRS_FOGSTART/END from SkyFogNearZ/FarZ around the sky draw),
         // measured in the sky box's own units.
         t.m_bFog = m_FogSky.m_bOn;
         t.m_fFogNear = m_FogSky.m_fNear; t.m_fFogFar = m_FogSky.m_fFar;
         for (int k = 0; k < 3; ++k) t.m_FogRGB[k] = m_FogSky.m_RGB[k];
-        DrawModel(t, SMVP, *m_pSky, stex, st);
+        std::vector<SkyDraw> draws;
+        SkyDraws(pXform, draws);
+        for (size_t d = 0; d < draws.size(); ++d)
+        {
+            const SkyDraw& D = draws[d];
+            float LM[16];
+            const float* pM = SMVP;
+            if (D.m_bHasLocal) { LT3D::Multiply(SMVP, D.m_Local, LM); pM = LM; }
+            DrawModel(t, pM, *D.m_pModel, D.m_Tex, st,
+                      D.m_bOrdered ? BuildBackToFrontOrder(*D.m_pModel, sc) : 0, 0, D.m_ePass);
+            if (D.m_bLast) LT3D::ClearDepth(t);
+        }
         t.m_bFog = false;
         LT3D::ClearDepth(t);
     }
@@ -4622,7 +4889,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     LT3D::g_nDynTriTests = LT3D::g_nDynTriLit = 0;
     for (size_t i = 0; i < mdl.size(); ++i)
     {
-        if (&mdl[i] == m_pSky) continue;        // drawn already, at infinity
+        if (IsSkyModel(&mdl[i])) continue;        // drawn already, at infinity
         if (!Drawable(mdl[i], pXform)) continue;
         // ⚠️ Translucent by its OBJECT's alpha (5cf): pass 4 draws all of it.
         { float a; if (ModelObjectAlpha(mdl[i], pXform, &a)) continue; }
@@ -5063,7 +5330,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
 
     for (size_t i = 0; i < mdl.size(); ++i)
     {
-        if (&mdl[i] == m_pSky) continue;
+        if (IsSkyModel(&mdl[i])) continue;
         if (!Drawable(mdl[i], pXform)) continue;
 
         const LTWorldModelHeader& M = mdl[i];

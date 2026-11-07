@@ -115,6 +115,9 @@ namespace
         o.m_Pos[0] = pW[0]; o.m_Pos[1] = pW[1]; o.m_Pos[2] = pW[2];
         o.m_UV[0]  = v.m_U; o.m_UV[1] = v.m_V;
         o.m_RGB[0] = v.m_R; o.m_RGB[1] = v.m_G; o.m_RGB[2] = v.m_B;
+        // The lightmap (5fc): the atlas coordinates, or none.
+        o.m_LM[0] = v.m_LU < 0.0f ? -1.0f : v.m_LU;
+        o.m_LM[1] = v.m_LU < 0.0f ? -1.0f : v.m_LV;
         // ⚠️ NO DYNAMIC LIGHT HERE (5ey) -- a fullbright polygon, or anything
         // but a world polygon -- goes out NEGATED; vs_world takes abs() and
         // flags the pixel. The vertex keeps its layout. The light reads the
@@ -196,6 +199,7 @@ namespace
                     memcpy(e.m_Pos, b.m_Pos, sizeof e.m_Pos);
                     memcpy(e.m_UV,  b.m_UV,  sizeof e.m_UV);
                     memcpy(e.m_RGB, b.m_RGB, sizeof e.m_RGB);
+                    memcpy(e.m_LM,  b.m_LM,  sizeof e.m_LM);
                     e.m_UV2[0] = pV[i].m_U2; e.m_UV2[1] = pV[i].m_V2;
                     r.push_back(e);
                 }
@@ -465,7 +469,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         const std::vector<LTWorldModelHeader>& pre = m_World.GetModels();
         for (size_t i = 0; i < pre.size(); ++i)
         {
-            if (&pre[i] == m_pSky) continue;
+            if (IsSkyModel(&pre[i])) continue;
             if (!Drawable(pre[i])) continue;
             // ...and a model translucent by its OBJECT's alpha (5cf) uses the
             // object-alpha entries instead, which need their handle as much.
@@ -542,7 +546,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         m_bRecordingStatic = true;
         for (size_t i = 0; i < sm.size(); ++i)
         {
-            if (&sm[i] == m_pSky) continue;
+            if (IsSkyModel(&sm[i])) continue;
             std::vector<const LT3DTexture*> tex(sm[i].m_Textures.size(), (const LT3DTexture*)0);
             for (size_t k = 0; k < sm[i].m_Textures.size(); ++k)
                 tex[k] = GetTexture(sm[i].m_Textures[k]);
@@ -609,6 +613,24 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     {
         std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(m_AnimSurf[i].m_pCur);
         m_MetalTex[&m_AnimSurf[i].m_pAlias->m_Tex] = (h != m_MetalTex.end()) ? h->second : 0u;
+    }
+    // ⚠️ THE LIGHTMAP ATLAS (5fc), uploaded once per level, one level, no
+    // mips -- D3D drew lightmaps unfiltered by mip too.
+    {
+        unsigned int nLM = 0;
+        if (const LT3DTexture* pLM = LightMapAtlas())
+        {
+            std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(pLM);
+            if (h != m_MetalTex.end()) nLM = h->second;
+            else
+            {
+                const unsigned char* pLv[1] = { pLM->m_pRGBA };
+                int w[1] = { pLM->m_Width }, hh[1] = { pLM->m_Height };
+                nLM = LTMetal_CreateTexture(pLv, w, hh, 1, false, 0.5f);
+                m_MetalTex[pLM] = nLM;
+            }
+        }
+        LTMetal_SetLightMap(nLM, LTLightMapScale());
     }
     pt.Mark(CPassTimer::kUpload);
 
@@ -677,25 +699,19 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     }
 
     // ---- pass 1: the sky, from its own centre -------------------------- //
+    // Every sky object, one over the other, from SkyView's camera -- the
+    // software path's rule (5fd).
     if (m_pSky && LTSkyEnabled())
     {
-        float c[3];
-        for (int k = 0; k < 3; ++k)
-            c[k] = (m_pSky->m_Min[k] + m_pSky->m_Max[k]) * 0.5f;
+        float c[3], fNear, fFar;
+        SkyView(pEye3, c, &fNear, &fFar);
 
         float at[3] = { c[0] + (pAt3[0] - pEye3[0]),
                         c[1] + (pAt3[1] - pEye3[1]),
                         c[2] + (pAt3[2] - pEye3[2]) };
 
-        float sr = 0.0f;
-        for (int k = 0; k < 3; ++k)
-        {
-            float e = m_pSky->m_Max[k] - m_pSky->m_Min[k];
-            if (e > sr) sr = e;
-        }
-
         float SP[16], SV[16], SMVP[16];
-        LT3D::Perspective(fFovY, fAspect, sr * 0.001f + 0.1f, sr * 4.0f, SP);
+        LT3D::Perspective(fFovY, fAspect, fNear, fFar, SP);
 
         // ⚠️ THE SCENE MIRROR, TAKEN FROM THE ONE PLACE THAT DECIDES IT. The
         // software path negates row 0 of the projection; this must do exactly
@@ -711,16 +727,27 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         LT3D::Multiply(SP, SV, SMVP);
         { float t[16]; ToMetalClip(SMVP, t); memcpy(SMVP, t, sizeof(SMVP)); }
 
-        std::vector<const LT3DTexture*> stex(m_pSky->m_Textures.size(), (const LT3DTexture*)0);
-        for (size_t k = 0; k < m_pSky->m_Textures.size(); ++k)
-            stex[k] = GetTexture(m_pSky->m_Textures[k]);
-
-        batch.SetMVP(SMVP);
         // The sky fogs with its own distances -- the software path's rule
         // (ltworldrender.cpp). Batched draws take the fog at Flush.
         LTMetal_SetFog(m_FogSky.m_bOn, m_FogSky.m_fNear, m_FogSky.m_fFar, m_FogSky.m_RGB);
-        DrawModel(dummy, SMVP, *m_pSky, stex, st, 0, &batch);
-        batch.Flush(m_MetalTex);
+        std::vector<SkyDraw> draws;
+        SkyDraws(pXform, draws);
+        // Ordered runs draw from inside Tri(), with the handles they hold.
+        batch.SetHandles(&m_MetalTex);
+        for (size_t d = 0; d < draws.size(); ++d)
+        {
+            const SkyDraw& D = draws[d];
+            float LM[16];
+            const float* pM = SMVP;
+            if (D.m_bHasLocal) { LT3D::Multiply(SMVP, D.m_Local, LM); pM = LM; }
+            batch.SetMVP(pM);
+            batch.SetOrdered(D.m_bOrdered);
+            DrawModel(dummy, pM, *D.m_pModel, D.m_Tex, st,
+                      D.m_bOrdered ? BuildBackToFrontOrder(*D.m_pModel, c) : 0, &batch, D.m_ePass);
+            batch.Flush(m_MetalTex);
+            batch.SetOrdered(false);
+            if (D.m_bLast) LTMetal_ClearDepth();
+        }
 
         // ⚠️ Same rule as the software path: the sky is at infinity, so the
         // world must beat it everywhere. See LTMetal_ClearDepth.
@@ -871,7 +898,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         };
         for (size_t i = 0; i < mdl.size() && i < m_Static.m_Models.size(); ++i)
         {
-            if (&mdl[i] == m_pSky) continue;
+            if (IsSkyModel(&mdl[i])) continue;
             if (!Drawable(mdl[i], pXform)) continue;
             { float a; if (ModelObjectAlpha(mdl[i], pXform, &a)) continue; }    // pass 4 (5cf)
             const StaticModel& sm = m_Static.m_Models[i];
@@ -926,7 +953,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         for (size_t i = 0; i < mdl.size() && i < m_Static.m_Models.size(); ++i)
         {
             const StaticModel& sm = m_Static.m_Models[i];
-            if (sm.m_EnvPolys.empty() || &mdl[i] == m_pSky) continue;
+            if (sm.m_EnvPolys.empty() || IsSkyModel(&mdl[i])) continue;
             if (!Drawable(mdl[i], pXform)) continue;
             { float a; if (ModelObjectAlpha(mdl[i], pXform, &a)) continue; }    // pass 4 (5cf)
             const LTWorldModelHeader& M = mdl[i];
@@ -963,7 +990,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     batch.SetEnv(m_bEnvActive);
     for (size_t i = 0; i < mdl.size(); ++i)
     {
-        if (&mdl[i] == m_pSky) continue;
+        if (IsSkyModel(&mdl[i])) continue;
         if (!Drawable(mdl[i], pXform)) continue;
         { float a; if (ModelObjectAlpha(mdl[i], pXform, &a)) continue; }    // pass 4 (5cf)
 
@@ -1546,7 +1573,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
 
     for (size_t i = 0; i < mdl.size(); ++i)
     {
-        if (&mdl[i] == m_pSky) continue;
+        if (IsSkyModel(&mdl[i])) continue;
         if (!Drawable(mdl[i], pXform)) continue;
 
         const LTWorldModelHeader& M = mdl[i];
@@ -1964,6 +1991,9 @@ bool LTWorldMetal_MenuObjects(int nOutW, int nOutH, const int* pRect4, bool bCle
             memset(v, 0, sizeof(v));
             for (int q = 0; q < 4; ++q)
             {
+                // ⚠️ NO LIGHTMAP (5fc): zero-filled, the corner would read
+                // the atlas at (0,0) -- the in-game menu came out tinted.
+                v[q].m_LU = v[q].m_LV = -1.0f;
                 v[q].m_U = kU[q]; v[q].m_V = kV[q];
                 v[q].m_R = it.m_RGB[0]; v[q].m_G = it.m_RGB[1]; v[q].m_B = it.m_RGB[2];
             }

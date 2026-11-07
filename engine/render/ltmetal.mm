@@ -53,6 +53,7 @@ struct VIn {
     float3 pos [[attribute(0)]];
     float2 uv  [[attribute(1)]];
     float3 rgb [[attribute(2)]];
+    float2 luv [[attribute(3)]];    // the lightmap (5fc); negative = none
 };
 
 struct VOut {
@@ -94,7 +95,15 @@ struct VOut {
     // colour arrives NEGATED, ToMetalVert, so the vertex layout is unchanged).
     float3 opos;
     float  noLight [[flat]];
+
+    // ⚠️ THE LIGHTMAP'S COORDINATES (HANDOVER 5fc), perspective-correct like
+    // the texture's: a shadow edge is geometry. Negative = no lightmap.
+    float2 luv;
 };
+
+// ⚠️ THE LIGHTMAP (HANDOVER 5fc): bilinear, clamped -- the atlas gives every
+// map a one-texel border, and its coordinates never leave the texel centres.
+constexpr sampler kLMSampler(filter::linear, address::clamp_to_edge);
 
 // d3d.ren's per-texel rule (lt3d.h, LT3DDynLights), per pixel:
 //     light = vertex + scale x min(1, SUM col_i x min(1, sat x max(0, 1 - d^2 invR2_i)))
@@ -185,13 +194,16 @@ vertex VOut vs_world(VIn vin [[stage_in]],
     o.clipPos = o.pos;
     o.opos = vin.pos;
     o.noLight = (vin.rgb.r < 0.0 || vin.rgb.g < 0.0 || vin.rgb.b < 0.0) ? 1.0 : 0.0;
+    o.luv = vin.luv;
     return o;
 }
 
 fragment float4 fs_world(VOut in [[stage_in]],
                          constant Uniforms& u [[buffer(1)]],
                          constant DynL& dl [[buffer(3)]],
+                         constant float& lmScale [[buffer(4)]],
                          texture2d<float> tex [[texture(0)]],
+                         texture2d<float> lmap [[texture(2)]],
                          sampler smp [[sampler(0)]])
 {
     // The surface's normal for the back-facing test, here in uniform
@@ -242,6 +254,7 @@ fragment float4 fs_world(VOut in [[stage_in]],
     // is kept because it is still what LT_AFFINECOLOUR asks for, and because
     // the two must be comparable from one binary; see lt3d.cpp.
     float3 vc = (u.affineColour != 0) ? in.rgb : in.rgbPersp;
+    if (in.luv.x >= 0.0) vc *= lmap.sample(kLMSampler, in.luv).rgb * lmScale;
     if (dl.n > 0 && in.noLight == 0.0) vc += DynLightAt(dl, in.opos, nrm);
     float3 c = t.rgb * vc;
     // ⚠️ LINEAR DEPTH FOG, the software rasteriser's rule (lt3d.cpp): before
@@ -269,6 +282,7 @@ struct VInEnv {
     float2 uv  [[attribute(1)]];
     float3 rgb [[attribute(2)]];
     float2 uv2 [[attribute(3)]];
+    float2 luv [[attribute(4)]];    // the lightmap (5fc), as VIn
 };
 
 struct VOutEnv {
@@ -281,6 +295,7 @@ struct VOutEnv {
     float3 rgbPersp;
     float3 opos;                    // the dynamic lights (5ey), as VOut
     float  noLight [[flat]];
+    float2 luv;                     // the lightmap (5fc), as VOut
 };
 
 vertex VOutEnv vs_env(VInEnv vin [[stage_in]],
@@ -296,6 +311,7 @@ vertex VOutEnv vs_env(VInEnv vin [[stage_in]],
     o.fogXY = o.pos.xy * float2(u.fogKX, u.fogKY);
     o.opos = vin.pos;
     o.noLight = (vin.rgb.r < 0.0 || vin.rgb.g < 0.0 || vin.rgb.b < 0.0) ? 1.0 : 0.0;
+    o.luv = vin.luv;
     return o;
 }
 
@@ -303,8 +319,10 @@ fragment float4 fs_env(VOutEnv in [[stage_in]],
                        constant Uniforms& u [[buffer(1)]],
                        constant int& baseAlpha [[buffer(2)]],    // bit 0: base alpha counts; bit 1: chrome (5en)
                        constant DynL& dl [[buffer(3)]],
+                       constant float& lmScale [[buffer(4)]],
                        texture2d<float> tex [[texture(0)]],
                        texture2d<float> env [[texture(1)]],
+                       texture2d<float> lmap [[texture(2)]],
                        sampler smp [[sampler(0)]])
 {
     const float3 nrm = cross(dfdx(in.opos), dfdy(in.opos));
@@ -314,6 +332,7 @@ fragment float4 fs_env(VOutEnv in [[stage_in]],
     const float3 e = env.sample(smp, in.uv2).rgb;
     const float3 b = ((baseAlpha & 2) != 0) ? mix(e, t.rgb, a) : min(t.rgb + a * e, float3(1.0));
     float3 vc = (u.affineColour != 0) ? in.rgb : in.rgbPersp;
+    if (in.luv.x >= 0.0) vc *= lmap.sample(kLMSampler, in.luv).rgb * lmScale;
     if (dl.n > 0 && in.noLight == 0.0) vc += DynLightAt(dl, in.opos, nrm);
     float3 c = b * vc;
     if (u.fogOn != 0 && u.fogFar != u.fogNear)
@@ -430,6 +449,7 @@ vertex VOut vs_skin(uint vid [[vertex_id]],
     o.clipPos = o.pos;
     o.opos = p;
     o.noLight = 1.0;                // models take their lights per vertex (5ey)
+    o.luv = float2(-1.0);           // and no lightmap (5fc)
     return o;
 }
 )METAL";
@@ -603,6 +623,7 @@ namespace
         vd.attributes[1].format = MTLVertexFormatFloat2; vd.attributes[1].offset = sizeof(float) * 3; vd.attributes[1].bufferIndex = 0;
         vd.attributes[2].format = MTLVertexFormatFloat3; vd.attributes[2].offset = sizeof(float) * 5; vd.attributes[2].bufferIndex = 0;
         vd.attributes[3].format = MTLVertexFormatFloat2; vd.attributes[3].offset = sizeof(float) * 8; vd.attributes[3].bufferIndex = 0;
+        vd.attributes[4].format = MTLVertexFormatFloat2; vd.attributes[4].offset = sizeof(float) * 10; vd.attributes[4].bufferIndex = 0;
         vd.layouts[0].stride = sizeof(LTMetalEnvVert);
         vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
         MTLRenderPipelineDescriptor* ed = [pdOpaque copy];
@@ -647,6 +668,9 @@ namespace
         vd.attributes[2].format = MTLVertexFormatFloat3;
         vd.attributes[2].offset = sizeof(float) * 5;
         vd.attributes[2].bufferIndex = 0;
+        vd.attributes[3].format = MTLVertexFormatFloat2;    // the lightmap (5fc)
+        vd.attributes[3].offset = sizeof(float) * 8;
+        vd.attributes[3].bufferIndex = 0;
         vd.layouts[0].stride = sizeof(LTMetalVert);
         vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
 
@@ -1307,6 +1331,49 @@ namespace
         g_DynLEnc = g_Enc;
         g_nDynLBound = g_nDynLSerial;
     }
+
+    // ⚠️ THE LIGHTMAP ATLAS (HANDOVER 5fc), fragment texture 2 of fs_world
+    // and fs_env. ALWAYS bound -- a white texel when the level has none -- for
+    // the lesson of 5ey: Xcode's API validation stops the process on a
+    // texture the function declares and the draw does not bind, though the
+    // shader never samples it then. Rebound when the encoder or the atlas
+    // changes.
+    unsigned int g_nLightMap = 0, g_nLMBound = ~0u;
+    float g_fLMScale = 1.0f, g_fLMScaleBound = -1.0f;
+    id<MTLRenderCommandEncoder> g_LMEnc = nil;
+    id<MTLTexture> g_LMWhite = nil;
+
+    void BindLightMap()
+    {
+        if (g_LMEnc == g_Enc && g_nLMBound == g_nLightMap && g_fLMScaleBound == g_fLMScale) return;
+        id<MTLTexture> t = nil;
+        if (g_nLightMap != 0 && g_nLightMap < g_Textures.size()) t = g_Textures[g_nLightMap];
+        if (!t)
+        {
+            if (!g_LMWhite)
+            {
+                MTLTextureDescriptor* td =
+                    [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                       width:1 height:1 mipmapped:NO];
+                [td setUsage:MTLTextureUsageShaderRead];
+                g_LMWhite = [g_Device newTextureWithDescriptor:td];
+                const unsigned char white[4] = { 255, 255, 255, 255 };
+                [g_LMWhite replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:white bytesPerRow:4];
+            }
+            t = g_LMWhite;
+        }
+        [g_Enc setFragmentTexture:t atIndex:2];
+        [g_Enc setFragmentBytes:&g_fLMScale length:sizeof(g_fLMScale) atIndex:4];
+        g_LMEnc = g_Enc;
+        g_nLMBound = g_nLightMap;
+        g_fLMScaleBound = g_fLMScale;
+    }
+}
+
+void LTMetal_SetLightMap(unsigned int nTexture, float fScale)
+{
+    g_nLightMap = nTexture;
+    g_fLMScale = fScale;
 }
 
 void LTMetal_SetDynLights(const LT3DDynLights* p)
@@ -1443,6 +1510,7 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
     [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
     BindDynLights();
+    BindLightMap();
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
     if (ib)
         [g_Enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)nVerts
@@ -1507,6 +1575,7 @@ void LTMetal_DrawEnvTris(const float* pMVP, unsigned int nTexture, unsigned int 
             memcpy(plain[(size_t)i].m_Pos, pVerts[i].m_Pos, sizeof(float) * 3);
             memcpy(plain[(size_t)i].m_UV,  pVerts[i].m_UV,  sizeof(float) * 2);
             memcpy(plain[(size_t)i].m_RGB, pVerts[i].m_RGB, sizeof(float) * 3);
+            memcpy(plain[(size_t)i].m_LM,  pVerts[i].m_LM,  sizeof(float) * 2);
         }
         LTMetal_DrawTris(pMVP, nTexture, &plain[0], nVerts, bAlphaTest, fAlphaRef);
         return;
@@ -1560,6 +1629,7 @@ void LTMetal_DrawEnvTris(const float* pMVP, unsigned int nTexture, unsigned int 
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
     [g_Enc setFragmentBytes:&nBaseAlpha length:sizeof(nBaseAlpha) atIndex:2];
     BindDynLights();
+    BindLightMap();
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
     [g_Enc setFragmentTexture:g_Textures[nEnvTexture] atIndex:1];
     [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];
@@ -1968,6 +2038,7 @@ namespace
         vd.attributes[0].format = MTLVertexFormatFloat3; vd.attributes[0].offset = 0;                 vd.attributes[0].bufferIndex = 0;
         vd.attributes[1].format = MTLVertexFormatFloat2; vd.attributes[1].offset = sizeof(float) * 3; vd.attributes[1].bufferIndex = 0;
         vd.attributes[2].format = MTLVertexFormatFloat3; vd.attributes[2].offset = sizeof(float) * 5; vd.attributes[2].bufferIndex = 0;
+        vd.attributes[3].format = MTLVertexFormatFloat2; vd.attributes[3].offset = sizeof(float) * 8; vd.attributes[3].bufferIndex = 0;
         vd.layouts[0].stride = sizeof(LTMetalVert);
         vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
 

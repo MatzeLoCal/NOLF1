@@ -245,6 +245,14 @@ struct LT3DTarget
     // pass alone, in the space of the vertices' m_P; null everywhere else.
     const struct LT3DDynLights* m_pDynLights;
 
+    // ⚠️ THE WORLD'S LIGHTMAP ATLAS (HANDOVER 5fc) -- set by the world pass
+    // alone. A triangle whose corners carry lightmap coordinates
+    // (LT3DVert::m_LU >= 0) takes its light from here, bilinear, times its
+    // vertex colour (1 for such a polygon); the dynamic lights add after.
+    const struct LT3DTexture* m_pLightMap;
+    // ...times this: 2 under `Saturate`, d3d.ren's MODULATE2X (5fc).
+    float           m_fLightMapScale;
+
     // ⚠️ A CONSTRUCTOR, for the reason LT3DTexture has one: every existing
     // caller assigns the four fields above and nothing else, and an
     // uninitialised flag here would change how the game's own frames shade.
@@ -254,7 +262,7 @@ struct LT3DTarget
           m_bTrilinear(false), m_pProbeID(0), m_pProbeTex(0), m_pProbeUV(0),
           m_pProbeMip(0), m_bFog(false), m_fFogNear(0.0f), m_fFogFar(1.0f),
           m_fFogKX(0.0f), m_fFogKY(0.0f), m_fFarW(0.0f), m_bEnvMap(false),
-          m_pChrome(0), m_pDynLights(0)
+          m_pChrome(0), m_pDynLights(0), m_pLightMap(0), m_fLightMapScale(1.0f)
     { m_FogRGB[0] = m_FogRGB[1] = m_FogRGB[2] = 0.0f; }
 };
 
@@ -308,6 +316,11 @@ struct LT3DVert
     // space LT3DTarget::m_pDynLights is in. Only the world pass sets it; the
     // default is beyond any light's reach.
     float m_P[3] = { kLT3DNoLightPos, kLT3DNoLightPos, kLT3DNoLightPos };
+    // ⚠️ THE LIGHTMAP'S COORDINATES (HANDOVER 5fc), 0..1 in
+    // LT3DTarget::m_pLightMap; negative = this vertex has no lightmap.
+    // ⚠️ A memset vertex has (0,0) -- a lightmap texel, not "none": the
+    // in-game menu's items were tinted by the atlas's corner until set.
+    float m_LU = -1.0f, m_LV = -1.0f;
 };
 
 // A texture to sample. Nearest-neighbour, wrapping.

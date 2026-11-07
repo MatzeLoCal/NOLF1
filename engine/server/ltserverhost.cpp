@@ -2251,6 +2251,83 @@ namespace
             return LT_NOTFOUND;
         }
 
+        // ⚠️ THE SOCKETS, FOR THE BULLETS TOO (HANDOVER 5fb). A gunner riding a
+        // helicopter is an AI attached at a socket, and a shot is his only when
+        // it passes a box around that socket (CAttachmentObject::
+        // HandleProjectileImpact, Attachments.cpp:1340) -- which asks the
+        // SERVER for GetSocket + GetSocketTransform. Both were generated stubs
+        // (LT_ERROR): every shot at the M14S02 chopper's gunner went to the
+        // chopper (1 of 20 aimed shots reached him). The same rule that places
+        // the attachment (LTHost_AttachmentTransform): the parent's pose, the
+        // socket, the object's world frame. LT_NOSERVERSOCKETS=1 = the stubs.
+        static bool NoServerSockets()
+        {
+            static const bool b = []() {
+                const bool v = (getenv("LT_NOSERVERSOCKETS") != 0);
+                if (v) { printf("[SERVER] LT_NOSERVERSOCKETS=1 -- server GetSocket/GetSocketTransform fail (old stubs)\n"); fflush(stdout); }
+                return v; }();
+            return b;
+        }
+
+        LTRESULT GetSocket(HOBJECT hObj, char* pSocketName, HMODELSOCKET& hSocket) override
+        {
+            LTIMPL("ILTModel::GetSocket");
+            hSocket = INVALID_MODEL_SOCKET;
+            if (NoServerSockets()) return LT_ERROR;
+            SRec* p = CLTServerObjects::FromHandle(hObj);
+            if (!p || !pSocketName) return LT_ERROR;
+            const CLTABCModel* pModel = LTScene_ModelForFile(p->m_sFilename.c_str());
+            if (!pModel) return LT_ERROR;
+            const std::vector<LTABCSocket>& so = pModel->GetSockets();
+            for (size_t i = 0; i < so.size(); ++i)
+                if (strcasecmp(so[i].m_sName.c_str(), pSocketName) == 0)
+                { hSocket = (HMODELSOCKET)i; return LT_OK; }
+            return LT_NOTFOUND;
+        }
+
+        LTRESULT GetSocketTransform(HOBJECT hObj, HMODELSOCKET hSocket, LTransform& transform,
+                                    LTBOOL bWorldSpace) override
+        {
+            LTIMPL("ILTModel::GetSocketTransform");
+            transform.m_Pos.Init();
+            transform.m_Rot.Init();
+            if (NoServerSockets()) return LT_ERROR;
+            SRec* p = CLTServerObjects::FromHandle(hObj);
+            if (!p) return LT_ERROR;
+            const CLTABCModel* pModel = 0;
+            LTModelPose pose;
+            if (!LTHost_PoseOf(p, pModel, pose)) return LT_ERROR;
+            const std::vector<LTABCSocket>& so = pModel->GetSockets();
+            if ((unsigned)hSocket >= so.size()) return LT_ERROR;
+
+            static const bool bMirror = (getenv("LT_DYNMIRROR") != 0);
+            float S[16];
+            if (!LTModelDraw::SocketTransform(*pModel, pose, so[(unsigned)hSocket].m_sName.c_str(), bMirror, S))
+                return LT_ERROR;
+            float R[16];
+            if (bWorldSpace)
+            {
+                float W[16];
+                LTHost_ObjectFrame(p, *pModel, bMirror, W);
+                LT3D::Multiply(W, S, R);
+            }
+            else memcpy(R, S, sizeof(R));
+            transform.m_Pos.Init(R[3], R[7], R[11]);
+            float q[4];
+            QuatFromRot(R, q);
+            transform.m_Rot.Init(q[0], q[1], q[2], q[3]);
+            {
+                static const char* pNT = getenv("LT_NODETRACE");
+                if (pNT && *pNT && strcasecmp(p->m_sName.c_str(), pNT) == 0)
+                {
+                    printf("[SOCKET] t=%.2f %s socket %-14s %s (%.0f %.0f %.0f)\n", g_fServerTime, p->m_sName.c_str(),
+                           so[(unsigned)hSocket].m_sName.c_str(), bWorldSpace ? "world" : "model", R[3], R[7], R[11]);
+                    fflush(stdout);
+                }
+            }
+            return LT_OK;
+        }
+
         LTRESULT GetNodeTransform(HOBJECT hObj, HMODELNODE hNode, LTransform& transform,
                                   LTBOOL bWorldSpace) override
         {
@@ -2288,6 +2365,27 @@ namespace
             float q[4];
             QuatFromRot(R, q);
             transform.m_Rot.Init(q[0], q[1], q[2], q[3]);
+
+            // LT_NODETRACE=<object name> -- every WORLD-space node the game asks
+            // of that object (the bullets' hit test, CharacterHitBox.cpp:294,
+            // asks every hit node of the skeleton): name, world position and
+            // its offset from the object, with the object's own rotation and
+            // scale (5fb).
+            {
+                static const char* pNT = getenv("LT_NODETRACE");
+                if (pNT && *pNT && bWorldSpace && strcasecmp(p->m_sName.c_str(), pNT) == 0)
+                {
+                    const std::vector<LTABCNode>& nd = pModel->GetNodes();
+                    printf("[NODE] t=%.2f %s node %-18s at (%.0f %.0f %.0f) = obj (%.0f %.0f %.0f) + (%.0f %.0f %.0f)  rot (%.2f %.2f %.2f %.2f) scale %.2f anim %d dims (%.0f %.0f %.0f)\n",
+                           g_fServerTime, p->m_sName.c_str(),
+                           (unsigned)hNode < nd.size() ? nd[(unsigned)hNode].m_sName.c_str() : "?",
+                           R[3], R[7], R[11], p->m_Pos[0], p->m_Pos[1], p->m_Pos[2],
+                           R[3] - p->m_Pos[0], R[7] - p->m_Pos[1], R[11] - p->m_Pos[2],
+                           p->m_Rot[0], p->m_Rot[1], p->m_Rot[2], p->m_Rot[3], p->m_Scale[0], p->m_nAnim,
+                           p->m_Dims[0], p->m_Dims[1], p->m_Dims[2]);
+                    fflush(stdout);
+                }
+            }
 
             // LT_EYETRACE=<object name> -- an AI's EYE as the game derives it.
             // CAIHuman::UpdateNodes takes Head_node's world rotation and passes
@@ -6131,10 +6229,22 @@ namespace
 
             out.sModel = p->m_sFilename;
             out.sSkins.clear();
+            // ⚠️ A `.spr` SKIN AS ITS FRAME OF THE MOMENT (HANDOVER 5fb) -- the
+            // client provider's rule (ltscene.cpp, 5em) for SERVER models too.
+            // The renderer loads a skin as a DTX, so a server Prop skinned with
+            // a sprite drew UNTEXTURED -- solid white: every helicopter's rotor
+            // (Attachments\Spr\Rotorblades.spr) was a white wall behind it,
+            // hiding the chopper and its gunner. LT_NOSERVERSPRSKIN=1 = the raw
+            // name again (says so).
+            static const bool s_bRawSpr = []() {
+                const bool b = (getenv("LT_NOSERVERSPRSKIN") != 0);
+                if (b) { printf("[SERVER] LT_NOSERVERSPRSKIN=1 -- server models get their .spr skin by name (old)\n"); fflush(stdout); }
+                return b; }();
             for (size_t k = 0; k < p->m_Skins.size(); ++k)
             {
                 if (k) out.sSkins += ";";
-                out.sSkins += p->m_Skins[k];
+                out.sSkins += s_bRawSpr ? p->m_Skins[k]
+                                        : LTScene_SpriteFrame(p->m_Skins[k], LTHost_AnimElapsed(p->m_fSprStart) * 1000.0);
             }
             // The record's scale (5em; ScaleObject used to be a stub).
             for (int k = 0; k < 3; ++k)
@@ -6209,9 +6319,9 @@ namespace
                     seen[p] = p->m_nAnim;
                     const float ql = sqrtf(p->m_Rot[0]*p->m_Rot[0] + p->m_Rot[1]*p->m_Rot[1]
                                          + p->m_Rot[2]*p->m_Rot[2] + p->m_Rot[3]*p->m_Rot[3]);
-                    printf("[DYN] %-24s %-44s at (%.0f %.0f %.0f) anim %d |q| %.4f\n",
+                    printf("[DYN] %-24s %-44s at (%.0f %.0f %.0f) anim %d |q| %.4f alpha %.3f op %d\n",
                            p->m_pClass->m_ClassName, p->m_sFilename.c_str(),
-                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], p->m_nAnim, ql);
+                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], p->m_nAnim, ql, out.m_fAlpha, out.m_nBlendOp);
                     fflush(stdout);
                 }
             }
@@ -7367,8 +7477,9 @@ void LTServerHost_Update(float fElapsed)
             g_Objects.FindByName(s_sName.c_str(), v);
             for (size_t i = 0; i < v.size(); ++i)
                 if (SRec* p = CLTServerObjects::FromHandle(v[i] ? v[i]->m_hObject : 0))
-                    printf("[POS] t=%.3f %s (%.1f %.1f %.1f)\n", g_fServerTime, s_sName.c_str(),
-                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2]);
+                    printf("[POS] t=%.3f %s (%.1f %.1f %.1f) dims (%.1f %.1f %.1f) flags 0x%08x anim %d\n", g_fServerTime, s_sName.c_str(),
+                           p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], p->m_Dims[0], p->m_Dims[1], p->m_Dims[2],
+                           (unsigned)p->m_Flags, p->m_nAnim);
             fflush(stdout);
         }
     }

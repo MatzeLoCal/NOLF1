@@ -1042,10 +1042,17 @@ static void LTHost_UpdateFog()
     pW->SetFarZ(fFarZ);
     // ⚠️ MIRRORS (HANDOVER 5de): the game's own "Mirrors" option writes
     // DrawPortals (FolderAdvDisplay.cpp:196) -- and FolderDisplay forces it
-    // to 0 whenever BitDepth is 16. Not set at all = on: the port always
-    // renders 32-bit, which is what the original asks for before it offers
-    // reflections.
-    LTWorldSetMirrors(F("DrawPortals", 1.0f) != 0.0f);
+    // to 0 whenever BitDepth is 16, as a fresh profile's Medium preset does.
+    // ⚠️ ALWAYS ON (user 2026-11-05, DEVIATIONS E-016): the port renders
+    // 32-bit everywhere, so mirrors reflect whatever DrawPortals says.
+    // LT_MIRRORCONSOLE=1 = follow DrawPortals as before (says so).
+    {
+        static const bool s_bConsole = []() {
+            const bool b = (getenv("LT_MIRRORCONSOLE") != 0);
+            if (b) { printf("[LT3D] LT_MIRRORCONSOLE=1 -- mirrors follow DrawPortals (old)\n"); fflush(stdout); }
+            return b; }();
+        LTWorldSetMirrors(s_bConsole ? (F("DrawPortals", 1.0f) != 0.0f) : true);
+    }
     // ⚠️ WORLD ENVIRONMENT MAPS (HANDOVER 5el): the game's "Environment Map"
     // option writes EnvMapWorld (FolderAdvDisplay.cpp:198); d3d.ren registers
     // it at 1. The env coordinates are scaled by DetailTextureScale (autoexec

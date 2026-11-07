@@ -138,6 +138,8 @@ bool LTMirrorsEnabled();
 // ⚠️ DYNAMIC LIGHTS (HANDOVER 5ey): OT_LIGHT objects are made and light the
 // world and models. LT_NODYNLIGHTS=1 = neither (old; announces itself).
 bool LTDynLightsEnabled();
+// The lightmaps' factor (HANDOVER 5fc): 2 under `Saturate`, as d3d.ren draws them.
+float LTLightMapScale();
 
 // ⚠️ THE WORLD'S ENVIRONMENT MAPS (HANDOVER 5el): drawn when the game's
 // "Environment Map" option is on -- console EnvMapWorld (d3d.ren's default 1),
@@ -1112,6 +1114,43 @@ private:
     CLTWorld                                m_World;
     CLTPropTypes                            m_PropTypes;
     const LTWorldModelHeader*               m_pSky;
+    // ⚠️ THE SKY'S OBJECTS (HANDOVER 5fd): every SkyPointer's (and
+    // DemoSkyWorldModel's) world model in sky-index order -- m_pSky is the
+    // first. No world pass draws any of them; the sky pass draws them all,
+    // one over the other, from SkyView's camera.
+    std::vector<const LTWorldModelHeader*>  m_SkyModels;
+    // The sky box's VIEW box (SetSkyDef's m_ViewMin/Max: SkyDims x
+    // InnerPercent around the pointer), when a sky object set one.
+    bool                                    m_bSkyDef = false;
+    float                                   m_SkyViewMin[3] = { 0, 0, 0 };
+    float                                   m_SkyViewMax[3] = { 0, 0, 0 };
+    bool                IsSkyModel(const LTWorldModelHeader* p) const
+    {
+        for (size_t i = 0; i < m_SkyModels.size(); ++i) if (m_SkyModels[i] == p) return true;
+        return false;
+    }
+    // ⚠️ WHERE THE SKY IS SEEN FROM, and its depth range: the camera's place
+    // across the world's extents mapped into the view box (donor
+    // common_draw.cpp d3d_SetupSkyStuff); without a sky box, the first sky
+    // object's centre (the old rule). Near/far cover every sky object.
+    void                SkyView(const float* pEye3, float* pPos3, float* pNear, float* pFar) const;
+    // ⚠️ EACH SKY OBJECT'S DRAWS, in order (5fd): skipped while its object
+    // is invisible or at alpha 0; translucent by its object's alpha as pass 4
+    // draws such a model (kPassAll, the object-alpha textures, ordered);
+    // otherwise its opaque surfaces, then its blended ones. pLocal: its
+    // object's transform, or null. bLast: the model's last draw -- the caller
+    // clears depth then, as the original drew its sky objects without one.
+    struct SkyDraw
+    {
+        const LTWorldModelHeader*       m_pModel;
+        std::vector<const LT3DTexture*> m_Tex;
+        EGeomPass                       m_ePass;
+        bool                            m_bOrdered;
+        bool                            m_bHasLocal;
+        float                           m_Local[16];
+        bool                            m_bLast;
+    };
+    void                SkyDraws(const ILTWorldModelXform* pXform, std::vector<SkyDraw>& out);
     std::map<std::string, CachedTex*>       m_Textures;
     std::map<std::string, CachedModel*>     m_Models;
     // Scratch for BuildOrder, kept across frames so the sort does not allocate.
@@ -1251,6 +1290,24 @@ private:
     int                                     m_nReflW = 0, m_nReflH = 0;
 
     void                BuildMirrors();
+
+    // ⚠️ THE LIGHTMAPS (HANDOVER 5fc): every polygon's map from
+    // CLTWorld::GetLightMapTexels(), packed once per level into one atlas
+    // (RGBA, 2048 wide, a power of two high, each map with a one-texel
+    // border copied from its edge). m_LMAt[model][polygon] = x | y << 16 of
+    // texel (0,0), or ~0u for none. Empty atlas = vertex light, as before.
+    void                BuildLightMapAtlas();
+public:
+    const LT3DTexture*  LightMapAtlas() const { return m_LMAtlas.m_pRGBA ? &m_LMAtlas : 0; }
+private:
+    LT3DTexture                             m_LMAtlas;
+    std::vector<unsigned char>              m_LMAtlasRGBA;
+    std::vector<std::vector<unsigned int> > m_LMAt;
+    // The polygon's lightmap coordinates in the atlas for one corner, or
+    // false (no lightmap: the vertex light is drawn).
+    bool                LightMapUV(const LTWorldModelHeader& M, size_t q,
+                                   const LTWorldPolyVert& pv, float* pU, float* pV) const;
+
     // The mirrors' own walks, the same for both backends: each reflected
     // plane's model, the matrix it is drawn with, its textures and its
     // polygons. bGlass: pass 4's -- BLENDED textures (the object-alpha ones

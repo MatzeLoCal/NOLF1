@@ -118,7 +118,10 @@ struct LTWorldObject
 // check validates the whole preamble.
 struct LTWorldInfo
 {
-    float           m_fUnknown;         // 16/20/24/32 across the shipped set
+    // ⚠️ THE LIGHTMAP GRID (HANDOVER 5fc): world units per lightmap texel.
+    // lithtech.exe reads it into the world (+0xf8) and d3d.ren scales the
+    // lightmap axes by it. 16/20/24/32 across the shipped set.
+    float           m_fLMGridSize;
     float           m_ExtentsMin[3];
     float           m_ExtentsMax[3];
     float           m_TreeMin[3];       // the world tree's root box
@@ -190,20 +193,37 @@ struct LTWorldSurface
     unsigned char   m_Fixed[14];
     std::vector<LTWorldSurfaceEffect> m_Effects;
     unsigned short  m_nTrailing;
+
+    // ⚠️ THE SURFACE'S PLANE (HANDOVER 5fc), the uint16 at offset 2 of the
+    // fixed block: an index into the model's plane array. Its normal equals
+    // the winding's own (Newell) normal for 8,431 of 8,431 M01S01 polygons.
+    // The lightmap's axes are built from it (LTWorldPoly::m_Centre).
+    unsigned short  m_nPlane;
 };
 
-// ⚠️ Per-VERTEX colour -- this is VERTEX LIGHTING, not a lightmap. Unlit
-// brushes are all 255,255,255, which is exactly why "lightmap" was a
-// believable wrong guess.
+// Per-VERTEX colour: the preprocessor's baked vertex light. Unlit brushes are
+// all 255,255,255. ⚠️ NOT THE ONLY LIGHT (HANDOVER 5fc): most polygons also
+// carry a LIGHTMAP, and with lightmaps on (the original's default) it is the
+// lightmap that is drawn -- see LTWorldPoly::m_nLMTexel.
 struct LTWorldPolyVert
 {
     unsigned short  m_nPoint;           // index into the model's point array
     unsigned char   m_RGB[3];
+    // This corner in its polygon's lightmap, in TEXELS: texel (x, y) is
+    // centred at x, y. Set only for a polygon with a lightmap (m_nLMTexel).
+    float           m_LM[2];
 };
 
 struct LTWorldPoly
 {
+    // ⚠️ NOT THE CENTRE: THE LIGHTMAP'S ORIGIN (HANDOVER 5fc) -- the world
+    // point under texel (0, 0). Every corner lies within one grid step of it
+    // along both lightmap axes, which is how it was recognised.
     float           m_Centre[3];
+    // ⚠️ THE LIGHTMAP'S SIZE in texels: width (along P) in the low half,
+    // height (along Q) in the high half -- d3d.ren's pages are at most
+    // MaxLMSize (32). Zero for a polygon with none. The decoded texel count
+    // equals width x height for all 6,010 of M01S01's lightmaps.
     unsigned int    m_nUnknown0;
     unsigned int    m_nIndexWord;       // (polygon index << 16) | ?
 
@@ -212,6 +232,13 @@ struct LTWorldPoly
     unsigned short  m_nSurface;
     unsigned short  m_nUnknown1;
     std::vector<LTWorldPolyVert> m_Verts;
+
+    // ⚠️ THE POLYGON'S LIGHTMAP (HANDOVER 5fc): the first of its
+    // LMWidth() x LMHeight() texels in CLTWorld::GetLightMapTexels(), rows of
+    // width, or -1 when it has none.
+    int             m_nLMTexel = -1;
+    unsigned int    LMWidth() const  { return m_nUnknown0 & 0xFFFFu; }
+    unsigned int    LMHeight() const { return m_nUnknown0 >> 16; }
 };
 
 // One BSP node -- 14 bytes, the v85 record unchanged (de_mainworld.cpp:577).
@@ -347,6 +374,18 @@ public:
     // First object of a given class, or 0.
     const LTWorldObject* FindObjectOfType(const char* pType) const;
 
+    // ⚠️ THE LIGHTMAPS (HANDOVER 5fc) -- the base light animation after the
+    // object list ("LightAnim_BASE"), decoded: X1R5G5B5 texels, each polygon's
+    // a run of LTWorldPoly::LMWidth() x LMHeight() starting at m_nLMTexel.
+    // Empty when the world has none or they could not be read; then every
+    // polygon keeps its vertex light, as before.
+    const std::vector<unsigned short>& GetLightMapTexels() const { return m_LMTexels; }
+    unsigned int        GetNumLightMapped() const { return m_nLightMapped; }
+    // Polygons whose corners fell outside their lightmap by more than half a
+    // texel and were clamped into it -- the axis rule's misses, reported.
+    unsigned int        GetNumLightMapClamped() const { return m_nLightMapClamped; }
+    const char*         GetLightMapError() const { return m_sLMError.c_str(); }
+
 private:
 
     bool                Fail(const char* pWhy);
@@ -354,6 +393,7 @@ private:
     bool                ReadGeometryInfo(const unsigned char* p, unsigned int nSize,
                                          unsigned int nStart);
     void                ParseBody(const unsigned char* p, LTWorldModelHeader& m);
+    void                ReadLightMaps(const unsigned char* p, unsigned int nSize);
 
     bool                        m_bLoaded;
     bool                        m_bGeometry;
@@ -370,6 +410,10 @@ private:
     unsigned int                m_nBlindObjectDataPos;
     std::string                 m_sInfo;
     std::vector<LTWorldObject>  m_Objects;
+    std::vector<unsigned short> m_LMTexels;
+    unsigned int                m_nLightMapped;
+    unsigned int                m_nLightMapClamped;
+    std::string                 m_sLMError;
 };
 
 #endif // __LT_WORLD_H__

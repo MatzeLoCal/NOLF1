@@ -67,6 +67,8 @@ namespace
         v.m_B = Lerp(a.m_B, b.m_B, t);
         v.m_U2 = Lerp(a.m_U2, b.m_U2, t);
         v.m_V2 = Lerp(a.m_V2, b.m_V2, t);
+        v.m_LU = Lerp(a.m_LU, b.m_LU, t);
+        v.m_LV = Lerp(a.m_LV, b.m_LV, t);
         for (int i = 0; i < 3; ++i) v.m_P[i] = Lerp(a.m_P[i], b.m_P[i], t);
         return v;
     }
@@ -83,6 +85,8 @@ namespace
         float u2OverW, v2OverW;     // the env map's coordinates (5el)
         float pOverW[3];            // the position the dynamic lights see (5ey)
         bool  bNoLight;             // at kLT3DNoLightPos: no dynamic light
+        float luOverW, lvOverW;     // the lightmap's coordinates (5fc)
+        bool  bNoLM;                // m_LU < 0: no lightmap
     };
 
     Screen ToScreen(const LT3DVert& v, int w, int h)
@@ -102,6 +106,9 @@ namespace
         s.v2OverW = v.m_V2 * invW;
         s.bNoLight = !(v.m_P[0] < 0.5f * kLT3DNoLightPos);
         for (int i = 0; i < 3; ++i) s.pOverW[i] = s.bNoLight ? 0.0f : v.m_P[i] * invW;
+        s.bNoLM = v.m_LU < 0.0f;
+        s.luOverW = s.bNoLM ? 0.0f : v.m_LU * invW;
+        s.lvOverW = s.bNoLM ? 0.0f : v.m_LV * invW;
         return s;
     }
 
@@ -288,6 +295,9 @@ namespace
             ++LT3D::g_nDynTriTests;
             if (tl.n > 0) ++LT3D::g_nDynTriLit;
         }
+        // The lightmap counts only when all three corners carry one (5fc).
+        const bool bLM = t.m_pLightMap && t.m_pLightMap->m_pRGBA
+                      && !a.bNoLM && !b.bNoLM && !c.bNoLM;
 
         // Bounding box, clamped to the target and to the pixel centres that
         // can actually be covered.
@@ -447,6 +457,21 @@ namespace
                     r = (l0 * p0->rOverW + l1 * p1->rOverW + l2 * p2->rOverW) * w;
                     g = (l0 * p0->gOverW + l1 * p1->gOverW + l2 * p2->gOverW) * w;
                     b = (l0 * p0->bOverW + l1 * p1->bOverW + l2 * p2->bOverW) * w;
+                }
+
+                // ⚠️ THE LIGHTMAP (5fc): the light of a lightmapped polygon,
+                // bilinear like D3D's lightmap stage, perspective-correct --
+                // a shadow edge is geometry and must not swim. Before the
+                // dynamic lights, which add to it.
+                if (bLM)
+                {
+                    const float lu = (l0 * p0->luOverW + l1 * p1->luOverW + l2 * p2->luOverW) * w;
+                    const float lv = (l0 * p0->lvOverW + l1 * p1->lvOverW + l2 * p2->lvOverW) * w;
+                    float lm[4];
+                    SampleLevel(t.m_pLightMap->m_pRGBA, t.m_pLightMap->m_Width,
+                                t.m_pLightMap->m_Height, lu, lv, true, lm);
+                    const float s = t.m_fLightMapScale;
+                    r *= lm[0] * s; g *= lm[1] * s; b *= lm[2] * s;
                 }
 
                 if (tl.n > 0)
