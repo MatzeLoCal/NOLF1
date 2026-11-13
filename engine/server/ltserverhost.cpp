@@ -3120,7 +3120,12 @@ namespace
         // game sets both once (a Prop's Additive in InitialUpdate, a pickup's
         // ScaleObject) and a loaded object gets no InitialUpdate to set them
         // again.
-        const unsigned int nVersion = 10;
+        // ⚠️ VERSION 11 (5fe) appends, after the links, the LIGHT ANIMATIONS'
+        // state: a door or rotating model sets its shadows in its FIRST update
+        // and on moving, and does not save its handles -- a loaded game's door
+        // never sets them again. (Whether lithtech.exe saved them was not
+        // found; without it a loaded level would keep those lights off.)
+        const unsigned int nVersion = 11;
         fwrite(&nVersion, sizeof(nVersion), 1, pF);
         const long nCountAt = ftell(pF);
         unsigned int nSaved = 0;
@@ -3317,6 +3322,22 @@ namespace
             nLinkSaved = nLinks;
         }
 
+        // ---- version 11: the light animations' state, in the level's order -- //
+        {
+            const std::vector<LTWorldLightAnim>& A = LTGetWorldScene()->GetWorld().GetLightAnims();
+            const unsigned int nLA = (unsigned int)A.size();
+            fwrite(&nLA, sizeof(nLA), 1, pF);
+            for (size_t k = 0; k < A.size(); ++k)
+            {
+                fwrite(A[k].m_iFrames, sizeof(unsigned int), 2, pF);
+                fwrite(&A[k].m_fPercentBetween, sizeof(float), 1, pF);
+                fwrite(&A[k].m_fBlendPercent, sizeof(float), 1, pF);
+                fwrite(A[k].m_vLightPos, sizeof(float), 3, pF);
+                fwrite(A[k].m_vLightColor, sizeof(float), 3, pF);
+                fwrite(&A[k].m_fLightRadius, sizeof(float), 1, pF);
+            }
+        }
+
         fseek(pF, nCountAt, SEEK_SET);
         fwrite(&nSaved, sizeof(nSaved), 1, pF);
         fclose(pF);
@@ -3414,10 +3435,14 @@ namespace
         // ⚠️ VERSION 9 IS STILL READ (5em): version 10 only appends FLAG2 and
         // the scale, so a version-9 save loads with what it had before --
         // normal blend, scale 1, until the game sets them.
-        if (nVersion < 5 || nVersion > 10)
+        // ⚠️ VERSION 10 IS STILL READ (5fe): version 11 only appends the light
+        // animations, so an older save loads with them as a fresh level has
+        // them -- the LightFX lamps set themselves every frame; a door's
+        // shadow lights stay off until it moves.
+        if (nVersion < 5 || nVersion > 11)
         {
             fclose(pF);
-            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 10\n",
+            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 11\n",
                    sPath.c_str(), nVersion);
             fflush(stdout);
             return LT_ERROR;
@@ -3646,6 +3671,24 @@ namespace
                 savedLinks.push_back(std::make_pair(o, l));
             }
         }
+        // version 11 (5fe): the light animations' state
+        struct SavedLA { unsigned int iFrames[2]; float fPct, fBlend, pos[3], col[3], fRadius; };
+        std::vector<SavedLA> savedLA;
+        if (nVersion >= 11 && !bTruncated)
+        {
+            unsigned int n = 0;
+            if (fread(&n, sizeof(n), 1, pF) != 1 || n > 65536) bTruncated = true;
+            for (unsigned int k = 0; k < n && !bTruncated; ++k)
+            {
+                SavedLA t;
+                if (fread(t.iFrames, sizeof(unsigned int), 2, pF) != 2
+                    || fread(&t.fPct, sizeof(float), 1, pF) != 1 || fread(&t.fBlend, sizeof(float), 1, pF) != 1
+                    || fread(t.pos, sizeof(float), 3, pF) != 3 || fread(t.col, sizeof(float), 3, pF) != 3
+                    || fread(&t.fRadius, sizeof(float), 1, pF) != 1)
+                { bTruncated = true; break; }
+                savedLA.push_back(t);
+            }
+        }
         fclose(pF);
 
         // ⚠️ A SHORT FILE IS A REFUSAL, not a partial restore. Indices in every
@@ -3696,6 +3739,31 @@ namespace
                              && strcasecmp(sSavedWorld.c_str(), LTWorldScene_Name()) == 0
                              && !g_Objects.HasWorldObjects() && !savedMade.empty();
         if (bLinkWorld) g_Objects.SetWorldMade(savedMade);
+        // ⚠️ The light animations go back only into the SAME level, as the
+        // world link does: a level change's keep-alives carry another world's.
+        unsigned int nLARestored = 0;
+        if (bLinkWorld && !savedLA.empty())
+        {
+            std::vector<LTWorldLightAnim>& A = LTGetWorldScene()->GetLightAnims();
+            if (A.size() == savedLA.size())
+                for (size_t k = 0; k < A.size(); ++k)
+                {
+                    const SavedLA& t = savedLA[k];
+                    LTWorldLightAnim& la = A[k];
+                    la.m_iFrames[0] = t.iFrames[0]; la.m_iFrames[1] = t.iFrames[1];
+                    la.m_fPercentBetween = t.fPct; la.m_fBlendPercent = t.fBlend;
+                    for (int c = 0; c < 3; ++c) { la.m_vLightPos[c] = t.pos[c]; la.m_vLightColor[c] = t.col[c]; }
+                    la.m_fLightRadius = t.fRadius;
+                    ++la.m_nChange;
+                    ++nLARestored;
+                }
+            else
+            {
+                printf("[SERVER] RestoreObjects: %zu light animation(s) saved, the level has %zu -- not restored\n",
+                       savedLA.size(), A.size());
+                fflush(stdout);
+            }
+        }
         unsigned int nLinked = 0;
         unsigned int nAsleep = 0;      // version 7: restored asleep (5cp)
         unsigned int nAnimRestored = 0;    // version 9: an animation set back (5dd)
@@ -4091,6 +4159,11 @@ namespace
         if (nAnimRestored)
         {
             printf("[SERVER] RestoreObjects: %u model(s) given their saved animation back\n", nAnimRestored);
+            fflush(stdout);
+        }
+        if (nLARestored)
+        {
+            printf("[SERVER] RestoreObjects: %u light animation(s) given their saved state back\n", nLARestored);
             fflush(stdout);
         }
 
@@ -5478,6 +5551,7 @@ namespace
             m_pModelLT             = &g_ServerModel;
             m_pPhysicsLT           = &g_ServerPhysics;
             m_pTransformLT         = &g_ServerTransform;
+            m_pLightAnimLT         = LTWorldScene_LightAnimLT();    // the client's too (5fe)
         }
     };
 
@@ -6553,6 +6627,8 @@ namespace
         // already the one loaded.
         if (!LTWorldScene_Load(LTGetFileMgr(), pszWorldFileName))
             return LT_ERROR;
+        // The engine's light-animation table is the level's afresh (5fe).
+        LTWorldScene_ResetLightAnims();
 
         // ⚠️ COLLISION FOR THE NEW LEVEL, built from the SAME scene the client
         // draws -- so what stops an object is exactly what you can see stopping

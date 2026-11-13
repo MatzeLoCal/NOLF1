@@ -50,4 +50,18 @@ bool            LTWorldScene_Load(CLTFileMgr* pFileMgr, const char* pWorldName);
 bool            LTWorldScene_IsLoaded();
 const char*     LTWorldScene_Name();
 
+// ⚠️ THE LIGHT ANIMATIONS' INTERFACE (HANDOVER 5fe) -- ILTLightAnim, ONE for
+// the client and the server. lithtech.exe keeps a table on each and the
+// server sends its changes to the client (0x46d4d0 -> 0x466650); here both
+// sides already share this scene, so they share the table -- the handles the
+// server writes into a LightFX's message are the client's too. The game is
+// told never to drive one animation from both sides, so nothing is lost.
+class ILTLightAnim;
+ILTLightAnim*   LTWorldScene_LightAnimLT();
+// Every animation back to how the world file leaves it (lithtech.exe's
+// constructor: off, blend 1; the base on). The server calls it on every
+// LoadWorld -- the scene is not reloaded for the same level, but the engine's
+// table is, and a door sets its shadows again in its first update.
+void            LTWorldScene_ResetLightAnims();
+
 #endif // __LT_WORLD_SCENE_H__

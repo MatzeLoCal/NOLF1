@@ -462,6 +462,9 @@ int             LTScene_SetObjectPos(void* hObj, float x, float y, float z);
 //
 // ⚠️ The CLIENT's, and that is where the player's movement lives. See the
 // members on LTSceneObject for why there are two sets of these in the engine.
+// Where the object is (zero and false for no object) -- for instruments
+// (LT_JUMPTRACE) that live beside the integrator, not behind ILTClient.
+bool  LTScene_GetObjectPos(void* hObj, float* pPos3);
 bool  LTScene_GetVelocity(void* hObj, float* pV3);
 bool  LTScene_SetVelocity(void* hObj, const float* pV3);
 bool  LTScene_GetAcceleration(void* hObj, float* pA3);

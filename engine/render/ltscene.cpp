@@ -1602,6 +1602,14 @@ void LTScene_DumpPhysCensus()
     fflush(stdout);
 }
 
+bool LTScene_GetObjectPos(void* hObj, float* pPos3)
+{
+    if (!pPos3) return false;
+    LTSceneObject* p = Obj((HLOCALOBJ)hObj);
+    for (int k = 0; k < 3; ++k) pPos3[k] = p ? p->m_Pos[k] : 0.0f;
+    return p != 0;
+}
+
 bool LTScene_GetVelocity(void* hObj, float* pV3)
 {
     if (!pV3) return false;

@@ -906,49 +906,120 @@ public:
             return b; }();
         const bool bGravity = s_bAlways || (LTScene_GetObjectFlags(h) & FLAG_GRAVITY) != 0;
 
-        for (int k = 0; k < 3; ++k)
+        // LT_JUMPTRACE=1 (5ff): one line per spell off the ground -- where it
+        // left, the top, where it came down and how long it took. The player
+        // is the only client object that moves through here every frame.
+        static const bool s_bJumpTrace = (getenv("LT_JUMPTRACE") != 0);
+        if (s_bJumpTrace)
         {
-            float acc = a[k];
-            if (bGravity && (!bGround || k != 1)) acc += g[k];
-            v[k] += acc * dt;
+            static void* s_h = 0;
+            static bool  s_bAir = false;
+            static float s_fGroundY = 0.0f, s_fTop = 0.0f, s_fUpY = 0.0f, s_fUpVel = 0.0f;
+            static float s_fT = 0.0f;
+            static unsigned s_nPrinted = 0;
+            float pos[3];
+            LTScene_GetObjectPos(h, pos);
+            if (h != s_h) { s_h = h; s_bAir = false; s_fGroundY = pos[1]; }
+            if (!bGround)
+            {
+                if (!s_bAir) { s_bAir = true; s_fUpY = s_fGroundY; s_fTop = pos[1]; s_fT = 0.0f; s_fUpVel = v[1]; }
+                if (pos[1] > s_fTop) s_fTop = pos[1];
+                s_fT += dt;
+            }
+            else
+            {
+                if (s_bAir && s_fT > 0.05f && s_nPrinted++ < 40)
+                {
+                    float g[3]; LTServerPhys_GetGlobalForce(g);
+                    printf("[JUMP] off at y %.1f (vel y %.0f, gravity %.0f), top %.1f (+%.1f), down at y %.1f after %.2f s\n",
+                           s_fUpY, s_fUpVel, g[1], s_fTop, s_fTop - s_fUpY, pos[1], s_fT);
+                    fflush(stdout);
+                }
+                s_bAir = false;
+                s_fGroundY = pos[1];
+            }
         }
-        if (bGround && v[1] < 0.0f) v[1] = 0.0f;
 
-        // ⚠️ FRICTION, AND WITHOUT IT THE PLAYER IS ON ICE. The integrator
-        // added acceleration and never took anything away, so velocity only
-        // ever grew and releasing a key left the player coasting. The game
-        // SETS a coefficient for the surface being stood on
-        // (CMoveMgr.cpp:2030) and this port was storing it and ignoring it.
+        // ⚠️ OFF THE FLOOR, LITHTECH.EXE'S OWN STEP (HANDOVER 5ff). CalcMotion
+        // (0x4500d0; the donor's motion.cpp) moves an object that has no
+        // friction by
         //
-        // ⚠️ GROUND ONLY. Damping horizontal motion in mid-air would make
-        // jumps and falls feel like wading, and the game already handles air
-        // control itself.
-        if (bGround)
+        //     offset = v*dt + a*(dt*dt*0.5)*0.5     <- a QUARTER, not a half
+        //     v     += a*dt
+        //
+        // and, standing on a floor, applies gravity IN FULL and no friction
+        // the moment the new velocity would leave it (its "Jump" branch:
+        // (v + F*dt).n > 0.01). This port stepped by the NEW velocity and left
+        // gravity out on the take-off frame: JumpSpeed 550 rose 80.3 units
+        // where lithtech.exe rises 77.9 at 60 fps (85.0 vs 80.0 at 30) -- the
+        // difference between clearing an 79-unit ledge or not. The floor's
+        // normal is taken as straight up: only a jump beats 0.01 against
+        // 2000*dt. On the floor the port's own friction step stays (below).
+        // LT_OLDAIRSTEP=1 = the old step (says so).
+        static const bool s_bOldAir = []() {
+            const bool b = (getenv("LT_OLDAIRSTEP") != 0);
+            if (b) { printf("[PHYS] LT_OLDAIRSTEP=1 -- airborne step by the new velocity, no gravity on the take-off frame (old)\n"); fflush(stdout); }
+            return b; }();
+        const bool bLeaving = !s_bOldAir && bGround && bGravity && (v[1] + g[1] * dt) > 0.01f;
+        if (!s_bOldAir && (!bGround || bLeaving))
         {
-            float fCoeff = 0.0f;
-            GetFrictionCoefficient(pInfo->m_hObject, fCoeff);
-
-            // A sane floor: with no coefficient set yet the player must still
-            // be able to stop. Expressed per second and converted to this
-            // frame, so the feel does not change with frame rate.
-            if (fCoeff <= 0.0f) fCoeff = 5.0f;
-
-            float fDamp = 1.0f - fCoeff * dt;
-            if (fDamp < 0.0f) fDamp = 0.0f;
-            if (fDamp > 1.0f) fDamp = 1.0f;
-
-            v[0] *= fDamp;
-            v[2] *= fDamp;
-
-            // ⚠️ Below a threshold, stop dead. Exponential decay never reaches
-            // zero, and a player drifting at 0.01 units/s never reports as
-            // standing still to anything that asks.
-            if (v[0]*v[0] + v[2]*v[2] < 1.0f) { v[0] = 0.0f; v[2] = 0.0f; }
+            float off[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                float acc = a[k];
+                if (bGravity) acc += g[k];
+                off[k] = v[k] * dt + acc * (dt * dt * 0.5f) * 0.5f;
+                v[k] += acc * dt;
+            }
+            LTScene_SetVelocity(h, v);
+            pInfo->m_Offset.Init(off[0], off[1], off[2]);
         }
+        else
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                float acc = a[k];
+                if (bGravity && (!bGround || k != 1)) acc += g[k];
+                v[k] += acc * dt;
+            }
+            if (bGround && v[1] < 0.0f) v[1] = 0.0f;
 
-        LTScene_SetVelocity(h, v);
+            // ⚠️ FRICTION, AND WITHOUT IT THE PLAYER IS ON ICE. The integrator
+            // added acceleration and never took anything away, so velocity only
+            // ever grew and releasing a key left the player coasting. The game
+            // SETS a coefficient for the surface being stood on
+            // (CMoveMgr.cpp:2030) and this port was storing it and ignoring it.
+            //
+            // ⚠️ GROUND ONLY. Damping horizontal motion in mid-air would make
+            // jumps and falls feel like wading, and the game already handles air
+            // control itself.
+            if (bGround)
+            {
+                float fCoeff = 0.0f;
+                GetFrictionCoefficient(pInfo->m_hObject, fCoeff);
 
-        pInfo->m_Offset.Init(v[0] * dt, v[1] * dt, v[2] * dt);
+                // A sane floor: with no coefficient set yet the player must still
+                // be able to stop. Expressed per second and converted to this
+                // frame, so the feel does not change with frame rate.
+                if (fCoeff <= 0.0f) fCoeff = 5.0f;
+
+                float fDamp = 1.0f - fCoeff * dt;
+                if (fDamp < 0.0f) fDamp = 0.0f;
+                if (fDamp > 1.0f) fDamp = 1.0f;
+
+                v[0] *= fDamp;
+                v[2] *= fDamp;
+
+                // ⚠️ Below a threshold, stop dead. Exponential decay never reaches
+                // zero, and a player drifting at 0.01 units/s never reports as
+                // standing still to anything that asks.
+                if (v[0]*v[0] + v[2]*v[2] < 1.0f) { v[0] = 0.0f; v[2] = 0.0f; }
+            }
+
+            LTScene_SetVelocity(h, v);
+
+            pInfo->m_Offset.Init(v[0] * dt, v[1] * dt, v[2] * dt);
+        }
 
         if (getenv("LT_PHYSTRACE"))
         {
@@ -1176,7 +1247,7 @@ public:
         m_pPhysicsLT   = &m_physics;
         m_pModelLT     = &m_model;
         m_pTransformLT = &m_transform;
-        m_pLightAnimLT = &m_lightAnim;
+        m_pLightAnimLT = LTWorldScene_LightAnimLT();     // shared with the server (5fe)
         m_pSoundMgr    = &m_soundMgr;
 
         // ⚠️ AND the 208 function-pointer MEMBERS. These are not virtuals, so
@@ -1881,7 +1952,6 @@ private:
         }
     };
     HostTransform             m_transform;
-    LTStub_ILTLightAnim       m_lightAnim;
 public:
     // The host needs it to start the device and push the listener; the GAME
     // only ever sees it through ILTClient::m_pSoundMgr.

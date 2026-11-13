@@ -27,10 +27,37 @@ typedef CLTServerObjects::Record SRec;
 namespace
 {
 
-    // ⚠️ NOLF's own default, not a guess: `PhysicsLT::SetGlobalForce` is fed
-    // from WorldProperties, and a level that does not set one gets this. Y is
-    // up in this world, so gravity is negative Y.
-    float g_Force[3] = { 0.0f, -1000.0f, 0.0f };
+    // ⚠️ GRAVITY IS -2000, AND IT WAS -1000 FOR TWO MONTHS (HANDOVER 5ff).
+    // lithtech.exe builds the client's and the server's MotionInfo with
+    // (0, -2000, 0) and slide ratio -0.7071 (0x410aa2 and 0x4135ec: push 0,
+    // 0xc4fa0000, 0; then SetForce 0x410e20), the donor's motion.h says the
+    // same, and nothing in NOLF ever sets another: WorldProperties has no
+    // gravity property and no ObjectDLL code calls SetGlobalForce. The old
+    // comment here claimed -1000 was "NOLF's own default"; it was a guess.
+    //
+    // ⚠️ THE PLAYER JUMPED TWICE AS HIGH. CPlayerObj sends this value
+    // (PSTATE_GRAVITY, PlayerObj.cpp:1583) and CMoveMgr makes it its own
+    // m_fGravity (CMoveMgr.cpp:2091), so JumpSpeed 550 rose 156 units in 1.1 s
+    // instead of ~78 in 0.57 s. Every FLAG_GRAVITY server object -- bodies,
+    // dropped pickups, thrown grenades -- fell at half speed with it.
+    //
+    // LT_OLDGRAVITY=1 = the old -1000 (says so; see DefaultForce below).
+    float g_Force[3] = { 0.0f, -2000.0f, 0.0f };
+
+    // Applies LT_OLDGRAVITY before the first read or write of g_Force, so the
+    // game's own SetGlobalForce still wins over the default.
+    void DefaultForce()
+    {
+        static bool s_bDone = false;
+        if (s_bDone) return;
+        s_bDone = true;
+        if (getenv("LT_OLDGRAVITY"))
+        {
+            g_Force[0] = 0.0f; g_Force[1] = -1000.0f; g_Force[2] = 0.0f;
+            printf("[PHYS] LT_OLDGRAVITY=1 -- world gravity -1000 (old; lithtech.exe: -2000)\n");
+            fflush(stdout);
+        }
+    }
 
     // CCharacter sets 24; the engine default before anyone sets one.
     float g_fStairHeight = 24.0f;
@@ -219,6 +246,7 @@ void LTServerPhys_TeleportTo(void* hObj, const float* pPos3)
 void LTServerPhys_Update(float fDelta)
 {
     if (fDelta <= 0.0f) return;
+    DefaultForce();
 
     // ⚠️ CLAMPED. A frame that stalled -- a texture decode, a breakpoint, a
     // level load -- would otherwise integrate a single step across the level
@@ -651,12 +679,14 @@ bool LTServerPhys_RayTestFiltered(const float* pFrom3, const float* pTo3,
 void LTServerPhys_SetGlobalForce(const float* pF3)
 {
     if (!pF3) return;
+    DefaultForce();
     for (int k = 0; k < 3; ++k) g_Force[k] = pF3[k];
 }
 
 void LTServerPhys_GetGlobalForce(float* pF3)
 {
     if (!pF3) return;
+    DefaultForce();
     for (int k = 0; k < 3; ++k) pF3[k] = g_Force[k];
 }
 

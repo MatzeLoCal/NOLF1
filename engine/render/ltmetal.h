@@ -107,6 +107,15 @@ unsigned int LTMetal_CreateTexture(const unsigned char* const* ppLevels,
                                    const int* pW, const int* pH, int nLevels,
                                    bool bCutout = false, float fAlphaRef = 0.5f);
 
+// ⚠️ A RECTANGLE OF A TEXTURE, REPLACED ON THE GPU'S TIMELINE (HANDOVER 5fe):
+// the bytes (RGBA8, nStride bytes a row) are copied now, and the copy into
+// mip level 0 is encoded ahead of the NEXT frame's render encoder -- after
+// every earlier frame's reads of the texture, before this one's. For a
+// texture the frames in flight still read (the lightmap atlas while lights
+// switch); a CPU replaceRegion there would race them.
+void LTMetal_UpdateTextureRegion(unsigned int nTexture, int x, int y, int w, int h,
+                                 const unsigned char* pRGBA, int nStride);
+
 // ---- drawing --------------------------------------------------------- //
 
 // One vertex, matching the layout the shader declares.

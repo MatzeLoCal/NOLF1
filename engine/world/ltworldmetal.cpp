@@ -426,6 +426,36 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     CPassTimer pt;                  // LT_PASSTIME=1
     UpdateAnimatedSurfaces();       // `.spr` surfaces to the frame of the moment (5em)
 
+    // ⚠️ THE SWITCHED LIGHTS INTO THE ATLAS (HANDOVER 5fe), and their
+    // rectangles to the GPU copy BEFORE the frame begins: the Begin call opens
+    // the frame's render encoder, and LTMetal_UpdateTextureRegion's copies are
+    // encoded ahead of it, on the GPU's own timeline. Written straight into the
+    // texture instead, they would race the frames still in flight, which read
+    // the same atlas.
+    if (!m_bReflecting)
+    {
+        UpdateLightAnims();
+        std::map<const LT3DTexture*, unsigned int>::const_iterator h =
+            m_LMAtlas.m_pRGBA ? m_MetalTex.find(&m_LMAtlas) : m_MetalTex.end();
+        if (h != m_MetalTex.end() && h->second)
+        {
+            const int W = m_LMAtlas.m_Width;
+            if (m_bLARectsAll)
+                LTMetal_UpdateTextureRegion(h->second, 0, 0, W, m_LMAtlas.m_Height, &m_LMAtlasRGBA[0], W * 4);
+            else
+                for (size_t k = 0; k + 1 < m_LARects.size(); k += 2)
+                {
+                    const int x = (int)(m_LARects[k] & 0xFFFFu), y = (int)(m_LARects[k] >> 16);
+                    const int w = (int)(m_LARects[k + 1] & 0xFFFFu), hh = (int)(m_LARects[k + 1] >> 16);
+                    LTMetal_UpdateTextureRegion(h->second, x, y, w, hh,
+                                                &m_LMAtlasRGBA[((size_t)y * W + x) * 4], W * 4);
+                }
+        }
+        // No GPU copy yet: its creation uploads the atlas as it now is.
+        m_LARects.clear();
+        m_bLARectsAll = false;
+    }
+
     // The camera's up -- reflected inside a mirror's pass (HANDOVER 5de).
     const float up[3] = { m_CamUp[0], m_CamUp[1], m_CamUp[2] };
     const float fAspect = (float)nWidth / (float)(nHeight ? nHeight : 1);

@@ -225,7 +225,7 @@ struct LTWorldPoly
     // MaxLMSize (32). Zero for a polygon with none. The decoded texel count
     // equals width x height for all 6,010 of M01S01's lightmaps.
     unsigned int    m_nUnknown0;
-    unsigned int    m_nIndexWord;       // (polygon index << 16) | ?
+    unsigned int    m_nIndexWord;       // surface << 16 | the last light-animation entry's index (5fe)
 
     // ⚠️ Index into the model's surface array, and every one of 185,634
     // polygons across 12 worlds is in range -- none had to be clamped.
@@ -239,6 +239,52 @@ struct LTWorldPoly
     int             m_nLMTexel = -1;
     unsigned int    LMWidth() const  { return m_nUnknown0 & 0xFFFFu; }
     unsigned int    LMHeight() const { return m_nUnknown0 >> 16; }
+
+    // ⚠️ THE LIGHT ANIMATIONS ON THIS POLYGON (HANDOVER 5fe): v62's "poly
+    // animref list" after the lightmap size, in file order -- the order
+    // d3d.ren adds them in, the base first. Each is the animation's index in
+    // CLTWorld::GetLightAnims() (low half) | this polygon's index in that
+    // animation's list (high half). See the parse for its real shape.
+    std::vector<unsigned int> m_LMRefs;
+    // The lightmap's unit axes, P (along the width) then Q, as the
+    // placement worked them out: texel (x, y) lies at
+    // m_Centre + (x P + y Q) x the grid. Set with m_nLMTexel.
+    float           m_LMAxes[6] = { 0, 0, 0, 0, 0, 0 };
+};
+
+// ⚠️ ONE LIGHT ANIMATION (HANDOVER 5fe), from the block after the object
+// list. The first is LightAnim_BASE, the static light; the others are the
+// lights the game switches, flickers or moves -- a LightFX's "<name>__LA", a
+// door's or a rotating model's shadows, a keyframed light -- whose light is
+// NOT in the base map. Each has nFrames maps per polygon: 16-bit X1R5G5B5
+// texels, or for a SHADOW-MAPPED animation one byte per texel (0 or 255,
+// the light's visibility), lit at run time from the light's position,
+// colour and radius.
+struct LTWorldLightAnim
+{
+    std::string     m_sName;
+    bool            m_bShadowMap = false;
+    unsigned int    m_nFrames = 0;
+    // model | polygon << 16, per entry of this animation.
+    std::vector<unsigned int> m_Polys;
+    // m_First[frame * m_Polys.size() + i]: the first texel of that map in
+    // GetLightAnimTexels() (16-bit) or GetLightAnimShadows() (shadow-mapped),
+    // or -1 when its polygon has no lightmap. Frame 0 of the base points into
+    // GetLightMapTexels() instead -- the same as LTWorldPoly::m_nLMTexel.
+    std::vector<int> m_First;
+
+    // ---- the run-time state the game sets (ILTLightAnim's LAInfo) -------- //
+    // lithtech.exe's constructor (0x422240): both frames NONE, blend 1, the
+    // rest zero; the loader then sets the base's frames to 0.
+    unsigned int    m_iFrames[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+    float           m_fPercentBetween = 0.0f;
+    float           m_fBlendPercent = 1.0f;
+    float           m_vLightPos[3] = { 0, 0, 0 };
+    float           m_vLightColor[3] = { 0, 0, 0 };    // 0-255
+    float           m_fLightRadius = 0.0f;
+    // Bumped on every SetLightAnimInfo: the renderer rebuilds this
+    // animation's polygons when it differs from what it last drew.
+    unsigned int    m_nChange = 0;
 };
 
 // One BSP node -- 14 bytes, the v85 record unchanged (de_mainworld.cpp:577).
@@ -386,6 +432,20 @@ public:
     unsigned int        GetNumLightMapClamped() const { return m_nLightMapClamped; }
     const char*         GetLightMapError() const { return m_sLMError.c_str(); }
 
+    // ⚠️ THE LIGHT ANIMATIONS (HANDOVER 5fe), the base first; empty when the
+    // lightmaps could not be read. The state fields are the game's to set
+    // (through ILTLightAnim) -- hence the non-const access.
+    std::vector<LTWorldLightAnim>&       GetLightAnims()       { return m_LightAnims; }
+    const std::vector<LTWorldLightAnim>& GetLightAnims() const { return m_LightAnims; }
+    const std::vector<unsigned short>&   GetLightAnimTexels() const { return m_LATexels; }
+    const std::vector<unsigned char>&    GetLightAnimShadows() const { return m_LAShadows; }
+    // Index of the animation of that name (case-insensitive, as the engine's
+    // FindLightAnim), or -1.
+    int                 FindLightAnim(const char* pName) const;
+    // Polygon entries whose own animation list (LTWorldPoly::m_LMRefs) did
+    // not agree with the animations' polygon lists -- reported, 0 measured.
+    unsigned int        GetNumLightAnimRefMismatches() const { return m_nLARefMismatch; }
+
 private:
 
     bool                Fail(const char* pWhy);
@@ -414,6 +474,10 @@ private:
     unsigned int                m_nLightMapped;
     unsigned int                m_nLightMapClamped;
     std::string                 m_sLMError;
+    std::vector<LTWorldLightAnim> m_LightAnims;
+    std::vector<unsigned short> m_LATexels;
+    std::vector<unsigned char>  m_LAShadows;
+    unsigned int                m_nLARefMismatch;
 };
 
 #endif // __LT_WORLD_H__

@@ -972,6 +972,63 @@ unsigned int LTMetal_CreateTexture(const unsigned char* const* ppLevels,
 }
 
 
+// ---- REGIONS OF A TEXTURE, COPIED ON THE GPU'S TIMELINE (HANDOVER 5fe) ---- //
+namespace
+{
+    struct PendingRegion { unsigned int m_nTex; int m_X, m_Y, m_W, m_H; size_t m_nAt; };
+    std::vector<PendingRegion> g_PendingRegions;
+    std::vector<unsigned char> g_PendingBytes;
+
+    // Every queued region as a blit into cmd, AHEAD of the render encoder the
+    // caller opens next: the queue runs it after every earlier frame's reads
+    // of the texture and before this frame's. (replaceRegion from the CPU
+    // would race the frames still in flight.)
+    void FlushPendingRegions(id<MTLCommandBuffer> cmd)
+    {
+        if (g_PendingRegions.empty() || !cmd) return;
+        @autoreleasepool
+        {
+            id<MTLBuffer> b = [g_Device newBufferWithBytes:g_PendingBytes.data()
+                                                    length:g_PendingBytes.size()
+                                                   options:MTLResourceStorageModeShared];
+            id<MTLBlitCommandEncoder> be = b ? [cmd blitCommandEncoder] : nil;
+            for (size_t i = 0; be && i < g_PendingRegions.size(); ++i)
+            {
+                const PendingRegion& r = g_PendingRegions[i];
+                if (r.m_nTex >= g_Textures.size()) continue;
+                id<MTLTexture> t = g_Textures[r.m_nTex];
+                if (!t || r.m_X < 0 || r.m_Y < 0
+                    || (NSUInteger)(r.m_X + r.m_W) > [t width] || (NSUInteger)(r.m_Y + r.m_H) > [t height]) continue;
+                [be copyFromBuffer:b
+                      sourceOffset:(NSUInteger)r.m_nAt
+                 sourceBytesPerRow:(NSUInteger)r.m_W * 4
+               sourceBytesPerImage:(NSUInteger)r.m_W * 4 * (NSUInteger)r.m_H
+                        sourceSize:MTLSizeMake((NSUInteger)r.m_W, (NSUInteger)r.m_H, 1)
+                         toTexture:t
+                  destinationSlice:0
+                  destinationLevel:0
+                 destinationOrigin:MTLOriginMake((NSUInteger)r.m_X, (NSUInteger)r.m_Y, 0)];
+            }
+            if (be) [be endEncoding];
+        }
+        g_PendingRegions.clear();
+        g_PendingBytes.clear();
+    }
+}
+
+void LTMetal_UpdateTextureRegion(unsigned int nTexture, int x, int y, int w, int h,
+                                 const unsigned char* pRGBA, int nStride)
+{
+    if (!g_Device || !pRGBA || w <= 0 || h <= 0 || nTexture == 0 || nTexture >= g_Textures.size()) return;
+    const size_t at = g_PendingBytes.size();
+    g_PendingBytes.resize(at + (size_t)w * h * 4);
+    for (int r = 0; r < h; ++r)
+        memcpy(&g_PendingBytes[at + (size_t)r * w * 4], pRGBA + (size_t)r * nStride, (size_t)w * 4);
+    PendingRegion pr = { nTexture, x, y, w, h, at };
+    g_PendingRegions.push_back(pr);
+}
+
+
 bool LTMetal_BeginOffscreen(int nWidth, int nHeight, float fR, float fG, float fB)
 {
     // ⚠️ Does NOT need a layer, so it works before -- or entirely without --
@@ -1012,6 +1069,7 @@ bool LTMetal_BeginOffscreen(int nWidth, int nHeight, float fR, float fG, float f
         if (!EnsureDepth(nWidth, nHeight)) { Fail("offscreen depth failed"); return false; }
 
         g_Cmd = [g_Queue commandBuffer];
+        FlushPendingRegions(g_Cmd);         // before the frame's encoder (5fe)
 
         MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
         g_ColourTarget = g_OffTex;
@@ -1076,6 +1134,7 @@ bool LTMetal_BeginFrame(float fR, float fG, float fB)
     if (!EnsureDepth(w, h)) { g_Drawable = nil; return false; }
 
     g_Cmd = [g_Queue commandBuffer];
+    FlushPendingRegions(g_Cmd);             // before the frame's encoder (5fe)
 
     MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
     g_ColourTarget = [g_Drawable texture];
@@ -2378,6 +2437,7 @@ bool LTMetal_BeginScene(int nOutW, int nOutH, int vx, int vy, int vw, int vh, bo
 
         g_Cmd = g_FrameCmd;
         g_ColourTarget = g_SceneTex;
+        FlushPendingRegions(g_Cmd);         // before the frame's encoder (5fe)
         g_Enc = [g_Cmd renderCommandEncoderWithDescriptor:rp];
         [g_Enc setRenderPipelineState:(g_ScenePipes[0] ? g_ScenePipes[0] : g_Pipe)];
         [g_Enc setDepthStencilState:g_Depth];

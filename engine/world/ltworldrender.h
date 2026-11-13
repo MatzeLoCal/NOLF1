@@ -666,6 +666,9 @@ public:
                                     const ILTWorldModelXform* pXform = 0);
 
     const CLTWorld&     GetWorld() const { return m_World; }
+    // The light animations' run-time state is the one thing the game writes
+    // here (ILTLightAnim, ltworldscene.cpp -- HANDOVER 5fe).
+    std::vector<LTWorldLightAnim>& GetLightAnims() { return m_World.GetLightAnims(); }
 
     // ⚠️ THE SURFACE TYPE OF A POLYGON -- what ILTServer/ILTClient::
     // GetPolyTextureFlags answer. It is the DTX's user-flags byte of the
@@ -1307,6 +1310,36 @@ private:
     // false (no lightmap: the vertex light is drawn).
     bool                LightMapUV(const LTWorldModelHeader& M, size_t q,
                                    const LTWorldPolyVert& pv, float* pU, float* pV) const;
+    // One map into the atlas at `at` (x | y << 16 of its border's corner),
+    // X1R5G5B5 widened by bit replication, the border repeating the edge.
+    void                WriteAtlasMap(unsigned int at, int w, int h, const unsigned short* pTexels);
+
+    // ⚠️ THE LIGHT ANIMATIONS (HANDOVER 5fe): the lights the game switches,
+    // flickers or moves are NOT in the base map. d3d.ren rebuilds a polygon's
+    // lightmap from every animation on it (0x1006be50) -- the base copied,
+    // each other one that is on added x its blend, saturating per 5-bit
+    // channel -- and a SHADOW-MAPPED one is lit first from the light's
+    // position, colour and radius (0x1006b500). Same here, into the atlas,
+    // whenever an animation's state changed (CLTWorld's m_nChange).
+    // LT_NOLMANIM=1 = the base light only (old); says so.
+public:
+    // Once per frame, before either backend draws.
+    void                UpdateLightAnims();
+private:
+    void                BuildLightAnims();
+    void                ComposeLightMap(const LTWorldPoly& po, unsigned short* pOut) const;
+    struct LAPoly { unsigned int m_nModel, m_nPoly, m_nAt; };
+    std::vector<LAPoly>                     m_LAPolys;      // every polygon a non-base animation lights
+    std::vector<std::vector<unsigned int> > m_LAPolysOf;    // per animation, indices into m_LAPolys
+    std::vector<unsigned int>               m_LASeen;       // per animation, the m_nChange last drawn
+    std::vector<unsigned char>              m_LADirty;      // per m_LAPolys entry
+    // The atlas rectangles changed since the GPU copy last caught up
+    // (x | y << 16, then w | h << 16), or all of it; the Metal pass takes them.
+    std::vector<unsigned int>               m_LARects;
+    bool                                    m_bLARectsAll = false;
+    float                                   m_fLASat = -1.0f;
+    unsigned int                            m_LAAtten[64];
+    unsigned int                            m_nLAComposed = 0;  // polygons rebuilt, for LT_LATRACE
 
     // The mirrors' own walks, the same for both backends: each reflected
     // plane's model, the matrix it is drawn with, its textures and its

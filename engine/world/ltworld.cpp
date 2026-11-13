@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 
 namespace
 {
@@ -156,6 +157,10 @@ void CLTWorld::Clear()
     m_LMTexels.clear();
     m_nLightMapped = m_nLightMapClamped = 0;
     m_sLMError.clear();
+    m_LightAnims.clear();
+    m_LATexels.clear();
+    m_LAShadows.clear();
+    m_nLARefMismatch = 0;
 }
 
 bool CLTWorld::Fail(const char* pWhy)
@@ -396,12 +401,14 @@ void CLTWorld::ParseBody(const unsigned char* p, LTWorldModelHeader& m)
         // produced ground truth for one model (5,049 polygons), and the rule
         // above reproduces it exactly -- then reproduces every other model too.
         unsigned int nExtra = 0;
+        std::vector<unsigned int> extra;
         if (po.m_nUnknown0 != 0)
         {
             nExtra = r.U32();
             if (r.Bad() || nExtra == 0 || nExtra > 64)
             { m.m_Planes.clear(); m.m_Surfaces.clear(); m.m_Polys.clear(); return; }
-            r.Skip(4 * (nExtra - 1));
+            extra.resize(nExtra - 1);
+            for (unsigned int k = 0; k + 1 < nExtra; ++k) extra[k] = r.U32();
         }
         nExtraTotal += nExtra;
 
@@ -411,6 +418,27 @@ void CLTWorld::ParseBody(const unsigned char* p, LTWorldModelHeader& m)
         po.m_nIndexWord = r.U32();
         po.m_nSurface   = (unsigned short)(po.m_nIndexWord >> 16);
         po.m_nUnknown1  = r.U16();
+
+        // ⚠️ THE ENTRIES ARE THE POLYGON'S LIGHT ANIMATIONS (HANDOVER 5fe), and
+        // the uint32 reading above is TWO BYTES OFF their real shape: a uint16
+        // count, then count x { uint16 animation, uint16 index in its list },
+        // the base first. So the "count" word carries the first animation in
+        // its high half, every entry an index (low) and the NEXT animation
+        // (high), and the low half of the index word -- the "0,1,2,..." -- is
+        // the LAST entry's index: for most polygons their place in the base's
+        // list. Measured: every polygon entry of every animation in the 100
+        // shipped worlds is found this way (GetNumLightAnimRefMismatches).
+        if (nExtra)
+        {
+            po.m_LMRefs.resize(nExtra);
+            unsigned int nAnim = nExtra >> 16;
+            for (unsigned int k = 0; k < nExtra; ++k)
+            {
+                const unsigned int w = (k + 1 < nExtra) ? extra[k] : po.m_nIndexWord;
+                po.m_LMRefs[k] = nAnim | ((w & 0xFFFFu) << 16);
+                nAnim = w >> 16;
+            }
+        }
 
         if (po.m_nSurface >= m.m_nSurfaces)
         { m.m_Planes.clear(); m.m_Surfaces.clear(); m.m_Polys.clear(); return; }
@@ -1026,17 +1054,18 @@ bool CLTWorld::LoadThroughFileMgr(CLTFileMgr* pFileMgr, const char* pName)
 // second position (named "blind object data" here after v85), as v61's
 // LIGHTMAP ANIMATIONS (the donor packer's version history, PCWorldPacker.cpp):
 //
-//     uint32 ?, nAnims, ?, ?, ?
+//     uint32 nPolyEntries, nFrames (all anims), nDataBytes, nFrameEntries,
+//            nAnims
 //     per anim: uint16-counted name, uint32 flags, uint32 nFrames,
 //               uint32 nPolies, nPolies x { uint16 model, uint16 polygon },
 //               nFrames x nPolies x { uint32 nBytes, nBytes of RLE }
 //
 // The first anim is "LightAnim_BASE", the static light, one frame. Its RLE is
 // 16-bit: a texel with the top bit set is a run whose count is the next byte,
-// otherwise one X1R5G5B5 texel. The decoded count equals the polygon's
-// width x height for every lightmap of M01S01 and M16S01. The other anims
-// (the lamps a LightFX flickers or switches, flags 1) are coded differently
-// and are NOT read yet.
+// otherwise one X1R5G5B5 texel. The others (HANDOVER 5fe) are the lights the
+// game drives; flags 1 = SHADOW-MAPPED, one byte of visibility per texel
+// coded as alternating run lengths. The decoded count equals the polygon's
+// width x height for all 885,373 maps of the 100 shipped worlds.
 //
 // ⚠️ PLACEMENT, d3d.ren's rule (0x1006b310, the texel walk): texel (0,0) sits
 // on the polygon's stored "centre"; one texel per m_fLMGridSize units along
@@ -1079,114 +1108,210 @@ void CLTWorld::ReadLightMaps(const unsigned char* p, unsigned int nSize)
     m_LMTexels.clear();
     m_nLightMapped = m_nLightMapClamped = 0;
     m_sLMError.clear();
+    m_LightAnims.clear();
+    m_LATexels.clear();
+    m_LAShadows.clear();
+    m_nLARefMismatch = 0;
     if (getenv("LT_NOLIGHTMAPS")) { m_sLMError = "LT_NOLIGHTMAPS"; return; }
     const float G = m_Info.m_fLMGridSize;
     if (!m_bGeometry || !(G > 0.0f)) { m_sLMError = "no geometry"; return; }
     if (m_nBlindObjectDataPos == 0 || m_nBlindObjectDataPos + 20 > nSize)
     { m_sLMError = "no light animations"; return; }
 
+    // ⚠️ THE HEADER'S COUNTS (lithtech.exe 0x4250e0 sizes its arrays by them):
+    // the polygon entries over all animations, their FRAMES, the data bytes,
+    // the frame x polygon entries, and only then the number of animations.
+    // The second word is the frame count, not the animation count -- they
+    // agree only while every animation has one frame (M01S03's 3-frame blinds:
+    // 4 frames, 2 animations).
     Reader r(p, nSize, m_nBlindObjectDataPos);
-    (void)r.U32();
+    (void)r.U32(); (void)r.U32(); (void)r.U32(); (void)r.U32();
     const unsigned int nAnims = r.U32();
-    (void)r.U32(); (void)r.U32(); (void)r.U32();
     if (r.Bad() || nAnims == 0) { m_sLMError = "no light animations"; return; }
 
-    const std::string sName = r.Str();
-    (void)r.U32();                                  // flags: 0 for the base
-    const unsigned int nFrames = r.U32();
-    const unsigned int nPolies = r.U32();
-    if (r.Bad() || strcasecmp(sName.c_str(), "LightAnim_BASE") != 0 || nFrames == 0
-        || !r.CountFits(nPolies, 4))
-    { m_sLMError = "first light animation is not LightAnim_BASE"; return; }
-
-    std::vector<std::pair<unsigned int, unsigned int> > refs(nPolies);
-    for (unsigned int i = 0; i < nPolies; ++i)
+    std::vector<LTWorldLightAnim> anims;
+    std::vector<unsigned short> texels, laTexels;
+    std::vector<unsigned char> laShadows;
+    std::string sAnimError;
+    for (unsigned int a = 0; a < nAnims && sAnimError.empty(); ++a)
     {
-        refs[i].first  = r.U16();
-        refs[i].second = r.U16();
-    }
+        LTWorldLightAnim la;
+        la.m_sName = r.Str();
+        la.m_bShadowMap = r.U32() != 0;     // d3d.ren: nonzero = lit at run time
+        la.m_nFrames = r.U32();
+        const unsigned int nPolies = r.U32();
+        if (a == 0 && (r.Bad() || strcasecmp(la.m_sName.c_str(), "LightAnim_BASE") != 0
+                       || la.m_nFrames == 0 || la.m_bShadowMap || !r.CountFits(nPolies, 4)))
+        { m_sLMError = "first light animation is not LightAnim_BASE"; return; }
+        if (r.Bad() || !r.CountFits(nPolies, 4) || la.m_nFrames > 256)
+        { sAnimError = "light animation " + la.m_sName + ": bad header"; break; }
 
-    std::vector<LTWorldPoly*> polys(nPolies, (LTWorldPoly*)0);
-    for (unsigned int i = 0; i < nPolies; ++i)
-    {
-        if (refs[i].first >= m_Models.size()) continue;
-        LTWorldModelHeader& m = m_Models[refs[i].first];
-        if (!m.m_bBodyParsed || refs[i].second >= m.m_Polys.size()) continue;
-        polys[i] = &m.m_Polys[refs[i].second];
-    }
-
-    // ---- frame 0: decode every polygon's map --------------------------- //
-    std::vector<unsigned short> texels;
-    std::vector<int> first(nPolies, -1);
-    for (unsigned int i = 0; i < nPolies; ++i)
-    {
-        const unsigned int nBytes = r.U32();
-        const unsigned int nEnd = r.Tell() + nBytes;
-        if (r.Bad() || nEnd > nSize) { m_sLMError = "lightmap data runs past the end of the file"; return; }
-        const int nAt = (int)texels.size();
-        while (r.Tell() + 2 <= nEnd)
+        la.m_Polys.resize(nPolies);
+        std::vector<LTWorldPoly*> polys(nPolies, (LTWorldPoly*)0);
+        for (unsigned int i = 0; i < nPolies; ++i)
         {
-            unsigned int v = r.U16();
-            unsigned int n = 1;
-            if (v & 0x8000u) { n = (r.Tell() < nEnd) ? r.U8() : 0; v &= 0x7FFFu; }
-            texels.insert(texels.end(), n, (unsigned short)v);
+            const unsigned int m = r.U16(), q = r.U16();
+            la.m_Polys[i] = m | (q << 16);
+            if (m >= m_Models.size()) continue;
+            LTWorldModelHeader& M = m_Models[m];
+            if (!M.m_bBodyParsed || q >= M.m_Polys.size()) continue;
+            polys[i] = &M.m_Polys[q];
         }
-        if (r.Tell() != nEnd)
-        { m_sLMError = "a lightmap's RLE does not end on its length"; return; }
-        LTWorldPoly* po = polys[i];
-        if (!po) { texels.resize((size_t)nAt); continue; }
-        if (texels.size() - (size_t)nAt != (size_t)po->LMWidth() * po->LMHeight())
+
+        // ---- every frame of every polygon, decoded ---------------------- //
+        //
+        // 16-bit (d3d.ren 0x1006a790): a uint16 texel; the top bit set = a run
+        // whose count is the next byte, otherwise one X1R5G5B5 texel.
+        // ⚠️ SHADOW-MAPPED (0x1006a800) IS SOMETHING ELSE: every byte is a RUN
+        // LENGTH, the runs alternating unlit (0) and lit (255), unlit first --
+        // "00 06" is a 6-texel map all lit, "ff 00 45" a run of 300. The
+        // decoded count equals width x height for all 885,373 maps of the 100
+        // shipped worlds, both kinds.
+        la.m_First.assign((size_t)la.m_nFrames * nPolies, -1);
+        for (unsigned int f = 0; f < la.m_nFrames; ++f)
+            for (unsigned int i = 0; i < nPolies; ++i)
+            {
+                const unsigned int nBytes = r.U32();
+                const unsigned int nEnd = r.Tell() + nBytes;
+                if (r.Bad() || nEnd > nSize)
+                {
+                    if (a == 0) { m_sLMError = "lightmap data runs past the end of the file"; return; }
+                    sAnimError = "light animation " + la.m_sName + ": data runs past the end"; break;
+                }
+                LTWorldPoly* po = polys[i];
+                const size_t nWant = po ? (size_t)po->LMWidth() * po->LMHeight() : 0;
+                size_t nGot = 0;
+                int nAt = -1;
+                if (la.m_bShadowMap)
+                {
+                    nAt = (int)laShadows.size();
+                    unsigned char v = 0;
+                    while (r.Tell() < nEnd)
+                    {
+                        const unsigned int n = r.U8();
+                        laShadows.insert(laShadows.end(), n, v);
+                        nGot += n;
+                        v = (unsigned char)(v ? 0 : 255);
+                    }
+                    if (!po) laShadows.resize((size_t)nAt);
+                }
+                else
+                {
+                    std::vector<unsigned short>& dst = (a == 0 && f == 0) ? texels : laTexels;
+                    nAt = (int)dst.size();
+                    while (r.Tell() + 2 <= nEnd)
+                    {
+                        unsigned int v = r.U16();
+                        unsigned int n = 1;
+                        if (v & 0x8000u) { n = (r.Tell() < nEnd) ? r.U8() : 0; v &= 0x7FFFu; }
+                        dst.insert(dst.end(), n, (unsigned short)v);
+                        nGot += n;
+                    }
+                    if (!po) dst.resize((size_t)nAt);
+                }
+                if (r.Tell() != nEnd)
+                {
+                    if (a == 0) { m_sLMError = "a lightmap's RLE does not end on its length"; return; }
+                    sAnimError = "light animation " + la.m_sName + ": a map does not end on its length"; break;
+                }
+                if (!po) continue;
+                if (nGot != nWant)
+                {
+                    char buf[160];
+                    std::snprintf(buf, sizeof(buf), "%s map %u has %u texels, its polygon says %ux%u",
+                                  la.m_sName.c_str(), i, (unsigned int)nGot, po->LMWidth(), po->LMHeight());
+                    if (a == 0) { m_sLMError = buf; return; }
+                    sAnimError = buf; break;
+                }
+                la.m_First[(size_t)f * nPolies + i] = nAt;
+            }
+        if (a == 0)
         {
-            char buf[128];
-            std::snprintf(buf, sizeof(buf), "lightmap %u has %u texels, its polygon says %ux%u",
-                          i, (unsigned int)(texels.size() - nAt), po->LMWidth(), po->LMHeight());
-            m_sLMError = buf;
-            return;
+            la.m_iFrames[0] = la.m_iFrames[1] = 0;      // lithtech.exe 0x4253eb
+            for (unsigned int i = 0; i < nPolies; ++i)
+                if (polys[i] && la.m_First[i] >= 0) polys[i]->m_nLMTexel = la.m_First[i];
         }
-        first[i] = nAt;
+        if (sAnimError.empty()) anims.push_back(la);
+    }
+    if (!sAnimError.empty())
+    {
+        // ⚠️ The base still draws; the switched lights are left out, and said.
+        anims.resize(1);
+        laTexels.clear(); laShadows.clear();
+        printf("[WORLD] light animations not read: %s\n", sAnimError.c_str());
     }
 
     // ---- placement: each corner's texel coordinates -------------------- //
-    for (unsigned int i = 0; i < nPolies; ++i)
+    for (size_t m = 0; m < m_Models.size(); ++m)
     {
-        LTWorldPoly* po = polys[i];
-        if (!po || first[i] < 0) continue;
-        LTWorldModelHeader& m = m_Models[refs[i].first];
-        if (po->m_nSurface >= m.m_Surfaces.size()) continue;
-        const LTWorldSurface& sf = m.m_Surfaces[po->m_nSurface];
-        if (sf.m_nPlane >= m.m_Planes.size()) continue;
-        const float* N = m.m_Planes[sf.m_nPlane].m_Normal;
-
-        int nBest = 0;
-        float fBest = -2.0f;
-        for (int k = 0; k < 6; ++k)
+        LTWorldModelHeader& M = m_Models[m];
+        for (size_t q = 0; q < M.m_Polys.size(); ++q)
         {
-            const float d = kLMPlanes[k].N[0]*N[0] + kLMPlanes[k].N[1]*N[1] + kLMPlanes[k].N[2]*N[2];
-            if (d > fBest) { fBest = d; nBest = k; }
-        }
-        float P[3], Q[3];
-        Cross(kLMPlanes[nBest].Q, N, P);
-        Cross(N, P, Q);
-        if (!Unit(P) || !Unit(Q)) continue;
+            LTWorldPoly* po = &M.m_Polys[q];
+            if (po->m_nLMTexel < 0) continue;
+            const int nTexel = po->m_nLMTexel;
+            po->m_nLMTexel = -1;
+            if (po->m_nSurface >= M.m_Surfaces.size()) continue;
+            const LTWorldSurface& sf = M.m_Surfaces[po->m_nSurface];
+            if (sf.m_nPlane >= M.m_Planes.size()) continue;
+            const float* N = M.m_Planes[sf.m_nPlane].m_Normal;
 
-        const float W = (float)(po->LMWidth() - 1), H = (float)(po->LMHeight() - 1);
-        bool bClamped = false, bBad = false;
-        for (size_t v = 0; v < po->m_Verts.size(); ++v)
-        {
-            LTWorldPolyVert& pv = po->m_Verts[v];
-            if (pv.m_nPoint >= m.m_Points.size()) { bBad = true; break; }
-            const float* pt = m.m_Points[pv.m_nPoint].m_Pos;
-            const float d[3] = { pt[0] - po->m_Centre[0], pt[1] - po->m_Centre[1], pt[2] - po->m_Centre[2] };
-            float s = (d[0]*P[0] + d[1]*P[1] + d[2]*P[2]) / G;
-            float t = (d[0]*Q[0] + d[1]*Q[1] + d[2]*Q[2]) / G;
-            if (s < -0.5f || s > W + 0.5f || t < -0.5f || t > H + 0.5f) bClamped = true;
-            pv.m_LM[0] = s < 0.0f ? 0.0f : (s > W ? W : s);
-            pv.m_LM[1] = t < 0.0f ? 0.0f : (t > H ? H : t);
+            int nBest = 0;
+            float fBest = -2.0f;
+            for (int k = 0; k < 6; ++k)
+            {
+                const float d = kLMPlanes[k].N[0]*N[0] + kLMPlanes[k].N[1]*N[1] + kLMPlanes[k].N[2]*N[2];
+                if (d > fBest) { fBest = d; nBest = k; }
+            }
+            float P[3], Q[3];
+            Cross(kLMPlanes[nBest].Q, N, P);
+            Cross(N, P, Q);
+            if (!Unit(P) || !Unit(Q)) continue;
+
+            const float W = (float)(po->LMWidth() - 1), H = (float)(po->LMHeight() - 1);
+            bool bClamped = false, bBad = false;
+            for (size_t v = 0; v < po->m_Verts.size(); ++v)
+            {
+                LTWorldPolyVert& pv = po->m_Verts[v];
+                if (pv.m_nPoint >= M.m_Points.size()) { bBad = true; break; }
+                const float* pt = M.m_Points[pv.m_nPoint].m_Pos;
+                const float d[3] = { pt[0] - po->m_Centre[0], pt[1] - po->m_Centre[1], pt[2] - po->m_Centre[2] };
+                float s = (d[0]*P[0] + d[1]*P[1] + d[2]*P[2]) / G;
+                float t = (d[0]*Q[0] + d[1]*Q[1] + d[2]*Q[2]) / G;
+                if (s < -0.5f || s > W + 0.5f || t < -0.5f || t > H + 0.5f) bClamped = true;
+                pv.m_LM[0] = s < 0.0f ? 0.0f : (s > W ? W : s);
+                pv.m_LM[1] = t < 0.0f ? 0.0f : (t > H ? H : t);
+            }
+            if (bBad) continue;
+            po->m_nLMTexel = nTexel;
+            for (int k = 0; k < 3; ++k) { po->m_LMAxes[k] = P[k]; po->m_LMAxes[3 + k] = Q[k]; }
+            ++m_nLightMapped;
+            if (bClamped) ++m_nLightMapClamped;
         }
-        if (bBad) continue;
-        po->m_nLMTexel = first[i];
-        ++m_nLightMapped;
-        if (bClamped) ++m_nLightMapClamped;
     }
+
+    // ---- each polygon's own list must name the same animations --------- //
+    for (size_t a = 0; a < anims.size(); ++a)
+        for (size_t i = 0; i < anims[a].m_Polys.size(); ++i)
+        {
+            const unsigned int m = anims[a].m_Polys[i] & 0xFFFFu, q = anims[a].m_Polys[i] >> 16;
+            if (m >= m_Models.size() || q >= m_Models[m].m_Polys.size()) continue;
+            const std::vector<unsigned int>& refs = m_Models[m].m_Polys[q].m_LMRefs;
+            const unsigned int want = (unsigned int)a | ((unsigned int)i << 16);
+            if (std::find(refs.begin(), refs.end(), want) == refs.end()) ++m_nLARefMismatch;
+        }
+
     m_LMTexels.swap(texels);
+    m_LATexels.swap(laTexels);
+    m_LAShadows.swap(laShadows);
+    m_LightAnims.swap(anims);
+}
+
+
+int CLTWorld::FindLightAnim(const char* pName) const
+{
+    if (!pName) return -1;
+    for (size_t i = 0; i < m_LightAnims.size(); ++i)
+        if (strcasecmp(m_LightAnims[i].m_sName.c_str(), pName) == 0) return (int)i;
+    return -1;
 }

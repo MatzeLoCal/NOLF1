@@ -21,8 +21,10 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <cstring>
 #include <strings.h>
 #include <algorithm>
+#include <chrono>
 #include <set>
 
 namespace
@@ -2327,6 +2329,7 @@ bool CLTWorldScene::Load(CLTFileMgr* pFileMgr, const char* pWorldName)
     BuildMirrors();
 
     BuildLightMapAtlas();
+    BuildLightAnims();
 
     return true;
 }
@@ -2465,36 +2468,42 @@ void CLTWorldScene::BuildLightMapAtlas()
     if (nH > 32768) { printf("[LT3D] lightmaps: atlas too tall (%u) -- vertex light\n", y + shelf); fflush(stdout); return; }
 
     m_LMAtlasRGBA.assign((size_t)kW * nH * 4, 255);
-    for (size_t k = 0; k < items.size(); ++k)
-    {
-        const LTWorldPoly& po = mdl[items[k].m].m_Polys[items[k].q];
-        const unsigned int ax = at[k] & 0xFFFFu, ay = at[k] >> 16;
-        const int w = (int)po.LMWidth(), h = (int)po.LMHeight();
-        // X1R5G5B5, widened by bit replication; the border repeats the edge.
-        for (int ty = -1; ty <= h; ++ty)
-            for (int tx2 = -1; tx2 <= w; ++tx2)
-            {
-                const int sx = tx2 < 0 ? 0 : (tx2 >= w ? w - 1 : tx2);
-                const int sy = ty  < 0 ? 0 : (ty  >= h ? h - 1 : ty);
-                const unsigned int v = tx[(size_t)po.m_nLMTexel + (size_t)sy * w + sx];
-                const unsigned int r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31;
-                unsigned char* d = &m_LMAtlasRGBA[((size_t)(ay + 1 + ty) * kW + (ax + 1 + tx2)) * 4];
-                d[0] = (unsigned char)((r5 << 3) | (r5 >> 2));
-                d[1] = (unsigned char)((g5 << 3) | (g5 >> 2));
-                d[2] = (unsigned char)((b5 << 3) | (b5 >> 2));
-                d[3] = 255;
-            }
-        m_LMAt[items[k].m][items[k].q] = at[k];
-    }
     m_LMAtlas.m_pRGBA  = &m_LMAtlasRGBA[0];
     m_LMAtlas.m_Width  = (int)kW;
     m_LMAtlas.m_Height = (int)nH;
+    for (size_t k = 0; k < items.size(); ++k)
+    {
+        const LTWorldPoly& po = mdl[items[k].m].m_Polys[items[k].q];
+        WriteAtlasMap(at[k], (int)po.LMWidth(), (int)po.LMHeight(), &tx[(size_t)po.m_nLMTexel]);
+        m_LMAt[items[k].m][items[k].q] = at[k];
+    }
     printf("[LT3D] lightmaps: %u polygon(s), %zu texel(s), grid %.0f, atlas %ux%u\n",
            m_World.GetNumLightMapped(), tx.size(), m_World.GetWorldInfo().m_fLMGridSize, kW, nH);
     if (m_World.GetNumLightMapClamped())
         printf("[LT3D]   %u of them reach past their map by over half a texel (clamped)\n",
                m_World.GetNumLightMapClamped());
     fflush(stdout);
+}
+
+
+void CLTWorldScene::WriteAtlasMap(unsigned int at, int w, int h, const unsigned short* pTexels)
+{
+    const unsigned int ax = at & 0xFFFFu, ay = at >> 16;
+    const size_t kW = (size_t)m_LMAtlas.m_Width;
+    // X1R5G5B5, widened by bit replication; the border repeats the edge.
+    for (int ty = -1; ty <= h; ++ty)
+        for (int tx2 = -1; tx2 <= w; ++tx2)
+        {
+            const int sx = tx2 < 0 ? 0 : (tx2 >= w ? w - 1 : tx2);
+            const int sy = ty  < 0 ? 0 : (ty  >= h ? h - 1 : ty);
+            const unsigned int v = pTexels[(size_t)sy * w + sx];
+            const unsigned int r5 = (v >> 10) & 31, g5 = (v >> 5) & 31, b5 = v & 31;
+            unsigned char* d = &m_LMAtlasRGBA[((size_t)(ay + 1 + ty) * kW + (ax + 1 + tx2)) * 4];
+            d[0] = (unsigned char)((r5 << 3) | (r5 >> 2));
+            d[1] = (unsigned char)((g5 << 3) | (g5 >> 2));
+            d[2] = (unsigned char)((b5 << 3) | (b5 >> 2));
+            d[3] = 255;
+        }
 }
 
 
@@ -3035,6 +3044,331 @@ void CLTWorldScene::SetDynLightConsts(float fLightSaturate, bool bSaturate)
 {
     g_fDynSat = (fLightSaturate > 0.0f) ? fLightSaturate : 0.0f;
     g_fDynScale = bSaturate ? 2.0f : 1.0f;
+}
+
+
+// ---- THE LIGHT ANIMATIONS -- d3d.ren's rule (HANDOVER 5fe) ---------------- //
+//
+// ⚠️ EVERY NUMBER BELOW IS d3d.ren's, read from the shipped renderer:
+//   0x1006be50  a polygon's lightmap from the animations on it, in the
+//               polygon's list order: each one whose frames are both below
+//               its frame count and whose blend is >= 0.02 contributes; the
+//               FIRST is copied as it is, every later one is added x
+//               (int)(blend x 64) >> 6 per 5-bit channel, capped at 31. None
+//               at all = black.
+//   0x1006bb30  a 16-bit animation's map: frame 0 when both frames are the
+//               same or the percent is under 1/32, frame 1 over 31/32,
+//               otherwise a0 + ((a1 - a0) x (int)(percent x 64) >> 6).
+//   0x1006b500  a SHADOW-MAPPED one: the visibility bytes picked or mixed the
+//               same way, then every texel lit from the light: 0 where unlit
+//               or at/beyond the radius, else k = (int)((1 - d^2/R^2) x 63),
+//               a = vis x T[k] >> 8, and per channel
+//               v = (a x ((2C - 255) << 16)) >> 32, less one, kept in 0..255
+//               (C the colour, truncated -- so a LightFX's "0.5 + c x value"
+//               colour comes out as 2 c value x 255, the 0.5 cancelling),
+//               stored as v >> 3.
+//   0x1006c510  T[k] = 65536 x min(1, k / 63 x LightSaturate), rebuilt when
+//               LightSaturate changes.
+// The texel positions are the placement's (texel (x, y) at the polygon's
+// origin + (x P + y Q) x the grid, ltworld.cpp); d3d.ren walks them by adding
+// the steps in x87 precision, so a texel exactly on one of the 64 distance
+// steps can land one step apart -- the only way this differs from it.
+namespace
+{
+    bool LMAnimOff()
+    {
+        static const bool b = (getenv("LT_NOLMANIM") != 0);
+        static const bool bSaid = (b ? (printf("[LT3D] LT_NOLMANIM=1 -- light animations not drawn, the base light only (old)\n"),
+                                        fflush(stdout), true) : true);
+        (void)bSaid;
+        return b;
+    }
+    bool LATrace()
+    {
+        static const bool b = (getenv("LT_LATRACE") != 0);
+        return b;
+    }
+
+    // One animation's map for polygon entry i of it, frame f: the base's
+    // frame 0 lives in the world's lightmap texels, everything else in the
+    // animation store. 0 when that polygon has no map.
+    const unsigned short* LAFrame16(const CLTWorld& w, unsigned int a, unsigned int f, unsigned int i)
+    {
+        const LTWorldLightAnim& la = w.GetLightAnims()[a];
+        const int at = la.m_First[(size_t)f * la.m_Polys.size() + i];
+        if (at < 0) return 0;
+        return (a == 0 && f == 0) ? &w.GetLightMapTexels()[(size_t)at] : &w.GetLightAnimTexels()[(size_t)at];
+    }
+    const unsigned char* LAFrame8(const CLTWorld& w, unsigned int a, unsigned int f, unsigned int i)
+    {
+        const LTWorldLightAnim& la = w.GetLightAnims()[a];
+        const int at = la.m_First[(size_t)f * la.m_Polys.size() + i];
+        return at < 0 ? 0 : &w.GetLightAnimShadows()[(size_t)at];
+    }
+
+    // 0x1006bb30's choice: 0 = frame 0, 1 = frame 1, 2 = mix.
+    int LAPick(const LTWorldLightAnim& la)
+    {
+        if (la.m_iFrames[0] == la.m_iFrames[1]) return 0;
+        if (0.03125f > la.m_fPercentBetween) return 0;
+        if (!(la.m_fPercentBetween <= 0.96875f)) return 1;
+        return 2;
+    }
+
+    // A 16-bit animation's map, d3d.ren 0x1006bb30.
+    bool LAMap16(const CLTWorld& w, unsigned int a, unsigned int i, unsigned int n, unsigned short* pOut)
+    {
+        const LTWorldLightAnim& la = w.GetLightAnims()[a];
+        const int nPick = LAPick(la);
+        const unsigned short* p0 = LAFrame16(w, a, la.m_iFrames[0], i);
+        const unsigned short* p1 = LAFrame16(w, a, la.m_iFrames[1], i);
+        if (nPick == 0) { if (!p0) return false; std::memcpy(pOut, p0, n * 2); return true; }
+        if (nPick == 1) { if (!p1) return false; std::memcpy(pOut, p1, n * 2); return true; }
+        if (!p0 || !p1) return false;
+        const int k = (int)((double)la.m_fPercentBetween * 64.0);
+        for (unsigned int t = 0; t < n; ++t)
+        {
+            int c[3];
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                const int sh = 10 - 5 * ch;
+                const int c0 = (p0[t] >> sh) & 31, c1 = (p1[t] >> sh) & 31;
+                const int v = c0 + (((c1 - c0) * k) >> 6);
+                c[ch] = v > 31 ? 31 : v;
+            }
+            pOut[t] = (unsigned short)((c[0] << 10) | (c[1] << 5) | c[2]);
+        }
+        return true;
+    }
+}
+
+
+void CLTWorldScene::BuildLightAnims()
+{
+    m_LAPolys.clear();
+    m_LAPolysOf.clear();
+    m_LASeen.clear();
+    m_LADirty.clear();
+    m_LARects.clear();
+    m_bLARectsAll = false;
+    m_fLASat = -1.0f;
+    m_nLAComposed = 0;
+    std::vector<LTWorldLightAnim>& A = m_World.GetLightAnims();
+    if (!m_LMAtlas.m_pRGBA || A.size() < 2) return;
+
+    // Every polygon some non-base animation lights, once, with its atlas spot.
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    std::map<unsigned int, unsigned int> index;     // model | polygon << 16 -> entry
+    m_LAPolysOf.resize(A.size());
+    unsigned int nShadow = 0;
+    for (size_t a = 1; a < A.size(); ++a)
+    {
+        nShadow += A[a].m_bShadowMap;
+        for (size_t i = 0; i < A[a].m_Polys.size(); ++i)
+        {
+            const unsigned int key = A[a].m_Polys[i];
+            const unsigned int m = key & 0xFFFFu, q = key >> 16;
+            if (m >= m_LMAt.size() || q >= m_LMAt[m].size() || m_LMAt[m][q] == ~0u) continue;
+            const LTWorldPoly& po = mdl[m].m_Polys[q];
+            if ((size_t)po.LMWidth() * po.LMHeight() > 1024) continue;   // d3d.ren refuses them too
+            std::map<unsigned int, unsigned int>::iterator it = index.find(key);
+            unsigned int e;
+            if (it != index.end()) e = it->second;
+            else
+            {
+                e = (unsigned int)m_LAPolys.size();
+                LAPoly lp = { m, q, m_LMAt[m][q] };
+                m_LAPolys.push_back(lp);
+                index[key] = e;
+            }
+            m_LAPolysOf[a].push_back(e);
+        }
+    }
+    m_LASeen.assign(A.size(), 0u);
+    for (size_t a = 0; a < A.size(); ++a) m_LASeen[a] = A[a].m_nChange;
+    m_LADirty.assign(m_LAPolys.size(), 0);
+    printf("[LT3D] light animations: %zu besides the base (%u shadow-mapped), lighting %zu polygon(s)%s\n",
+           A.size() - 1, nShadow, m_LAPolys.size(), LMAnimOff() ? " -- not drawn (LT_NOLMANIM)" : "");
+    fflush(stdout);
+}
+
+
+void CLTWorldScene::ComposeLightMap(const LTWorldPoly& po, unsigned short* pOut) const
+{
+    const std::vector<LTWorldLightAnim>& A = m_World.GetLightAnims();
+    const unsigned int W = po.LMWidth(), H = po.LMHeight(), n = W * H;
+    unsigned short buf[1024];
+    unsigned char vis[1024];
+    int nDone = 0;
+    for (size_t r = 0; r < po.m_LMRefs.size(); ++r)
+    {
+        const unsigned int a = po.m_LMRefs[r] & 0xFFFFu, i = po.m_LMRefs[r] >> 16;
+        if (a >= A.size()) continue;
+        const LTWorldLightAnim& la = A[a];
+        if (la.m_iFrames[0] >= la.m_nFrames || la.m_nFrames <= la.m_iFrames[1]) continue;
+        if (la.m_fBlendPercent < 0.02f) continue;
+        if (i >= la.m_Polys.size()) continue;
+
+        if (!la.m_bShadowMap)
+        {
+            if (!LAMap16(m_World, a, i, n, buf)) continue;
+        }
+        else
+        {
+            // ---- the visibility, picked or mixed (0x1006b500's head) ---- //
+            const int nPick = LAPick(la);
+            const unsigned char* p0 = LAFrame8(m_World, a, la.m_iFrames[0], i);
+            const unsigned char* p1 = LAFrame8(m_World, a, la.m_iFrames[1], i);
+            if (nPick == 0) { if (!p0) continue; std::memcpy(vis, p0, n); }
+            else if (nPick == 1) { if (!p1) continue; std::memcpy(vis, p1, n); }
+            else
+            {
+                if (!p0 || !p1) continue;
+                const int k = (int)((double)la.m_fPercentBetween * 64.0);
+                for (unsigned int t = 0; t < n; ++t)
+                    vis[t] = (unsigned char)(p0[t] + (((int)p1[t] - (int)p0[t]) * k >> 6));
+            }
+
+            // ---- then lit, texel by texel (0x1006b310 + the loop) ------- //
+            const double R = (double)la.m_fLightRadius;
+            const float r2 = (float)(R * R);
+            const float inv = (float)(1.0 / (R * R));
+            int Cp[3];
+            for (int ch = 0; ch < 3; ++ch)
+            {
+                const int C = (int)la.m_vLightColor[ch];
+                Cp[ch] = (int)((unsigned int)C * 0x20000u - 0xFF0000u);
+            }
+            const float G = m_World.GetWorldInfo().m_fLMGridSize;
+            const float sx[3] = { po.m_LMAxes[0] * G, po.m_LMAxes[1] * G, po.m_LMAxes[2] * G };
+            const float sy[3] = { po.m_LMAxes[3] * G, po.m_LMAxes[4] * G, po.m_LMAxes[5] * G };
+            const float* L = la.m_vLightPos;
+            for (unsigned int y = 0; y < H; ++y)
+                for (unsigned int x = 0; x < W; ++x)
+                {
+                    const unsigned int t = y * W + x;
+                    double d2d = 0.0;
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const double p = (double)po.m_Centre[c] + (double)sx[c] * x + (double)sy[c] * y;
+                        const double e = (double)L[c] - p;
+                        d2d += e * e;
+                    }
+                    const float d2 = (float)d2d;
+                    if (vis[t] == 0 || !(r2 > d2)) { buf[t] = 0; continue; }
+                    int k = (int)((1.0 - (double)inv * (double)d2) * 63.0);
+                    k = k < 0 ? 0 : (k > 63 ? 63 : k);
+                    const unsigned int av = ((unsigned int)vis[t] * m_LAAtten[k]) >> 8;
+                    int v5[3];
+                    for (int ch = 0; ch < 3; ++ch)
+                    {
+                        int v = (int)(((long long)(int)av * (long long)Cp[ch]) >> 32) - 1;
+                        v = v < 0 ? 0 : (v > 255 ? 255 : v);
+                        v5[ch] = v >> 3;
+                    }
+                    buf[t] = (unsigned short)((v5[0] << 10) | (v5[1] << 5) | v5[2]);
+                }
+        }
+
+        if (nDone == 0) std::memcpy(pOut, buf, n * 2);
+        else
+        {
+            const unsigned int f = (unsigned int)(int)((double)la.m_fBlendPercent * 64.0);
+            for (unsigned int t = 0; t < n; ++t)
+            {
+                unsigned int c[3];
+                for (int ch = 0; ch < 3; ++ch)
+                {
+                    const int sh = 10 - 5 * ch;
+                    const unsigned int v = ((pOut[t] >> sh) & 31) + ((((buf[t] >> sh) & 31) * f) >> 6);
+                    c[ch] = v > 31 ? 31 : v;
+                }
+                pOut[t] = (unsigned short)((c[0] << 10) | (c[1] << 5) | c[2]);
+            }
+        }
+        ++nDone;
+    }
+    if (nDone == 0) std::memset(pOut, 0, n * 2);
+}
+
+
+void CLTWorldScene::UpdateLightAnims()
+{
+    if (m_LAPolys.empty() || !m_LMAtlas.m_pRGBA || LMAnimOff()) return;
+    std::vector<LTWorldLightAnim>& A = m_World.GetLightAnims();
+
+    // d3d.ren's distance table follows LightSaturate (0x1006c510); a change
+    // relights every shadow-mapped polygon.
+    bool bAllShadow = false;
+    if (m_fLASat != g_fDynSat)
+    {
+        m_fLASat = g_fDynSat;
+        const double kStep = (double)(1.0f / 63.0f);
+        for (int k = 0; k < 64; ++k)
+        {
+            double v = (double)k * kStep * (double)m_fLASat;
+            if (!(1.0 >= v)) v = 1.0;
+            m_LAAtten[k] = (unsigned int)(int)(v * 65536.0);
+        }
+        bAllShadow = true;
+    }
+
+    bool bAny = false;
+    for (size_t a = 1; a < A.size() && a < m_LAPolysOf.size(); ++a)
+    {
+        if (m_LASeen[a] == A[a].m_nChange && !(bAllShadow && A[a].m_bShadowMap)) continue;
+        m_LASeen[a] = A[a].m_nChange;
+        for (size_t k = 0; k < m_LAPolysOf[a].size(); ++k) m_LADirty[m_LAPolysOf[a][k]] = 1;
+        bAny = true;
+    }
+    if (!bAny) return;
+
+    const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
+    unsigned short out[1024];
+    unsigned int nNow = 0;
+    unsigned long long nTexDiff = 0, nTexUp = 0;     // LT_LATRACE: texels off the base
+    const std::chrono::steady_clock::time_point tStart = std::chrono::steady_clock::now();
+    for (size_t e = 0; e < m_LAPolys.size(); ++e)
+    {
+        if (!m_LADirty[e]) continue;
+        m_LADirty[e] = 0;
+        const LAPoly& lp = m_LAPolys[e];
+        const LTWorldPoly& po = mdl[lp.m_nModel].m_Polys[lp.m_nPoly];
+        ComposeLightMap(po, out);
+        if (LATrace() && po.m_nLMTexel >= 0)
+        {
+            const unsigned short* pBase = &m_World.GetLightMapTexels()[(size_t)po.m_nLMTexel];
+            for (unsigned int t = 0; t < po.LMWidth() * po.LMHeight(); ++t)
+                if (out[t] != pBase[t])
+                {
+                    ++nTexDiff;
+                    nTexUp += ((out[t] >> 10) & 31) + ((out[t] >> 5) & 31) + (out[t] & 31)
+                            - ((pBase[t] >> 10) & 31) - ((pBase[t] >> 5) & 31) - (pBase[t] & 31);
+                }
+        }
+        WriteAtlasMap(lp.m_nAt, (int)po.LMWidth(), (int)po.LMHeight(), out);
+        if (!m_bLARectsAll)
+        {
+            m_LARects.push_back(lp.m_nAt);
+            m_LARects.push_back((po.LMWidth() + 2) | ((po.LMHeight() + 2) << 16));
+        }
+        ++nNow;
+    }
+    // Nobody took them (no GPU pass) -- past a point, say "everything".
+    if (m_LARects.size() > 16384) { m_LARects.clear(); m_bLARectsAll = true; }
+    m_nLAComposed += nNow;
+    if (LATrace())
+    {
+        static unsigned int s_nSaid = 0;
+        if (s_nSaid < 200)
+        {
+            ++s_nSaid;
+            const double fUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - tStart).count();
+            printf("[LATRACE] %u polygon lightmap(s) rebuilt in %.0f us (%u so far): %llu texel(s) off the base, %+lld 5-bit steps in all\n",
+                   nNow, fUs, m_nLAComposed, nTexDiff, (long long)nTexUp);
+            fflush(stdout);
+        }
+    }
 }
 
 void CLTWorldScene::GatherDynLights(const ILTWorldDynamicObjects* pDyn, const float* pEye3)
@@ -4636,6 +4970,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     st.m_nDynamic = 0;
     if (!m_bLoaded || !pRGBA || !pDepth) return st;
     UpdateAnimatedSurfaces();       // `.spr` surfaces to the frame of the moment (5em)
+    if (!m_bReflecting) UpdateLightAnims();     // the switched lights into the atlas (5fe)
 
     // ---- pass 0: MIRRORS (HANDOVER 5de) ---------------------------------- //
     //
