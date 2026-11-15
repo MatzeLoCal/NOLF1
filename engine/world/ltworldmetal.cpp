@@ -926,6 +926,25 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
                     drawRun(MVP, it->first, it->second[k].first, it->second[k].second, bIdx);
             pending.clear();
         };
+
+        // ⚠️ ONE-SIDED (HANDOVER 5fh): the recorded triangles hold every
+        // polygon for every eye, so the eye-in-front-of-the-plane test that
+        // DrawModel makes per frame is the rasteriser's here -- by winding,
+        // which agrees with the plane for every polygon in all 100 worlds. A
+        // reflection's mirrored projection reverses the winding. Only these
+        // runs: the guard puts the encoder back before anything else draws.
+        struct CullGuard
+        {
+            explicit CullGuard(int n) { if (n) LTMetal_SetWorldCull(n); m_bOn = (n != 0); }
+            ~CullGuard() { Off(); }
+            void Off() { if (m_bOn) LTMetal_SetWorldCull(0); m_bOn = false; }
+            bool m_bOn;
+        };
+        // Front is CLOCKWISE (1): measured -- T07S01's opening frame is byte-
+        // identical to LT_WORLDSTATIC=0, whose CPU test needs no winding; with
+        // counter-clockwise the room's walls vanish.
+        CullGuard cull(LTOneSidedWorld() ? (m_bReflecting ? 2 : 1) : 0);
+
         for (size_t i = 0; i < mdl.size() && i < m_Static.m_Models.size(); ++i)
         {
             if (IsSkyModel(&mdl[i])) continue;
@@ -972,6 +991,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             }
         }
         flushPending();
+        cull.Off();     // 5fh: what follows is DrawModel's, culled on the CPU
 
         // ⚠️ THE ENVIRONMENT-MAPPED POLYGONS (5el) the recorder left out:
         // drawn every frame through DrawModel -- the same surface rules --

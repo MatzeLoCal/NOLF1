@@ -65,6 +65,36 @@ void  LTServerPhys_Update(float fDeltaSeconds);
 void  LTServerPhys_SetGlobalForce(const float* pF3);
 void  LTServerPhys_GetGlobalForce(float* pF3);
 
+// ---- lithtech.exe's CalcMotion (0x4500d0), for client and server ------- //
+//
+// ⚠️ ONE STEP OF THE ORIGINAL ENGINE'S MOTION (HANDOVER 5fg), ported from the
+// shipped binary and the donor's motion.cpp, which agree branch for branch:
+// slow velocities and accelerations dropped (|x|^2 < 0.1); in the air,
+// gravity; standing, a slope steeper than the slide ratio slides, a velocity
+// about to leave the plane takes full gravity ("Jump"), an acceleration out
+// of the plane is turned into it ("Downhill"), otherwise ("Walk") the
+// friction coefficient damps v EXPONENTIALLY, exactly:
+//     v  = a/k + (v0 - a/k) e^(-k dt)
+//     dr = (a/k) dt + (k v0 - a)(1 - e^(-k dt)) / k^2
+// and without friction
+//     dr = v0 dt + a (dt*dt*0.5)*0.5      <- a QUARTER of a dt^2, lithtech's
+//     v  = v0 + a dt
+// Returns false when lithtech.exe would stop the object (standing, or no
+// gravity, and both slow): v and a are zeroed and nothing moves. pV3, pA3
+// are read and written (a as CalcMotion leaves it; the server then clears
+// the object's acceleration), pDr3 is the displacement. pGetNormal gives the
+// plane stood on, asked only when needed; false or null = straight up (the
+// original's "standing on an object": minus the force's direction).
+enum
+{
+    LTPHYS_STOP = 0, LTPHYS_FALL, LTPHYS_STEEP, LTPHYS_JUMP,
+    LTPHYS_DOWNHILL, LTPHYS_WALK, LTPHYS_FREE    // FREE: no gravity, moving
+};
+bool  LTPhys_CalcMotion(float dt, bool bGravity, bool bStanding,
+                        bool (*pGetNormal)(void* pCtx, float* pN3), void* pCtx,
+                        float fFriction, float* pV3, float* pA3, float* pDr3,
+                        int* pBranch = 0, bool* pbFriction = 0);
+
 // ⚠️ How far up a ledge a moving object is lifted rather than stopped. The
 // game sets this per character (CCharacter uses 24 units); with no step-up a
 // character is stopped dead by a kerb, which reads as "the AI are stuck".

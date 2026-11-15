@@ -1349,6 +1349,29 @@ void LTMetal_SetFogRange(float fKX, float fKY)
     g_Fog.m_fKX = fKX; g_Fog.m_fKY = fKY;
 }
 
+// ⚠️ ONE-SIDED WORLD POLYGONS (HANDOVER 5fh). d3d.ren draws with
+// D3DRENDERSTATE_CULLMODE = NONE (0x100326d8) and drops a world polygon whose
+// plane the eye is not in front of on the CPU (0x10066d76: n.eye - d <= 1e-4,
+// skip). The static world is recorded once, so here the same test is the
+// rasteriser's: every world polygon's winding agrees with its plane
+// (Docs/tools/wside, all 100 worlds), so for a flat polygon "front-facing on
+// screen" and "eye in front of the plane" are the same statement.
+// An encoder starts with no cull, so EncodeTris re-applies it while it is on.
+static int g_nWorldCull = 0;
+static void ApplyWorldCull()
+{
+    if (!g_Enc) return;
+    [g_Enc setCullMode:(g_nWorldCull ? MTLCullModeBack : MTLCullModeNone)];
+    if (g_nWorldCull)
+        [g_Enc setFrontFacingWinding:(g_nWorldCull == 1 ? MTLWindingClockwise : MTLWindingCounterClockwise)];
+}
+
+void LTMetal_SetWorldCull(int nMode)
+{
+    g_nWorldCull = (nMode == 1 || nMode == 2) ? nMode : 0;
+    ApplyWorldCull();
+}
+
 // ⚠️ ONE ENCODE FOR BOTH VERTEX SOURCES -- the per-frame arena
 // (LTMetal_DrawTris) and a buffer made once (LTMetal_DrawTrisFrom, the static
 // world, HANDOVER 5bu). Everything a draw decides -- uniforms, pipeline,
@@ -1570,6 +1593,7 @@ static void EncodeTris(const float* pMVP, unsigned int nTexture,
     [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
     BindDynLights();
     BindLightMap();
+    if (g_nWorldCull) ApplyWorldCull();     // 5fh: an encoder made since it was set has none
     [g_Enc setFragmentTexture:g_Textures[nTexture] atIndex:0];
     if (ib)
         [g_Enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:(NSUInteger)nVerts

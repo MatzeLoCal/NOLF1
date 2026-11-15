@@ -886,6 +886,7 @@ public:
 
         float v[3], a[3], g[3];
         LTScene_GetVelocity(h, v);
+        const float fFlatIn = sqrtf(v[0]*v[0] + v[2]*v[2]);   // LT_STOPTRACE
         LTScene_GetAcceleration(h, a);
         LTServerPhys_GetGlobalForce(g);
 
@@ -960,6 +961,10 @@ public:
             const bool b = (getenv("LT_OLDAIRSTEP") != 0);
             if (b) { printf("[PHYS] LT_OLDAIRSTEP=1 -- airborne step by the new velocity, no gravity on the take-off frame (old)\n"); fflush(stdout); }
             return b; }();
+        static const bool s_bOldGround = []() {
+            const bool b = (getenv("LT_OLDGROUNDSTEP") != 0);
+            if (b) { printf("[PHYS] LT_OLDGROUNDSTEP=1 -- on the floor the client's old linear friction step (old)\n"); fflush(stdout); }
+            return b; }();
         const bool bLeaving = !s_bOldAir && bGround && bGravity && (v[1] + g[1] * dt) > 0.01f;
         if (!s_bOldAir && (!bGround || bLeaving))
         {
@@ -970,6 +975,54 @@ public:
                 if (bGravity) acc += g[k];
                 off[k] = v[k] * dt + acc * (dt * dt * 0.5f) * 0.5f;
                 v[k] += acc * dt;
+            }
+            LTScene_SetVelocity(h, v);
+            pInfo->m_Offset.Init(off[0], off[1], off[2]);
+        }
+        else if (!s_bOldAir && !s_bOldGround && bGround && bGravity)
+        {
+            // ⚠️ ON THE FLOOR, CALCMOTION'S WALK BRANCH (HANDOVER 5fg):
+            // friction is EXPONENTIAL, the exact solution of v' = a - k v --
+            //     v  = a/k + (v0 - a/k) e^(-k dt)
+            //     dr = (a/k) dt + (k v0 - a)(1 - e^(-k dt)) / k^2
+            // (0x4506d2; the donor's motion.cpp) -- where the port took
+            // v *= 1 - k dt after adding a dt, and moved by the new velocity.
+            // And lithtech.exe's stop rule: a velocity or acceleration with
+            // |x|^2 < 0.1 is zero at the start of the step, and both zero on
+            // the floor is a stop (the port zeroed |v_flat|^2 < 1 after it).
+            // ⚠️ HORIZONTAL ONLY, and the vertical stays the port's: the
+            // donor's mover takes away the velocity into a surface on contact
+            // (collision.cpp), the client's mover here does not
+            // (LTScene_MoveWithCollision moves, it never touches velocity), so
+            // downward velocity is still zeroed on the floor here instead.
+            // ⚠️ A COEFFICIENT OF 0 IS STILL TAKEN AS 5. The game sends 5 x the
+            // container's Friction, and Filter, Wind and SafteyNet volumes have
+            // Friction 0 (311 of the 881 in the 100 worlds: M02S01's tunnels,
+            // M03S01's winds). lithtech.exe would run them without friction;
+            // whether Cate slid there on Windows is not known (TODO).
+            // LT_OLDGROUNDSTEP=1 = the old linear step (says so).
+            float fCoeff = 0.0f;
+            GetFrictionCoefficient(pInfo->m_hObject, fCoeff);
+            if (fCoeff <= 0.0f) fCoeff = 5.0f;
+
+            const float fVel2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+            const float fAcc2 = a[0]*a[0] + a[1]*a[1] + a[2]*a[2];
+            if (fVel2 < 0.1f) v[0] = v[1] = v[2] = 0.0f;
+            if (fAcc2 < 0.1f) a[0] = a[1] = a[2] = 0.0f;
+            float off[3] = { 0.0f, 0.0f, 0.0f };
+            if (fVel2 >= 0.1f || fAcc2 >= 0.1f)
+            {
+                const float e = expf(-fCoeff * dt);
+                const float f = (1.0f - e) / fCoeff / fCoeff;
+                for (int k = 0; k < 3; k += 2)
+                {
+                    const float akk = a[k] / fCoeff;
+                    off[k] = akk * dt + (v[k] * fCoeff - a[k]) * f;
+                    v[k] = (v[k] - akk) * e + akk;
+                }
+                v[1] += a[1] * dt;
+                if (v[1] < 0.0f) v[1] = 0.0f;
+                off[1] = v[1] * dt;
             }
             LTScene_SetVelocity(h, v);
             pInfo->m_Offset.Init(off[0], off[1], off[2]);
@@ -1019,6 +1072,50 @@ public:
             LTScene_SetVelocity(h, v);
 
             pInfo->m_Offset.Init(v[0] * dt, v[1] * dt, v[2] * dt);
+        }
+
+        // LT_STOPTRACE=1 (5fg): on the floor, from the frame the game's
+        // horizontal acceleration ends (a key let go) to the frame the
+        // velocity is gone -- the speed then, how far and how long it slid.
+        static const bool s_bStopTrace = (getenv("LT_STOPTRACE") != 0);
+        if (s_bStopTrace)
+        {
+            static bool  s_bSliding = false, s_bPushed = false;
+            static float s_P0[3], s_fV0 = 0.0f, s_fT = 0.0f;
+            static unsigned s_nPrinted = 0;
+            static float s_fIn[12], s_fOut[12];
+            static int   s_nSeq = 0;
+            float pos[3];
+            LTScene_GetObjectPos(h, pos);
+            const bool bPush = (a[0] != 0.0f || a[2] != 0.0f);
+            const float fFlat = sqrtf(v[0]*v[0] + v[2]*v[2]);
+            if (bGround && s_bPushed && !bPush && fFlat > 1.0f && !s_bSliding)
+            {
+                s_bSliding = true; s_fT = 0.0f; s_fV0 = fFlat; s_nSeq = 0;
+                for (int k = 0; k < 3; ++k) s_P0[k] = pos[k];
+            }
+            else if (s_bSliding)
+            {
+                s_fT += dt;
+                if (s_nSeq < 12) { s_fIn[s_nSeq] = fFlatIn; s_fOut[s_nSeq] = fFlat; ++s_nSeq; }
+                if (!bGround || bPush || fFlat <= 0.0f)
+                {
+                    const float dx = pos[0] - s_P0[0], dz = pos[2] - s_P0[2];
+                    if (s_nPrinted++ < 40)
+                    {
+                        float fCoeff = 0.0f; GetFrictionCoefficient(pInfo->m_hObject, fCoeff);
+                        char seq[256] = ""; size_t o = 0;
+                        for (int i = 0; i < s_nSeq && o + 24 < sizeof(seq); ++i)
+                            o += snprintf(seq + o, sizeof(seq) - o, " %.0f>%.0f", s_fIn[i], s_fOut[i]);
+                        printf("[STOP] let go at %.1f u/s (friction %.1f): %s after %.1f units in %.3f s; speed in>out per frame:%s\n",
+                               s_fV0, fCoeff, !bGround ? "left the floor" : bPush ? "pushed again" : "stopped",
+                               sqrtf(dx*dx + dz*dz), s_fT, seq);
+                        fflush(stdout);
+                    }
+                    s_bSliding = false;
+                }
+            }
+            s_bPushed = bPush;
         }
 
         if (getenv("LT_PHYSTRACE"))

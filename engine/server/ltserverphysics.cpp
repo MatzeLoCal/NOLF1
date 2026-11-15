@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <map>
+#include <string>
 
 typedef CLTServerObjects::Record SRec;
 
@@ -89,6 +91,258 @@ namespace
         if (r < 1.0f) r = 1.0f;         // a zero-dims object still needs a body
         return r;
     }
+
+    // How often each CalcMotion branch ran (LTPHYS_*), and with friction.
+    unsigned int g_nBranch[LTPHYS_FREE + 1] = { 0 };
+    unsigned int g_nFriction = 0;
+
+    // ⚠️ THE PLANE STOOD ON, for CalcMotion's slope tests (5fg): lithtech.exe
+    // reads the BSP node the object stands on (+0xec). The port's ground is a
+    // probe (ltworldcollide.cpp, 0.75 skin, n.y > 0.7) that keeps no plane, so
+    // this asks a short ray straight down from the centre, past the sphere's
+    // bottom -- as the client's GetStandingOn does. A miss (a ledge's edge)
+    // answers "straight up", the original's rule for standing on an object.
+    // Asked only for an object standing AND moving: a resting one stops first.
+    bool ServerGroundNormal(void* pCtx, float* pN3)
+    {
+        const SRec* p = (const SRec*)pCtx;
+        if (!p || !LTWorldCollide_Ready()) return false;
+        const float fR = RadiusOf(p);
+        const float from[3] = { p->m_Pos[0], p->m_Pos[1], p->m_Pos[2] };
+        const float to[3]   = { p->m_Pos[0], p->m_Pos[1] - fR - 4.0f, p->m_Pos[2] };
+        float pt[3], n[3], t;
+        if (!LTGetWorldCollide()->RaySegment(from, to, pt, n, &t)) return false;
+        if (n[1] <= 0.0f) return false;
+        pN3[0] = n[0]; pN3[1] = n[1]; pN3[2] = n[2];
+        return true;
+    }
+
+    // The plane found for the standing test, handed to CalcMotion as is.
+    const float kUp[3] = { 0.0f, 1.0f, 0.0f };
+    struct GroundCtx { bool m_bHave; float m_N[3]; };
+    bool GroundCtxNormal(void* pCtx, float* pN3)
+    {
+        const GroundCtx* g = (const GroundCtx*)pCtx;
+        if (!g || !g->m_bHave) return false;
+        pN3[0] = g->m_N[0]; pN3[1] = g->m_N[1]; pN3[2] = g->m_N[2];
+        return true;
+    }
+    unsigned int g_nArriving = 0;   // on the probe's floor, still falling into it
+    unsigned int g_nGoThru = 0;     // steps of FLAG_GOTHRUWORLD objects (no world touch)
+
+    // ---- LT_ARCTRACE=1 (5fg): each FLAG_GRAVITY object's flights and slides //
+    //
+    // One [ARC] line per spell in the air (from where, at what velocity, to
+    // where, how long, how far) and per slide on the floor (from what speed,
+    // how far, how long until it stopped), so the old and the new step can be
+    // compared on the same throw. An object removed mid-spell (a bomb that
+    // went off on impact) is reported where it was last seen.
+    struct ArcState
+    {
+        int   m_nState;         // 0 idle, 1 in the air, 2 sliding
+        float m_fT;
+        float m_P0[3], m_V0[3], m_Last[3];
+        float m_fTop;
+        std::string m_sName;
+    };
+    std::map<void*, ArcState> g_Arcs;
+    unsigned int g_nArcPrinted = 0;
+
+    void ArcPrint(const char* pWhat, const ArcState& s, const float* pEnd, float fSpeedEnd)
+    {
+        if (g_nArcPrinted++ >= 200) return;
+        const float dx = pEnd[0] - s.m_P0[0], dz = pEnd[2] - s.m_P0[2];
+        printf("[ARC] %-20s %-8s from (%.1f %.1f %.1f) vel (%.1f %.1f %.1f) -> (%.1f %.1f %.1f) after %.3f s: %.1f across, %+.1f up (top %+.1f), speed then %.1f\n",
+               s.m_sName.empty() ? "(unnamed)" : s.m_sName.c_str(), pWhat,
+               s.m_P0[0], s.m_P0[1], s.m_P0[2], s.m_V0[0], s.m_V0[1], s.m_V0[2],
+               pEnd[0], pEnd[1], pEnd[2], s.m_fT, sqrtf(dx*dx + dz*dz),
+               pEnd[1] - s.m_P0[1], s.m_fTop - s.m_P0[1], fSpeedEnd);
+        fflush(stdout);
+    }
+
+    void ArcTrace(void* h, const float* pPrePos, const float* pPreVel, float dt)
+    {
+        SRec* p = CLTServerObjects::FromHandle(h);
+        const bool bLive = p && LTServerHost_IsLive(h);
+        std::map<void*, ArcState>::iterator it = g_Arcs.find(h);
+        if (!bLive)
+        {
+            if (it != g_Arcs.end())
+            {
+                if (it->second.m_nState) ArcPrint(it->second.m_nState == 1 ? "air,gone" : "slid,gone", it->second, it->second.m_Last, 0.0f);
+                g_Arcs.erase(it);
+            }
+            return;
+        }
+        if (!(p->m_Flags & FLAG_GRAVITY)) return;
+        if (it == g_Arcs.end())
+        {
+            ArcState s0; s0.m_nState = 0; s0.m_fT = 0.0f; s0.m_fTop = 0.0f;
+            it = g_Arcs.insert(std::make_pair(h, s0)).first;
+        }
+        ArcState& s = it->second;
+        const float* v = p->m_Vel;
+        const float fSpeed = sqrtf(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        const float fFlat2 = v[0]*v[0] + v[2]*v[2];
+        const bool  bAir = !p->m_bOnGround;
+        for (int k = 0; k < 3; ++k) s.m_Last[k] = p->m_Pos[k];
+
+        if (s.m_nState == 0)
+        {
+            if ((bAir && fSpeed > 1.0f) || (!bAir && fFlat2 > 1.0f))
+            {
+                s.m_nState = bAir ? 1 : 2;
+                s.m_fT = dt;
+                s.m_sName = p->m_sName;
+                for (int k = 0; k < 3; ++k) { s.m_P0[k] = pPrePos[k]; s.m_V0[k] = pPreVel[k]; }
+                s.m_fTop = p->m_Pos[1] > pPrePos[1] ? p->m_Pos[1] : pPrePos[1];
+            }
+            return;
+        }
+        s.m_fT += dt;
+        if (p->m_Pos[1] > s.m_fTop) s.m_fTop = p->m_Pos[1];
+        if (s.m_nState == 1 && !bAir)
+        {
+            ArcPrint("air", s, p->m_Pos, fSpeed);
+            s.m_nState = 0;
+        }
+        else if (s.m_nState == 2 && (bAir || fFlat2 <= 1.0f))
+        {
+            ArcPrint(bAir ? "slid,off" : "slid", s, p->m_Pos, fSpeed);
+            s.m_nState = 0;
+        }
+    }
+}
+
+
+// ---- lithtech.exe's CalcMotion (0x4500d0) -- see ltserverphysics.h ----- //
+//
+// Read off the shipped binary (HANDOVER 5fg), the donor's motion.cpp says the
+// same: constants 0.1 (0x4a1e24), 0.01 (0x4a1e08), 0.5 (0x4a1a74); the
+// MotionInfo's slide ratio is -0.7071 (0xbf350481, set at 0x410aa2/0x4135ec)
+// and its unit force the force's direction. The order of the float operations
+// is the binary's; x87's wider intermediates are not reproduced.
+bool LTPhys_CalcMotion(float dt, bool bGravity, bool bStanding,
+                       bool (*pGetNormal)(void* pCtx, float* pN3), void* pCtx,
+                       float fFriction, float* v, float* a, float* dr,
+                       int* pBranch, bool* pbFriction)
+{
+    static const float kSlideRatio = -0.70710677f;
+    float F[3];
+    LTServerPhys_GetGlobalForce(F);
+
+    const float fTimeIntegral = dt * dt * 0.5f;
+    float fVel2 = v[0]*v[0] + v[1]*v[1] + v[2]*v[2];
+    float fAcc2 = a[0]*a[0] + a[1]*a[1] + a[2]*a[2];
+    if (fVel2 < 0.1f) { fVel2 = 0.0f; v[0] = v[1] = v[2] = 0.0f; }
+    if (fAcc2 < 0.1f) { fAcc2 = 0.0f; a[0] = a[1] = a[2] = 0.0f; }
+    dr[0] = dr[1] = dr[2] = 0.0f;
+
+    bool bFriction = false;
+    int  nBranch   = LTPHYS_FREE;
+    if (bGravity)
+    {
+        if (bStanding)
+        {
+            if (fVel2 < 0.1f && fAcc2 < 0.1f)
+            {
+                v[0] = v[1] = v[2] = 0.0f; a[0] = a[1] = a[2] = 0.0f;
+                if (pBranch) *pBranch = LTPHYS_STOP;
+                if (pbFriction) *pbFriction = false;
+                return false;
+            }
+
+            // The force's direction (0x436760 Mag, then 1/mag), and the plane:
+            // the node stood on, else minus the unit force.
+            float fd[3] = { F[0], F[1], F[2] };
+            const float fFMag = sqrtf(fd[0]*fd[0] + fd[1]*fd[1] + fd[2]*fd[2]);
+            if (fFMag != 0.0f) { const float r = 1.0f / fFMag; fd[0] *= r; fd[1] *= r; fd[2] *= r; }
+            float n[3] = { -fd[0], -fd[1], -fd[2] };
+            if (fFMag == 0.0f) { n[0] = 0.0f; n[1] = 1.0f; n[2] = 0.0f; }
+            float nPlane[3];
+            if (pGetNormal && pGetNormal(pCtx, nPlane))
+            { n[0] = nPlane[0]; n[1] = nPlane[1]; n[2] = nPlane[2]; }
+
+            const float awf[3] = { a[0] + F[0], a[1] + F[1], a[2] + F[2] };
+
+            if (fd[0]*n[0] + fd[1]*n[1] + fd[2]*n[2] > kSlideRatio)
+            {
+                // "Steep": slide along the plane, never up it, at |a + F|.
+                nBranch = LTPHYS_STEEP;
+                const float fMag = sqrtf(awf[0]*awf[0] + awf[1]*awf[1] + awf[2]*awf[2]);
+                const float d = awf[0]*n[0] + awf[1]*n[1] + awf[2]*n[2];
+                for (int k = 0; k < 3; ++k) a[k] = awf[k] - n[k] * d;
+                const float fUp = a[0]*fd[0] + a[1]*fd[1] + a[2]*fd[2];
+                if (fUp < 0.0f) for (int k = 0; k < 3; ++k) a[k] -= fd[k] * fUp;
+                const float m = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+                if (m != 0.0f) { const float s = fMag / m; a[0] *= s; a[1] *= s; a[2] *= s; }
+            }
+            else
+            {
+                const float nv[3] = { v[0] + F[0] * dt, v[1] + F[1] * dt, v[2] + F[2] * dt };
+                if (nv[0]*n[0] + nv[1]*n[1] + nv[2]*n[2] > 0.01f)
+                {
+                    nBranch = LTPHYS_JUMP;      // leaving the plane: full force
+                    for (int k = 0; k < 3; ++k) a[k] = awf[k];
+                }
+                else if (a[0]*n[0] + a[1]*n[1] + a[2]*n[2] > 0.01f)
+                {
+                    // "Downhill": turned into the plane, same magnitude.
+                    nBranch = LTPHYS_DOWNHILL;
+                    const float fMag = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+                    const float d = n[0]*a[0] + n[1]*a[1] + n[2]*a[2] + 1.0f;
+                    for (int k = 0; k < 3; ++k) a[k] -= n[k] * d;
+                    const float m = sqrtf(a[0]*a[0] + a[1]*a[1] + a[2]*a[2]);
+                    if (m != 0.0f) { const float s = fMag / m; a[0] *= s; a[1] *= s; a[2] *= s; }
+                    bFriction = true;
+                }
+                else
+                {
+                    nBranch = LTPHYS_WALK;      // the force is held by the floor
+                    bFriction = true;
+                }
+            }
+        }
+        else
+        {
+            nBranch = LTPHYS_FALL;
+            for (int k = 0; k < 3; ++k) a[k] += F[k];
+        }
+    }
+    else if (fVel2 < 0.1f && fAcc2 < 0.1f)
+    {
+        v[0] = v[1] = v[2] = 0.0f; a[0] = a[1] = a[2] = 0.0f;
+        if (pBranch) *pBranch = LTPHYS_STOP;
+        if (pbFriction) *pbFriction = false;
+        return false;
+    }
+
+    const float k = fFriction;
+    if (bFriction && k > 0.0f)
+    {
+        // 0x4506d2: exp by x87 f2xm1/fscale; the closed form of v' = a - k v.
+        const float e = expf(-k * dt);
+        const float f = (1.0f - e) / k / k;
+        for (int i = 0; i < 3; ++i)
+        {
+            const float akk = a[i] / k;
+            const float vNew = (v[i] - akk) * e + akk;
+            dr[i] = akk * dt + (v[i] * k - a[i]) * f;
+            v[i] = vNew;
+        }
+    }
+    else
+    {
+        bFriction = false;
+        for (int i = 0; i < 3; ++i)
+        {
+            dr[i] = v[i] * dt + a[i] * (fTimeIntegral * 0.5f);
+            v[i] += a[i] * dt;
+        }
+    }
+    if (pBranch) *pBranch = nBranch;
+    if (pbFriction) *pbFriction = bFriction;
+    return true;
 }
 
 
@@ -254,6 +508,22 @@ void LTServerPhys_Update(float fDelta)
     // reason at the same value.
     if (fDelta > 0.10f) fDelta = 0.10f;
 
+    // LT_OLDSERVERSTEP=1 = the port's old integrator (5fg; says so):
+    // v += (a + g) dt, downward velocity zeroed on the floor, moved by the new
+    // velocity, acceleration kept, no friction.
+    static const bool s_bOldStep = []() {
+        const bool b = (getenv("LT_OLDSERVERSTEP") != 0);
+        if (b) { printf("[PHYS] LT_OLDSERVERSTEP=1 -- server objects step by the new velocity, keep their acceleration, no friction (old)\n"); fflush(stdout); }
+        return b; }();
+    static const bool s_bArcTrace = (getenv("LT_ARCTRACE") != 0);
+    if (s_bArcTrace)        // objects removed since the last step
+        for (std::map<void*, ArcState>::iterator it = g_Arcs.begin(); it != g_Arcs.end(); )
+        {
+            std::map<void*, ArcState>::iterator cur = it++;
+            if (!CLTServerObjects::FromHandle(cur->first) || !LTServerHost_IsLive(cur->first))
+                ArcTrace(cur->first, 0, 0, 0.0f);
+        }
+
     const unsigned int n = LTServerHost_ObjectCount();
     for (unsigned int i = 0; i < n; ++i)
     {
@@ -279,25 +549,93 @@ void LTServerPhys_Update(float fDelta)
             p->m_Accel[0] == 0.0f && p->m_Accel[1] == 0.0f && p->m_Accel[2] == 0.0f)
             continue;
 
-        for (int k = 0; k < 3; ++k)
+        const float fPrePos[3] = { p->m_Pos[0], p->m_Pos[1], p->m_Pos[2] };
+        const float fPreVel[3] = { p->m_Vel[0], p->m_Vel[1], p->m_Vel[2] };
+
+        if (s_bOldStep)
         {
-            float a = p->m_Accel[k];
-            if (bGravity) a += g_Force[k];
-            p->m_Vel[k] += a * fDelta;
+            for (int k = 0; k < 3; ++k)
+            {
+                float a = p->m_Accel[k];
+                if (bGravity) a += g_Force[k];
+                p->m_Vel[k] += a * fDelta;
+            }
+
+            // ⚠️ RESTING KILLS DOWNWARD VELOCITY, or gravity accumulates forever
+            // while the object sits on the floor and the first sideways nudge
+            // launches it at whatever speed it has silently reached.
+            if (p->m_bOnGround && p->m_Vel[1] < 0.0f) p->m_Vel[1] = 0.0f;
+
+            float want[3] = { p->m_Pos[0] + p->m_Vel[0] * fDelta,
+                              p->m_Pos[1] + p->m_Vel[1] * fDelta,
+                              p->m_Pos[2] + p->m_Vel[2] * fDelta };
+
+            bool bGround = false;
+            LTServerPhys_MoveTo(h, want, &bGround);
+            ++g_nIntegrated;
+            if (s_bArcTrace) ArcTrace(h, fPrePos, fPreVel, fDelta);
+            continue;
         }
 
-        // ⚠️ RESTING KILLS DOWNWARD VELOCITY, or gravity accumulates forever
-        // while the object sits on the floor and the first sideways nudge
-        // launches it at whatever speed it has silently reached.
-        if (p->m_bOnGround && p->m_Vel[1] < 0.0f) p->m_Vel[1] = 0.0f;
+        // ⚠️ LITHTECH.EXE'S OWN STEP (HANDOVER 5fg): the object update
+        // 0x469800 runs CalcMotion (call sites 0x46998e, with containers,
+        // and 0x469afe) on the object's velocity and acceleration, then --
+        // only when CalcMotion did not stop it -- CLEARS THE ACCELERATION
+        // (0x4699d6) and moves the object by the displacement if
+        // |dr|^2 > 0.001 (0x4699f4, [0x4a1a54]). The port integrated by the
+        // NEW velocity (dr = (v + a dt) dt), kept every acceleration forever
+        // (CCharacter::SpawnItem's one-frame push of a dropped item never
+        // ended) and had no friction at all: m_fFriction was stored, never
+        // read, and started at 0 where lithtech.exe's objects start at 5
+        // (0x45a91f). A grenade fell 0.75 g dt^2 a frame too far: 25 units
+        // per second of flight at 60 fps. The resting rule -- downward
+        // velocity zeroed on the floor -- is the world touch's job now
+        // (5do: the velocity into a surface is taken away, as the donor's
+        // collision response does), and CalcMotion's walk branch adds no
+        // gravity to an object standing still.
+        // ⚠️ Not done: containers (MID_AFFECTPHYSICS, the first call site) --
+        // the port never asks a VolumeBrush to change an object's physics.
+        float v[3] = { p->m_Vel[0], p->m_Vel[1], p->m_Vel[2] };
+        float a[3] = { p->m_Accel[0], p->m_Accel[1], p->m_Accel[2] };
+        float dr[3];
+        int nBranch = LTPHYS_FREE;
+        bool bFriction = false;
 
-        float want[3] = { p->m_Pos[0] + p->m_Vel[0] * fDelta,
-                          p->m_Pos[1] + p->m_Vel[1] * fDelta,
-                          p->m_Pos[2] + p->m_Vel[2] * fDelta };
-
-        bool bGround = false;
-        LTServerPhys_MoveTo(h, want, &bGround);
-        ++g_nIntegrated;
+        // ⚠️ STANDING MEANS THE FLOOR HAS STOPPED IT. lithtech.exe sets
+        // "standing on" from the collision of the move itself, and that
+        // collision has taken the velocity into the plane away, all but the
+        // 0.05 it leaves on purpose (EXTRA_PENETRATION_ADD) -- a standing
+        // object never still falls into its floor. The port's ground is a
+        // probe with a 0.75 skin (ltworldcollide.cpp), so a falling object
+        // whose step ends inside the skin, short of contact, counted as
+        // standing at full speed: a coin landing at 605 u/s took two frames
+        // of WALK friction (-15%) before its first touch, and bounced short.
+        // So: standing, but moving into the plane faster than 0.1 u/s, is
+        // the last bit of a fall. LT_OLDSERVERSTEP=1 has no such rule.
+        GroundCtx g;
+        g.m_bHave = false;
+        bool bStanding = p->m_bOnGround;
+        if (bStanding && bGravity && v[0]*v[0] + v[1]*v[1] + v[2]*v[2] >= 0.1f)
+        {
+            g.m_bHave = ServerGroundNormal(p, g.m_N);
+            const float* n = g.m_bHave ? g.m_N : kUp;
+            if (v[0]*n[0] + v[1]*n[1] + v[2]*n[2] < -0.1f) { bStanding = false; ++g_nArriving; }
+        }
+        const bool bGo = LTPhys_CalcMotion(fDelta, bGravity, bStanding,
+                                           GroundCtxNormal, &g, p->m_fFriction,
+                                           v, a, dr, &nBranch, &bFriction);
+        ++g_nBranch[nBranch];
+        if (bFriction) ++g_nFriction;
+        if (p->m_Flags & FLAG_GOTHRUWORLD) ++g_nGoThru;
+        for (int k = 0; k < 3; ++k) { p->m_Vel[k] = v[k]; p->m_Accel[k] = 0.0f; }
+        if (bGo && dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2] > 0.001f)
+        {
+            const float want[3] = { p->m_Pos[0] + dr[0], p->m_Pos[1] + dr[1], p->m_Pos[2] + dr[2] };
+            bool bGround = false;
+            LTServerPhys_MoveTo(h, want, &bGround);
+            ++g_nIntegrated;
+        }
+        if (s_bArcTrace) ArcTrace(h, fPrePos, fPreVel, fDelta);
     }
 }
 
@@ -717,6 +1055,12 @@ void LTServerPhys_DumpCensus()
            g_nGravity, g_nWithVel);
     printf("       flags: %u object-tick(s) carried any flag; union 0x%08x\n",
            g_nWithFlags, g_FlagsSeen);
+    printf("       CalcMotion branches (5fg): stop %u, fall %u, steep %u, jump %u, downhill %u, walk %u, no gravity %u; %u with friction\n",
+           g_nBranch[LTPHYS_STOP], g_nBranch[LTPHYS_FALL], g_nBranch[LTPHYS_STEEP],
+           g_nBranch[LTPHYS_JUMP], g_nBranch[LTPHYS_DOWNHILL], g_nBranch[LTPHYS_WALK],
+           g_nBranch[LTPHYS_FREE], g_nFriction);
+    printf("       %u step(s) on the probe's floor still falling into it (taken as falling); %u step(s) of FLAG_GOTHRUWORLD objects\n",
+           g_nArriving, g_nGoThru);
     if (!g_nIntegrated)
         printf("       ⚠️  NOTHING INTEGRATED. Either no object has velocity or\n"
                "           gravity, or the integrator is not being called.\n");

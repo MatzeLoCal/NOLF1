@@ -225,6 +225,14 @@ void LTMetal_SetFog(bool bOn, float fNear, float fFar, const float* pRGB255);
 // draws use; 0, 0 = depth fog (the default).
 void LTMetal_SetFogRange(float fKX, float fKY);
 
+// ⚠️ ONE-SIDED WORLD POLYGONS (HANDOVER 5fh) for the draws that follow, until
+// set again: 0 = both faces (everything but the static world); 1 = cull the
+// back, front clockwise; 2 = front counter-clockwise (a reflection pass, whose
+// mirrored projection reverses every winding). Takes effect on the current
+// encoder at once -- not every draw goes through the same encoder path, and
+// a model drawn after the world must not inherit the cull.
+void LTMetal_SetWorldCull(int nMode);
+
 // ⚠️ GPU SKINNING (HANDOVER 5cd). A model's mesh goes up once -- vertices with
 // their file position, normal and weight range; the weights; one CORNER per
 // face corner (UVs live on faces) -- and a frame sends only the node palette

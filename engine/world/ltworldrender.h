@@ -219,6 +219,21 @@ bool LTModelDepthBiasEnabled();
 // this flag, always named `PhysicsBSP`, and nothing else does.
 bool LTIsMainWorldBSP(const LTWorldModelHeader& m);
 
+// ⚠️ WORLD POLYGONS ARE ONE-SIDED (HANDOVER 5fh). d3d.ren draws a world
+// polygon only when the eye is in front of its plane (0x10066d76, and the
+// second world loop 0x1007b745 at 0.01); both of this port's backends drew
+// both faces. Closed brushes hid it; a see-through one -- T07S01's fences, a
+// unit thick with the mesh on both faces -- showed both lattices.
+// LT_TWOSIDEDWORLD=1 = both faces again (says so).
+bool LTOneSidedWorld();
+
+// The camera centre in the space a clip matrix maps FROM: the one point it
+// sends to x = y = w = 0. So the eye a model is drawn from comes with the
+// matrix it is drawn with -- moved, mirrored, depth-nudged or a sky's --
+// rather than from a field each caller has to remember to set. False for a
+// matrix with no centre (orthographic, or the static recorder's identity).
+bool LTEyeFromClip(const float* pMVP16, float* pEye3);
+
 // ----------------------------------------------------------------------- //
 //
 // ⚠️ A SPRITE OBJECT IS NOT A MODEL AND NOT A BRUSH -- it is a camera-facing

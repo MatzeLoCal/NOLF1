@@ -144,7 +144,12 @@ BaseClass* CLTServerObjects::Create(ClassDef* pClass, ObjectCreateStruct* pStruc
     // reasons nobody can find. Same rule as every out-parameter in this port.
     for (int k = 0; k < 3; ++k) { pRec->m_Vel[k] = 0.0f; pRec->m_Accel[k] = 0.0f; }
     pRec->m_fMass = 1.0f;
-    pRec->m_fFriction = 0.0f;
+    // ⚠️ 5, AS LITHTECH.EXE'S OBJECTS START (0x45a91f: [obj+0xdc] = 5.0f; the
+    // donor's objectmgr.cpp: "Default friction coefficient"). It was 0 and
+    // read by nothing; CalcMotion's walk branch reads it since 5fg, and the
+    // game reads it back too (PlayerObj.cpp:1605 sends it to the client).
+    // LT_OLDSERVERSTEP=1 keeps 0, as before.
+    pRec->m_fFriction = getenv("LT_OLDSERVERSTEP") ? 0.0f : 5.0f;
     // The donor's default (objectmgr.cpp: "don't tell them unless they change
     // this"): a world touch is sent only to objects that lowered it --
     // projectiles, debris and destructibles set 0 or MINIMUM_FORCE (5do).

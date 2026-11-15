@@ -18,6 +18,7 @@
 #include "ltfilemgr.h"
 
 #include <math.h>
+#include <cmath>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
@@ -721,6 +722,41 @@ bool LTEnvMapsEnabled()
     return !s_bOff && s_bEnvConsole;
 }
 float LTEnvMapScale() { return s_fEnvScale; }
+
+bool LTOneSidedWorld()
+{
+    static const bool s_bTwo = []() {
+        const bool b = (getenv("LT_TWOSIDEDWORLD") != 0);
+        if (b) { printf("[LT3D] LT_TWOSIDEDWORLD=1 -- world polygons drawn from both sides (old)\n"); fflush(stdout); }
+        return b; }();
+    return !s_bTwo;
+}
+
+bool LTEyeFromClip(const float* M, float* pEye3)
+{
+    // Rows x, y and w of clip = M * (p, 1) set to zero: a 3x3 system, in
+    // double -- the entries mix a projection's ~1 with world coordinates in
+    // the thousands.
+    const double a[3][3] = { { M[0],  M[1],  M[2]  },
+                             { M[4],  M[5],  M[6]  },
+                             { M[12], M[13], M[14] } };
+    const double b[3] = { -(double)M[3], -(double)M[7], -(double)M[15] };
+    const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1])
+                     - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0])
+                     + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (!(fabs(det) > 1e-12)) return false;
+    for (int c = 0; c < 3; ++c)
+    {
+        double m[3][3];
+        for (int r = 0; r < 3; ++r)
+            for (int k = 0; k < 3; ++k) m[r][k] = (k == c) ? b[r] : a[r][k];
+        const double d = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                       - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                       + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        pEye3[c] = (float)(d / det);
+    }
+    return std::isfinite(pEye3[0]) && std::isfinite(pEye3[1]) && std::isfinite(pEye3[2]);
+}
 
 // See ltworldrender.h (HANDOVER 5en).
 namespace { bool s_bChromeConsole = false; std::string s_sChromeMap; float s_fChromePan = 0.0005f, s_fChromeScale = 1.0f; }
@@ -3763,6 +3799,13 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
     // per-polygon lookup below is skipped for the rest.
     const bool bMirrorModel = !m_MirrorModels.empty() && m_MirrorModels.count(&M) != 0;
 
+    // ⚠️ ONE-SIDED (HANDOVER 5fh): the eye this model is drawn from, in its
+    // own space, out of the very matrix it is drawn with. Not while the
+    // static world is recorded -- that is drawn once, for every eye, and the
+    // GPU culls it by winding instead (LTMetal_SetWorldCull).
+    float fSideEye[3] = { 0.0f, 0.0f, 0.0f };
+    const bool bOneSided = !m_bRecordingStatic && LTOneSidedWorld() && LTEyeFromClip(pMVP, fSideEye);
+
     for (size_t nAt = 0; nAt < nDraw; ++nAt)
     {
         const size_t q = pOrder ? (size_t)(*pOrder)[nAt] : nAt;
@@ -3774,6 +3817,18 @@ void CLTWorldScene::DrawModel(const LT3DTarget& t, const float* pMVP,
         if (po.m_nSurface >= M.m_Surfaces.size()) continue;
 
         const LTWorldSurface& sf = M.m_Surfaces[po.m_nSurface];
+
+        // ⚠️ THE EYE MUST BE IN FRONT OF THE PLANE, by more than 0.0001 --
+        // d3d.ren's world loop (0x10066d62..82) skips the polygon otherwise,
+        // before it even counts it as processed. Drawn two-sided, a fence
+        // (a brush a unit thick, the mesh on both faces) showed two lattices.
+        if (bOneSided && sf.m_nPlane < M.m_Planes.size())
+        {
+            const LTWorldPlane& pl = M.m_Planes[sf.m_nPlane];
+            if (pl.m_Normal[0] * fSideEye[0] + pl.m_Normal[1] * fSideEye[1]
+                + pl.m_Normal[2] * fSideEye[2] - pl.m_Dist <= 0.0001f)
+                continue;
+        }
 
         // ⚠️ A SKY PORTAL IS NOT A TEXTURED SURFACE. The engine draws the sky
         // through it; the texture on disk is DEdit's placeholder and it says
