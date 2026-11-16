@@ -1,3 +1,6 @@
+// Linux port only. Xcode compiles every file under engine/ (synchronized
+// folder), so this file is empty on macOS.
+#ifndef __APPLE__  // Linux port only
 // ----------------------------------------------------------------------- //
 //
 // MODULE  : ltgl.cpp  (Linux port)
@@ -1734,3 +1737,4 @@ bool LTGL_BlitRGBA(const unsigned char* pRGBA, int nWidth, int nHeight, int nOut
     glClipControl(GL_UPPER_LEFT, GL_ZERO_TO_ONE);
     return true;
 }
+#endif  // !__APPLE__

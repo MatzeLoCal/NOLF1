@@ -1,3 +1,6 @@
+// Linux port only. Xcode compiles every file under engine/ (synchronized
+// folder), so this file is empty on macOS.
+#ifndef __APPLE__  // Linux port only
 // Linux port: ltaudio.h on SDL3 audio + dr_mp3 (replaces sound/ltaudio.mm).
 
 #include "ltaudio.h"
@@ -95,3 +98,4 @@ bool LTAudio_DecodeMP3(const void* pData, unsigned int nSize,
     outChannels = cfg.channels;
     return true;
 }
+#endif  // !__APPLE__

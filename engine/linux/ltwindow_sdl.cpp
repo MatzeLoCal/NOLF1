@@ -1,3 +1,6 @@
+// Linux port only. Xcode compiles every file under engine/ (synchronized
+// folder), so this file is empty on macOS.
+#ifndef __APPLE__  // Linux port only
 // Linux port: ltwindow.h on SDL3 (replaces platform/ltwindow.mm).
 // The frame is a top-down RGBA8888 buffer, uploaded to a streaming texture.
 
@@ -404,3 +407,4 @@ void LTWindow_Close()
     g_bOpen = false;
     fprintf(stderr, "[LTWINDOW] closed\n");
 }
+#endif  // !__APPLE__

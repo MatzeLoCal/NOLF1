@@ -1,3 +1,6 @@
+// Linux port only. Xcode compiles every file under engine/ (synchronized
+// folder), so this file is empty on macOS.
+#ifndef __APPLE__  // Linux port only
 // ----------------------------------------------------------------------- //
 //
 // MODULE  : ltsf2.cpp  (Linux port)
@@ -253,3 +256,4 @@ bool LTSF2_Load(CLTDLSCollection& coll, const unsigned char* p, size_t n)
     fflush(stdout);
     return !coll.m_Instruments.empty();
 }
+#endif  // !__APPLE__
