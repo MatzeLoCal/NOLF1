@@ -295,6 +295,14 @@ void*        LTSaveRefs_OutsideAt(unsigned int i);
 unsigned int LTSaveRefs_Read();
 unsigned int LTSaveRefs_Unresolved();
 
+// The save-reference translation, shared by WriteToLoadSaveMessageObject /
+// ReadFromLoadSaveMessageObject and ILTMessage::WriteObject / ReadObject
+// (CLTMessage), which use it while a save or load is in progress.
+bool        LTSaveRefs_InSave();
+bool        LTSaveRefs_InLoad();
+LTRESULT    LTSaveRefs_WriteObject(HMESSAGEWRITE h, HOBJECT hObject);
+LTRESULT    LTSaveRefs_ReadObject(HMESSAGEREAD h, HOBJECT* hObject);
+
 // ⚠️ THE RECEIVERS, registered by the two hosts rather than called directly.
 // engine/shared cannot include engine/server or the skeleton host without
 // making the shared layer depend on both halves it exists to keep apart.

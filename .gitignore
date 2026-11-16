@@ -3,3 +3,4 @@ run/
 xcuserdata/
 # Linux port
 build-linux/
+build-mac/

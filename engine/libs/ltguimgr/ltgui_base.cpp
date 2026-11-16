@@ -45,6 +45,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
+#include <stdlib.h>
 
 #include "ltfont.h"
 #include "ltpcx.h"
@@ -243,6 +245,33 @@ LTBOOL CLTGUIFont::Init(ILTClient* pClientDE, LITHFONTCREATESTRUCT* lfCS)
             if (pFont->Build(pcx.GetRGBA(), (int)pcx.GetWidth(), (int)pcx.GetHeight(),
                              (unsigned int)lfCS->hTransColor, flags))
             {
+                // PORT: the subtitle / message font (MsgFontFore.pcx) from the
+                // system font instead: anti-aliased and NOLF_SUBSCALE (default
+                // 1.5) times the bitmap's height. NOLF_SUBSCALE=0 keeps the
+                // original bitmap. ltfont.cpp BuildSmooth.
+                {
+                    const char* pName = lfCS->szFontBitmap;
+                    const size_t n = strlen(pName);
+                    const char* kSub = "msgfontfore.pcx";
+                    const size_t k = strlen(kSub);
+                    const char* pScale = getenv("NOLF_SUBSCALE");
+                    const float fScale = pScale ? (float)atof(pScale) : 1.5f;
+                    if (n >= k && strcasecmp(pName + n - k, kSub) == 0 && fScale > 0.0f)
+                    {
+                        const int h = (int)(pFont->GetHeight() * fScale + 0.5f);
+                        CLTBitmapFont* pSmooth = new CLTBitmapFont;
+                        if (pSmooth->BuildSmooth(h, (unsigned int)lfCS->hTransColor))
+                        {
+                            printf("[LTFONT] %s: smooth system font, %d px (bitmap %d px)\n",
+                                   pName, h, pFont->GetHeight());
+                            fflush(stdout);
+                            delete pFont;
+                            pFont = pSmooth;
+                        }
+                        else
+                            delete pSmooth;
+                    }
+                }
                 Term();
                 pFont->m_bChromaKey = lfCS->bChromaKey ? true : false;
                 m_pClientDE   = pClientDE;

@@ -62,6 +62,13 @@ void	CSubtitle::Init()
 	LTFLOAT defSubtitles = 0.0f;
 	if (!g_pInterfaceResMgr->IsEnglish())
 		defSubtitles = 1.0f;
+	// PORT: a translated string table (NOLF_LANG_FILE, ltstringmgr.cpp) keeps
+	// IDS_GAME_LANGUAGE "English" for the bitmap fonts, but is there for the
+	// subtitles -- so they default to on, like a localised build's.
+	{
+		const char* pLang = getenv("NOLF_LANG_FILE");
+		if (pLang && *pLang) defSubtitles = 1.0f;
+	}
 	g_vtSubtitles.Init(g_pLTClient, "Subtitles", LTNULL, defSubtitles);
     g_vtSubtitleMaxDist.Init(g_pLTClient, "SubtitleMaxDist", LTNULL, 1000.0f);
 

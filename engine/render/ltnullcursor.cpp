@@ -110,8 +110,37 @@ LTRESULT CLTNullCursor::SetCursorMode(CursorMode cMode)
     // for one build -- hides the pointer over the dialogue window and makes the
     // cutscene impossible to advance. Driving capture from the game's own
     // request means the two can never disagree.
-    LTWindow_SetMouseLook(cMode == CM_None);
+    LTCursor_ApplyMouseLook();
     return LT_OK;
+}
+
+
+// ----------------------------------------------------------------------- //
+// ⚠️ CM_None IS NOT ENOUGH WITH THE SOFTWARE CURSOR. With "HardwareCursor" 0
+// (the game draws its own arrow) CInterfaceMgr::UseCursor(TRUE) never asks for
+// CM_Hardware again -- it only runs "CursorCenter 0" -- so after the first
+// UseCursor(FALSE) (a loading screen, a level) the mode stayed CM_None in the
+// menus: the pointer stayed captured and the menu cursor froze, first noticed
+// in the Load folder. CursorCenter is the game's own mouse-look switch
+// (InterfaceMgr.cpp UseCursor), so capture needs both: CM_None AND
+// CursorCenter 1. Before the game has said anything about CursorCenter, the
+// cursor mode alone decides, as before.
+// ----------------------------------------------------------------------- //
+
+static int g_nCursorCenter = -1;   // -1 = the game has not set it yet
+
+void LTCursor_ApplyMouseLook()
+{
+    CursorMode m = CM_Hardware;
+    LTGetNullCursor()->GetCursorMode(m);
+    const bool bLook = (m == CM_None) && (g_nCursorCenter != 0);
+    LTWindow_SetMouseLook(bLook);
+}
+
+void LTCursor_SetCenter(bool bCenter)
+{
+    g_nCursorCenter = bCenter ? 1 : 0;
+    LTCursor_ApplyMouseLook();
 }
 
 LTRESULT CLTNullCursor::GetCursorMode(CursorMode& cMode)

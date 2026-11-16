@@ -1159,6 +1159,35 @@ LTBOOL CBaseFolder::GetControlUnderPoint(int xPos, int yPos, int *pnIndex)
 {
 	_ASSERT(pnIndex);
 
+	// PORT: the back / next ARROW counts as its control. Only the text was
+	// ever hit-tested; the arrow beside it (ArrowBackPos / ArrowNextPos) is
+	// what a player clicks, and in a translated build the text is not even
+	// where the English one was. Fixed controls are indexed -1-i.
+	{
+		struct { CLTGUICtrl* pCtrl; const char* pBmp; LTIntPt pos; } arrows[2] =
+		{
+			{ m_pBack,     m_sArrowBack, m_ArrowBackPos },
+			{ m_pContinue, m_sArrowNext, m_ArrowNextPos },
+		};
+		for (int a = 0; a < 2; ++a)
+		{
+			if (!arrows[a].pCtrl || !arrows[a].pBmp[0] || !arrows[a].pCtrl->IsEnabled()) continue;
+			HSURFACE hArrow = g_pInterfaceResMgr->GetSharedSurface((char*)arrows[a].pBmp);
+			if (!hArrow) continue;
+			uint32 w = 0, h = 0;
+			g_pLTClient->GetSurfaceDims(hArrow, &w, &h);
+			if (xPos < arrows[a].pos.x || xPos > arrows[a].pos.x + (int)w ||
+				yPos < arrows[a].pos.y || yPos > arrows[a].pos.y + (int)h) continue;
+			for (int f = 0; f < (int)m_fixedControlArray.GetSize(); f++)
+			{
+				if (m_fixedControlArray[f] == arrows[a].pCtrl)
+				{
+					*pnIndex = -1 - f;
+					return LTTRUE;
+				}
+			}
+		}
+	}
 
 	// See if the user clicked on any of the controls.
 	int i;

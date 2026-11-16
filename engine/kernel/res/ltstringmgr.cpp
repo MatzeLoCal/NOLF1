@@ -106,7 +106,108 @@ bool CLTStringMgr::LoadResourceDll(CLTFileMgr* pFileMgr, const char* pDllName)
         LTRecord_Event("res", "lossy %u", m_Table.GetLossyCount());
     }
 
+    if (const char* pLang = getenv("NOLF_LANG_FILE"))
+        if (*pLang) LoadTranslation(pLang);
+
     return true;
+}
+
+
+// ----------------------------------------------------------------------- //
+//
+// PORT: the translation overlay (NOLF_LANG_FILE).
+//
+// The file is UTF-8; the game wants the 8-bit bytes the original Win32 build
+// would have had. That is CP1252, except for the four Hungarian letters
+// CP1252 lacks, which take their CP1250 positions -- the same bytes as
+// CP1252's õ û Õ Û, which the English table never uses. The bitmap fonts
+// draw those bytes as ő ű Ő Ű (ltfont.cpp, AddAccentedGlyphs).
+//
+// ----------------------------------------------------------------------- //
+
+static void ltstr_Utf8ToGame(const std::string& in, std::string& out, unsigned int& nLossy)
+{
+    out.clear();
+    std::vector<unsigned short> u16;
+    for (size_t i = 0; i < in.size(); )
+    {
+        unsigned char c = (unsigned char)in[i];
+        unsigned int cp = '?';
+        int n = 1;
+        if (c < 0x80) cp = c;
+        else if ((c & 0xE0) == 0xC0 && i + 1 < in.size()) { cp = ((c & 0x1F) << 6) | (in[i + 1] & 0x3F); n = 2; }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < in.size()) { cp = ((c & 0x0F) << 12) | ((in[i + 1] & 0x3F) << 6) | (in[i + 2] & 0x3F); n = 3; }
+        else if ((c & 0xF8) == 0xF0) { cp = '?'; n = 4; }
+        i += n;
+
+        switch (cp)
+        {
+            case 0x0151: out.push_back((char)0xF5); continue;   // ő
+            case 0x0171: out.push_back((char)0xFB); continue;   // ű
+            case 0x0150: out.push_back((char)0xD5); continue;   // Ő
+            case 0x0170: out.push_back((char)0xDB); continue;   // Ű
+        }
+        if (cp > 0xFFFF) cp = '?';
+        unsigned short w = (unsigned short)cp;
+        std::string one;
+        CLTPEStringTable::Utf16ToCP1252(&w, 1, one, &nLossy);
+        out += one;
+    }
+}
+
+
+unsigned int CLTStringMgr::LoadTranslation(const char* pPath)
+{
+    FILE* fp = fopen(pPath, "rb");
+    if (!fp)
+    {
+        fprintf(stderr, "[LTSTR] ⚠️  translation %s not found -- English text\n", pPath);
+        return 0;
+    }
+
+    unsigned int nSet = 0, nLossy = 0, nBad = 0;
+    std::string line, text, game;
+    char buf[8192];
+    while (fgets(buf, sizeof(buf), fp))
+    {
+        line = buf;
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+
+        size_t tab = line.find('\t');
+        if (tab == std::string::npos || tab == 0) { ++nBad; continue; }
+        int id = atoi(line.substr(0, tab).c_str());
+
+        text.clear();
+        for (size_t i = tab + 1; i < line.size(); ++i)
+        {
+            if (line[i] == '\\' && i + 1 < line.size())
+            {
+                char e = line[++i];
+                if (e == 'n') text += '\n';
+                else if (e == 't') text += '\t';
+                else if (e == 'r') text += '\r';
+                else if (e == '\\') text += '\\';
+                else { text += '\\'; text += e; }
+            }
+            else text += line[i];
+        }
+
+        // Only ids the game has: a typo in an id must not invent a string.
+        if (!m_Table.Find(id)) { ++nBad; continue; }
+
+        ltstr_Utf8ToGame(text, game, nLossy);
+        m_Table.Set(id, game);
+        ++nSet;
+    }
+    fclose(fp);
+
+    fprintf(stderr, "[LTSTR] translation %s: %u string(s) replaced", pPath, nSet);
+    if (nBad)   fprintf(stderr, ", %u line(s) skipped", nBad);
+    if (nLossy) fprintf(stderr, ", %u character(s) had no 8-bit spelling", nLossy);
+    fprintf(stderr, "\n");
+    LTRecord_Event("res", "translation %u", nSet);
+    return nSet;
 }
 
 
