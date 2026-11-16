@@ -5,6 +5,7 @@
 // ------------------------------------------------------------------------- //
 
 #include "ltdmperf.h"
+#include <set>
 
 #include <algorithm>
 #include <ctype.h>
@@ -220,7 +221,14 @@ const CLTDLSCollection* CLTDMPerformance::GetDLS(const char* pFile)
     if (bRead && !b.empty())
     {
         p = new CLTDLSCollection;
+        // Linux port: the GM set may be a SoundFont 2 bank (ltsf2.cpp).
+#ifndef __APPLE__
+        const bool bSF2 = b.size() > 12 && !memcmp(&b[0], "RIFF", 4) && !memcmp(&b[8], "sfbk", 4);
+        extern bool LTSF2_Load(CLTDLSCollection&, const unsigned char*, size_t);
+        if (!(bSF2 ? LTSF2_Load(*p, &b[0], b.size()) : p->Load(&b[0], b.size()))) { delete p; p = 0; }
+#else
         if (!p->Load(&b[0], b.size())) { delete p; p = 0; }
+#endif
     }
     m_DLS[k] = p;
     if (!p) fprintf(stderr, "[LTDM] DLS not loaded: %s\n", k.empty() ? m_sGMPath.c_str() : pFile);
@@ -284,6 +292,14 @@ bool CLTDMPerformance::Resolve(const LTDMBandInstrument& bi, const LTDLSInstrume
     if (gm != m_DLS.end() && gm->second)
         if (const LTDLSInstrument* p = gm->second->Find(nPatch, false))
         { pInst = p; pColl = gm->second; ++m_Stats.m_nGMHits; return true; }
+    // Linux port: name each unplayable patch once, so a missing GM set is audible in the log.
+    {
+        static std::set<uint32_t> s_Missed;
+        if (s_Missed.insert(nPatch).second)
+            fprintf(stderr, "[LTDM] no instrument for patch 0x%08X (bank %u, program %u)%s\n", nPatch,
+                    (unsigned)((nPatch >> 8) & 0x3FFF), (unsigned)(nPatch & 0x7F),
+                    (nPatch & 0x80000000u) ? " [drums]" : "");
+    }
     return false;
 }
 

@@ -32,6 +32,7 @@
 #include "ltreplicate.h"
 
 #include <algorithm>
+#include <chrono>
 #include <set>
 #include <stddef.h>
 

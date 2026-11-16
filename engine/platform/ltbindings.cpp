@@ -7,6 +7,11 @@
 // ----------------------------------------------------------------------- //
 
 #include "windows.h"
+#ifdef __APPLE__
+#define LT_APPSUPPORT_DIR "/Library/Application Support/NOLF1"
+#else
+#define LT_APPSUPPORT_DIR "/.local/share/NOLF1"   // Linux port
+#endif
 #include "lithtech.h"
 
 #include "ltbindings.h"
@@ -571,7 +576,7 @@ const char* LTConfig_Dir()
         else
         {
             const char* pHome = getenv("HOME");
-            s = std::string(pHome ? pHome : ".") + "/Library/Application Support/NOLF1";
+            s = std::string(pHome ? pHome : ".") + LT_APPSUPPORT_DIR;
         }
     }
     return s.c_str();
@@ -1202,7 +1207,10 @@ void LTBind_DumpCensus()
 // ----------------------------------------------------------------------- //
 
 #include <dlfcn.h>
+#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+
+#endif
 
 namespace
 {
@@ -1234,6 +1242,9 @@ namespace
     // time so the project needs no Carbon link.
     unsigned LayoutCharForMacKey(int nMacKey)
     {
+#ifndef __APPLE__
+        (void)nMacKey; return 0;   // Linux port: US key labels
+#else
         typedef void*       (*CopySrcFn)();
         typedef void*       (*GetPropFn)(void*, CFStringRef);
         typedef int32_t     (*TranslateFn)(const void*, uint16_t, uint16_t, uint32_t, uint32_t,
@@ -1264,6 +1275,7 @@ namespace
         }
         CFRelease((CFTypeRef)src);
         return c;
+#endif
     }
 
     unsigned LayoutChar(int vk)

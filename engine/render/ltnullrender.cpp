@@ -32,7 +32,9 @@
 #include <utility>
 #include <vector>
 #include <mach-o/dyld.h>
+#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+#endif
 
 
 // ----------------------------------------------------------------------- //
@@ -206,6 +208,7 @@ static void LTMode_RememberForLauncher(uint32 w, uint32 h)
     uint32_t n = sizeof(szExe);
     if (_NSGetExecutablePath(szExe, &n) != 0 || !strstr(szExe, ".app/Contents/Helpers/")) return;
 
+#ifdef __APPLE__
     const CFStringRef app = CFSTR("com.schonder.nolf.launcher");
     int iw = (int)w, ih = (int)h;
     CFNumberRef nw = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &iw);
@@ -220,6 +223,7 @@ static void LTMode_RememberForLauncher(uint32 w, uint32 h)
     }
     if (nw) CFRelease(nw);
     if (nh) CFRelease(nh);
+#endif
 }
 
 bool CLTNullRender::SetMode(const RMode* pMode)

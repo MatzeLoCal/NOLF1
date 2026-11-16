@@ -30,7 +30,33 @@
 
 namespace
 {
+#ifdef __APPLE__
     const char* const kGMPath = "/System/Library/Components/CoreAudio.component/Contents/Resources/gs_instruments.dls";
+#else
+    // Linux port: a General MIDI bank for the instruments NOLF's own DLS banks
+    // do not carry -- LT_GMBANK, else a SoundFont in the user data directory,
+    // else a distribution's GM SoundFont. DLS or SF2, either loads.
+    const char* GMBankPath()
+    {
+        static std::string s;
+        if (!s.empty()) return s.c_str();
+        std::vector<std::string> cand;
+        if (const char* e = getenv("LT_GMBANK")) cand.push_back(e);
+        const char* home = getenv("HOME");
+        const std::string d = std::string(home ? home : ".") + "/.local/share/NOLF1/";
+        cand.push_back(d + "gm.dls");
+        cand.push_back(d + "gm.sf2");
+        cand.push_back(d + "GeneralUser-GS.sf2");
+        cand.push_back("/usr/share/sounds/sf2/FluidR3_GM.sf2");
+        cand.push_back("/usr/share/soundfonts/FluidR3_GM.sf2");
+        cand.push_back("/usr/share/soundfonts/default.sf2");
+        for (size_t i = 0; i < cand.size(); ++i)
+            if (FILE* f = fopen(cand[i].c_str(), "rb")) { fclose(f); s = cand[i]; break; }
+        if (s.empty()) s = d + "GeneralUser-GS.sf2";     // named in the "not loaded" line
+        return s.c_str();
+    }
+#define kGMPath GMBankPath()
+#endif
 
     bool ReadGameFile(const char* pPath, std::vector<unsigned char>& out, void*)
     {
