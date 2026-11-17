@@ -270,6 +270,14 @@ void            LTServerHost_Stop();
 unsigned int LTServerHost_PointContainers(const float* pPoint3, void** pList, unsigned int nMax);
 bool         LTServerHost_ContainerCode(void* hServer, unsigned short* pCode);
 
+// MID_AFFECTPHYSICS (HANDOVER 5fj). Begin: collects this step's live volumes
+// (FLAG_CONTAINER), returns how many (0 = nothing to do, or
+// LT_NOCONTAINERPHYSICS=1). Pass: hands the object's acceleration, velocity
+// and flags -- a copy, changed in place -- to every volume its box is in, and
+// returns how many; 0 leaves the three untouched.
+unsigned int LTServerHost_BeginContainerPass();
+unsigned int LTServerHost_ContainerPass(void* hObj, float* pAccel3, float* pVel3, unsigned int* pFlags);
+
 // The server's GAME console variable (WorldProperties' fog, FarZ ...) -- what
 // the client's GetServerConVarValueString/Float read. Null when unknown.
 const char*  LTServerHost_GameConVarString(const char* pName);

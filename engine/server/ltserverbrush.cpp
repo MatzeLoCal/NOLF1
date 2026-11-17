@@ -70,6 +70,7 @@ namespace
         std::vector<float>  m_Tris;
         std::vector<unsigned int> m_TriPoly;    // LTWorldPolyId per triangle
         float               m_Box[6];       // m_Tris' bounds at rest: min3 max3 (5ef)
+        int                 m_nConvex;      // -1 not asked yet, 0, 1 -- see LTServerBrush_BoxTouches
     };
     std::vector<HitBrush>              g_HitBrushes;
     std::map<const void*, size_t>      g_HitIndex;
@@ -346,6 +347,7 @@ void LTServerBrush_Build(const CLTWorld& world)
             HitBrush hb;
             hb.m_pRec = p;
             hb.m_nMovable = -1;
+            hb.m_nConvex = -1;
             for (size_t q = 0; q < W.m_Polys.size(); ++q)
             {
                 const LTWorldPoly& po = W.m_Polys[q];
@@ -979,6 +981,106 @@ int LTServerBrush_RayTest(const void* hRec, const float* pFrom3, const float* pT
     if (pFrac) *pFrac = fBest;
     if (pPolyId) *pPolyId = nBestPoly;
     if (pNormal3) for (int k = 0; k < 3; ++k) pNormal3[k] = nBest[k];
+    return 1;
+}
+
+namespace
+{
+    // A triangle's plane, its normal OUT of the brush (e1 x e2, measured --
+    // see the one-sided rule in LTServerBrush_RayTest): n.x = d on it.
+    bool TriPlane(const float* a, const float* b, const float* c, float* n, float* d)
+    {
+        const float e1[3] = { b[0]-a[0], b[1]-a[1], b[2]-a[2] };
+        const float e2[3] = { c[0]-a[0], c[1]-a[1], c[2]-a[2] };
+        n[0] = e1[1]*e2[2] - e1[2]*e2[1];
+        n[1] = e1[2]*e2[0] - e1[0]*e2[2];
+        n[2] = e1[0]*e2[1] - e1[1]*e2[0];
+        const float l = sqrtf(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        if (!(l > 1e-6f)) return false;
+        n[0] /= l; n[1] /= l; n[2] /= l;
+        *d = n[0]*a[0] + n[1]*a[1] + n[2]*a[2];
+        return true;
+    }
+}
+
+// ⚠️ IS A BOX IN A VOLUME BRUSH -- ITS GEOMETRY, NOT ITS BOUNDING BOX (HANDOVER
+// 5fj). lithtech.exe links an object to a container when the object's box
+// meets the container's BSP (the donor's DoesBoxIntersectBSP, moveobject.cpp:
+// a box straddling a node's plane goes down both sides, reaching a solid leaf
+// is a hit). A convex brush's BSP is its faces in a row, so the walk comes to:
+// the box is not wholly in front of any face's plane -- what is tested here.
+// 716 of the 721 volumes in the 100 worlds are convex (Docs/tools/wvol), and
+// the ones that matter most are not boxes: M12S04's two CRUSH 10000 volumes
+// and M01S04's fire are wedges whose bounding box is up to twice the volume,
+// so a bounding-box test would kill Cate where Windows does not. A concave
+// volume (two M02S01 sound Filters, three in multiplayer maps) answers by its
+// bounding box. -1: not a brush object; 0: outside; 1: inside. *pbExact: the
+// answer came from the faces.
+int LTServerBrush_BoxTouches(const void* hRec, const float* pMin3, const float* pMax3, bool* pbExact)
+{
+    if (pbExact) *pbExact = false;
+    std::map<const void*, size_t>::const_iterator it = g_HitIndex.find(hRec);
+    if (it == g_HitIndex.end()) return -1;
+    HitBrush& hb = g_HitBrushes[it->second];
+    const std::vector<float>& T = hb.m_Tris;
+
+    // Convex: every corner of the brush behind (or within half a unit of)
+    // every face's plane. Asked once per brush, at rest.
+    if (hb.m_nConvex < 0)
+    {
+        hb.m_nConvex = 1;
+        for (size_t t = 0; t + 8 < T.size() && hb.m_nConvex; t += 9)
+        {
+            float n[3], d;
+            if (!TriPlane(&T[t], &T[t+3], &T[t+6], n, &d)) continue;
+            for (size_t v = 0; v + 2 < T.size(); v += 3)
+                if (n[0]*T[v] + n[1]*T[v+1] + n[2]*T[v+2] - d > 0.5f) { hb.m_nConvex = 0; break; }
+        }
+    }
+
+    float M[16];
+    const bool bMoved = (hb.m_nMovable >= 0) && Matrix(g_Brushes[(size_t)hb.m_nMovable], M);
+
+    // The bounding box first: what the port's container queries use, and all
+    // a concave volume gets.
+    float mn[3], mx[3];
+    if (!bMoved)
+        for (int k = 0; k < 3; ++k) { mn[k] = hb.m_Box[k]; mx[k] = hb.m_Box[3+k]; }
+    else
+    {
+        for (int k = 0; k < 3; ++k) { mn[k] = 1e30f; mx[k] = -1e30f; }
+        for (int c = 0; c < 8; ++c)
+        {
+            const float src[3] = { hb.m_Box[(c & 1) ? 3 : 0], hb.m_Box[(c & 2) ? 4 : 1], hb.m_Box[(c & 4) ? 5 : 2] };
+            float o[4];
+            LT3D::TransformPoint(M, src, o);
+            for (int k = 0; k < 3; ++k) { if (o[k] < mn[k]) mn[k] = o[k]; if (o[k] > mx[k]) mx[k] = o[k]; }
+        }
+    }
+    // Outside the bounding box is outside the volume: exact either way.
+    for (int k = 0; k < 3; ++k)
+        if (pMin3[k] > mx[k] || pMax3[k] < mn[k]) { if (pbExact) *pbExact = true; return 0; }
+    if (!hb.m_nConvex) return 1;
+
+    const float c[3] = { (pMin3[0] + pMax3[0]) * 0.5f, (pMin3[1] + pMax3[1]) * 0.5f, (pMin3[2] + pMax3[2]) * 0.5f };
+    const float h[3] = { (pMax3[0] - pMin3[0]) * 0.5f, (pMax3[1] - pMin3[1]) * 0.5f, (pMax3[2] - pMin3[2]) * 0.5f };
+    for (size_t t = 0; t + 8 < T.size(); t += 9)
+    {
+        float v[3][3];
+        for (int k = 0; k < 3; ++k)
+        {
+            const float* src = &T[t + (size_t)k*3];
+            if (bMoved) { float o[4]; LT3D::TransformPoint(M, src, o); v[k][0]=o[0]; v[k][1]=o[1]; v[k][2]=o[2]; }
+            else        { v[k][0]=src[0]; v[k][1]=src[1]; v[k][2]=src[2]; }
+        }
+        float n[3], d;
+        if (!TriPlane(v[0], v[1], v[2], n, &d)) continue;
+        // The box's corner deepest behind this face: in front even so = outside.
+        const float s = n[0]*c[0] + n[1]*c[1] + n[2]*c[2] - d
+                      - (fabsf(n[0])*h[0] + fabsf(n[1])*h[1] + fabsf(n[2])*h[2]);
+        if (s > 0.0f) { if (pbExact) *pbExact = true; return 0; }
+    }
+    if (pbExact) *pbExact = true;
     return 1;
 }
 

@@ -296,6 +296,48 @@ void LT2D::BlitSolidColor(const LT2DSurf& dst, const LT2DSurf& src,
 }
 
 
+void LT2D::BlitCoverage(const LT2DSurf& dst, const LT2DSurf& src,
+                        const LT2DRect* pSrcRect, int destX, int destY,
+                        unsigned int fill, float fAlpha)
+{
+    if (!Valid(dst) || !Valid(src)) return;
+
+    LT2DRect s;
+    ResolveRect(src, pSrcRect, s);
+
+    int sx = s.left, sy = s.top;
+    int w  = s.right - s.left, h = s.bottom - s.top;
+    int dx = destX,  dy = destY;
+
+    if (!ClipBlit(dst, src, sx, sy, w, h, dx, dy)) return;
+
+    const unsigned int a = AlphaToByte(fAlpha);
+    if (a == 0) return;
+
+    const unsigned char fr = ColorR(fill), fg = ColorG(fill), fb = ColorB(fill);
+
+    for (int y = 0; y < h; ++y)
+    {
+        const unsigned char* p = src.m_pRGBA + ((size_t)(sy + y) * src.m_Width + sx) * 4;
+        unsigned char*       d = dst.m_pRGBA + ((size_t)(dy + y) * dst.m_Width + dx) * 4;
+
+        for (int x = 0; x < w; ++x, p += 4, d += 4)
+        {
+            unsigned int c = p[0];
+            if (p[1] > c) c = p[1];
+            if (p[2] > c) c = p[2];
+            if (c == 0) continue;
+            // ⚠️ The same blend into BOTH compositor layers (black and grey,
+            // ltgui_DrawText) composites exactly: the grey layer's (128 - c')
+            // is the scene's share, (1 - c) of it, as for any other coverage.
+            c = (c * a + 127) / 255;
+            if (c >= 255) { d[0] = fr; d[1] = fg; d[2] = fb; d[3] = 255; }
+            else          BlendInto(d, fr, fg, fb, c);
+        }
+    }
+}
+
+
 // ----------------------------------------------------------------------- //
 // Scaling.
 //

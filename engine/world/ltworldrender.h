@@ -1378,8 +1378,12 @@ private:
     bool                MirrorActive(int nPlane) const
                         { return nPlane >= 0 && nPlane < (int)m_Mirrors.size() && m_Mirrors[nPlane].m_nSlot >= 0; }
     // Chooses this frame's reflections (sets m_nSlot, m_Live); returns how many.
+    // ⚠️ Needs UpdateVisCull for this view first: a mirror the camera's leaf
+    // cannot see gets no pass (5fk).
     int                 SelectMirrors(const float* pEye3, const float* pAt3, float fFovY,
                                       float fAspect, const ILTWorldModelXform* pXform);
+    static bool         MirrorVisOff();                     // LT_MIRRORNOVIS=1 (5fk)
+    static void         MirrorCensus(int nPasses, int nNotSeen);  // LT_MIRRORTRACE
     // The mirrored camera for plane nPlane: eye, look-at and up.
     void                ReflectCamera(int nPlane, const float* pEye3, const float* pAt3,
                                       float* pEyeOut, float* pAtOut, float* pUpOut) const;

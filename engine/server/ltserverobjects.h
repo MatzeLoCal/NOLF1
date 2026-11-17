@@ -160,6 +160,18 @@ public:
         // sphere cast per ask would be the same work done twice.
         bool            m_bOnGround;
 
+        // ⚠️ MOVED SINCE IT WAS CREATED (HANDOVER 5fj). lithtech.exe makes an
+        // object's CONTAINER LINKS in MoveObject -- every move, teleport and
+        // SetObjectPos re-finds the volumes its box is in -- and a new object
+        // has none until it is first moved: its create (0x474bf7, internal
+        // flags = 0x44) never moves it (Jupiter's later "Fixes container
+        // links" teleport after the create is not in lithtech.exe). Only a
+        // linked object is handed to its volumes each step (MID_AFFECTPHYSICS,
+        // LTServerPhys_Update), so a prop built inside a damage volume and
+        // never moved is not hurt by it -- on Windows either. Set by every
+        // position change the game or the engine makes after the create.
+        bool            m_bEverMoved;
+
         // ⚠️ WHEN THIS OBJECT WANTS MID_UPDATE NEXT, in server seconds.
         // `SetNextUpdate(hObj, 0)` means "stop updating me" -- a trigger that
         // has fired says exactly that -- so 0 is NOT "update immediately".

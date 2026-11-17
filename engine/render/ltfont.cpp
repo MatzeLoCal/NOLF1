@@ -10,6 +10,7 @@
 #include "ltfont.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 
@@ -221,6 +222,23 @@ void CLTBitmapFont::Draw(const LT2DSurf& dst, int x, int y, const char* pStr,
 {
     if (!pStr || !dst.m_pRGBA || m_Glyphs.empty()) return;
 
+    // ⚠️ TINTED TEXT FROM A BLENDED FONT IS DRAWN WITH ITS GREY EDGES
+    // (HANDOVER 5fi, DEVIATIONS E-017). The original tints every glyph with
+    // DrawSurfaceSolidColor (cshell.dll 0x10100732; lithtech.exe 0x40d120
+    // writes the fill wherever the pixel is not EXACTLY the key), and the
+    // blended fonts are white-on-black coverage maps with grey edges (123
+    // levels in font_large_0.pcx) -- so on Windows every grey edge pixel
+    // became solid: letters fattened and small counters closed ("e" read as
+    // "a"). Unnoticed at 1:1; the port zooms the 640x480 menu ~3x. Now the
+    // grey level is the coverage. Keyed fonts (magenta key) and untinted
+    // draws are unchanged. LT_SOLIDFONTS=1 = the original solid fill (says so).
+    static const bool s_bSolidFonts = []() {
+        const bool b = (getenv("LT_SOLIDFONTS") != 0);
+        if (b) { printf("[LTFONT] LT_SOLIDFONTS=1 -- tinted text filled solid wherever the glyph is not black (original, old)\n"); fflush(stdout); }
+        return b; }();
+    const bool bCoverage = bSolid && !s_bSolidFonts && !m_bChromaKey &&
+                           LT2D::ColorRGB(transColor) == 0;
+
     int penX = x;
 
     for (const unsigned char* p = (const unsigned char*)pStr; *p; ++p)
@@ -236,7 +254,9 @@ void CLTBitmapFont::Draw(const LT2DSurf& dst, int x, int y, const char* pStr,
         src.right  = gx + gw;
         src.bottom = m_Height;
 
-        if (bSolid)
+        if (bSolid && bCoverage)
+            LT2D::BlitCoverage(dst, m_Sheet, &src, penX, y, color, 1.0f);
+        else if (bSolid)
             LT2D::BlitSolidColor(dst, m_Sheet, &src, penX, y, transColor, color, 1.0f);
         else
             LT2D::Blit(dst, m_Sheet, &src, penX, y, true, transColor, 1.0f);

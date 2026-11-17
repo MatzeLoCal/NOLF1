@@ -168,9 +168,32 @@ int main(int argc, char** argv)
             }
         check(bClean, "NEGATIVE CONTROL: nothing is drawn past the measured width");
 
-        // Solid mode must recolour.
+        // ⚠️ TINTED TEXT FROM A BLENDED FONT (HANDOVER 5fi, DEVIATIONS E-017):
+        // the glyph's grey level is the coverage of the fill. Every pixel the
+        // untinted draw lit -- and no other -- is a shade of the fill, full
+        // where the glyph is white, partial on the grey edges.
+        std::vector<unsigned char> own = px;          // the untinted draw above
         std::fill(px.begin(), px.end(), 0);
         f.Draw(dst, 4, 4, "Hi!", true, 0x00FF00, BLACK);
+        bool bSame = true, bPure = true; int nFull = 0, nEdge = 0;
+        for (size_t i = 0; i < px.size(); i += 4)
+        {
+            const bool bLitOwn = own[i] || own[i+1] || own[i+2];
+            const bool bLitNow = px[i] || px[i+1] || px[i+2];
+            if (bLitOwn != bLitNow) bSame = false;
+            if (!bLitNow) continue;
+            if (px[i] != 0 || px[i+2] != 0) bPure = false;
+            if (px[i+1] == 0xFF) ++nFull; else ++nEdge;
+        }
+        check(bSame && bPure && nFull > 0, "tinted blended text: the fill exactly where the glyph is lit");
+        check(nEdge > 0, "NEGATIVE CONTROL: and its grey edges stay partial (not filled solid)");
+        printf("        \"Hi!\" tinted: %d full, %d edge pixels\n", nFull, nEdge);
+
+        // A CHROMA-KEYED font keeps the original solid fill (DrawSurfaceSolidColor).
+        f.m_bChromaKey = true;
+        std::fill(px.begin(), px.end(), 0);
+        f.Draw(dst, 4, 4, "Hi!", true, 0x00FF00, BLACK);
+        f.m_bChromaKey = false;
         bool bAllGreen = true, bAny = false;
         for (size_t i = 0; i < px.size(); i += 4)
             if (px[i] || px[i+1] || px[i+2])
@@ -178,7 +201,7 @@ int main(int argc, char** argv)
                 bAny = true;
                 if (px[i] != 0x00 || px[i+1] != 0xFF || px[i+2] != 0x00) bAllGreen = false;
             }
-        check(bAny && bAllGreen, "solid mode paints every lit pixel the fill colour");
+        check(bAny && bAllGreen, "keyed font: solid mode paints every lit pixel the fill colour");
     }
 
     printf("\n=== %d passed, %d failed ===\n", g_nPass, g_nFail);

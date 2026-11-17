@@ -129,6 +129,7 @@ namespace
     }
     unsigned int g_nArriving = 0;   // on the probe's floor, still falling into it
     unsigned int g_nGoThru = 0;     // steps of FLAG_GOTHRUWORLD objects (no world touch)
+    unsigned int g_nInVolumes = 0;  // object-steps handed to at least one volume (5fj)
 
     // ---- LT_ARCTRACE=1 (5fg): each FLAG_GRAVITY object's flights and slides //
     //
@@ -360,6 +361,7 @@ bool LTServerPhys_MoveTo(void* hObj, const float* pWantPos3, bool* pbGround)
 
     SRec* p = CLTServerObjects::FromHandle(hObj);
     if (!p || !pWantPos3) return false;
+    p->m_bEverMoved = true;     // MoveObject makes the container links (5fj)
 
     // ⚠️ WITH NO COLLISION BUILT THIS IS A TELEPORT, and saying so matters:
     // the walk viewer builds its own grid and the server builds this one, so
@@ -494,6 +496,7 @@ void LTServerPhys_TeleportTo(void* hObj, const float* pPos3)
     if (!p || !pPos3) return;
     for (int k = 0; k < 3; ++k) p->m_Pos[k] = pPos3[k];
     p->m_bOnGround = false;
+    p->m_bEverMoved = true;     // a teleport makes the container links too (5fj)
 }
 
 
@@ -524,6 +527,10 @@ void LTServerPhys_Update(float fDelta)
                 ArcTrace(cur->first, 0, 0, 0.0f);
         }
 
+    // This step's volumes (HANDOVER 5fj). Not with LT_OLDSERVERSTEP=1: the
+    // copy below is CalcMotion's, and the old integrator has none.
+    const unsigned int nVolumes = s_bOldStep ? 0 : LTServerHost_BeginContainerPass();
+
     const unsigned int n = LTServerHost_ObjectCount();
     for (unsigned int i = 0; i < n; ++i)
     {
@@ -534,7 +541,31 @@ void LTServerPhys_Update(float fDelta)
         // Asleep (HANDOVER 5cp): lithtech.exe moves only awake objects.
         if (p->m_nInactive) continue;
 
-        const bool bGravity = (p->m_Flags & FLAG_GRAVITY) != 0;
+        // ⚠️ ITS VOLUMES FIRST (HANDOVER 5fj, lithtech.exe 0x4698d1..0x469976):
+        // an object that is no container and has been moved since it was
+        // created (= has container links) hands a COPY of its acceleration,
+        // velocity and flags to every volume it is in (MID_AFFECTPHYSICS --
+        // water's viscosity, current and liquid gravity, and every volume's
+        // damage), and is then stepped FROM THE COPY. An object in a volume is
+        // never skipped by the early out: lithtech.exe sets IFLAG_APPLYPHYSICS
+        // again after each step in one (0x4699b1), so the player standing
+        // still in poison gas keeps being handed to it -- that is what hurts.
+        float cv[3], ca[3];
+        unsigned int cflags = p->m_Flags;
+        unsigned int nIn = 0;
+        if (nVolumes && p->m_bEverMoved && !(p->m_Flags & FLAG_CONTAINER))
+        {
+            for (int k = 0; k < 3; ++k) { cv[k] = p->m_Vel[k]; ca[k] = p->m_Accel[k]; }
+            nIn = LTServerHost_ContainerPass(h, ca, cv, &cflags);
+            if (nIn)
+            {
+                ++g_nInVolumes;
+                p = CLTServerObjects::FromHandle(h);    // a volume may have removed it
+                if (!p) continue;
+            }
+        }
+
+        const bool bGravity = nIn ? (cflags & FLAG_GRAVITY) != 0 : (p->m_Flags & FLAG_GRAVITY) != 0;
         const bool bVel = (p->m_Vel[0] != 0.0f || p->m_Vel[1] != 0.0f || p->m_Vel[2] != 0.0f);
         if (bGravity) ++g_nGravity;
         if (bVel)     ++g_nWithVel;
@@ -544,7 +575,7 @@ void LTServerPhys_Update(float fDelta)
         // ⚠️ THE EARLY OUT THAT MAKES THIS AFFORDABLE. A level is 731 objects
         // and a handful of them ever move; without this every light, every
         // AINode and every trigger would be swept against the world each tick.
-        if (!bGravity &&
+        if (!nIn && !bGravity &&
             p->m_Vel[0] == 0.0f && p->m_Vel[1] == 0.0f && p->m_Vel[2] == 0.0f &&
             p->m_Accel[0] == 0.0f && p->m_Accel[1] == 0.0f && p->m_Accel[2] == 0.0f)
             continue;
@@ -593,10 +624,10 @@ void LTServerPhys_Update(float fDelta)
         // (5do: the velocity into a surface is taken away, as the donor's
         // collision response does), and CalcMotion's walk branch adds no
         // gravity to an object standing still.
-        // ⚠️ Not done: containers (MID_AFFECTPHYSICS, the first call site) --
-        // the port never asks a VolumeBrush to change an object's physics.
+        // In a volume the step runs on the volumes' copy (5fj, above).
         float v[3] = { p->m_Vel[0], p->m_Vel[1], p->m_Vel[2] };
         float a[3] = { p->m_Accel[0], p->m_Accel[1], p->m_Accel[2] };
+        if (nIn) for (int k = 0; k < 3; ++k) { v[k] = cv[k]; a[k] = ca[k]; }
         float dr[3];
         int nBranch = LTPHYS_FREE;
         bool bFriction = false;
@@ -627,7 +658,24 @@ void LTServerPhys_Update(float fDelta)
         ++g_nBranch[nBranch];
         if (bFriction) ++g_nFriction;
         if (p->m_Flags & FLAG_GOTHRUWORLD) ++g_nGoThru;
-        for (int k = 0; k < 3; ++k) { p->m_Vel[k] = v[k]; p->m_Accel[k] = 0.0f; }
+        if (!nIn)
+            for (int k = 0; k < 3; ++k) { p->m_Vel[k] = v[k]; p->m_Accel[k] = 0.0f; }
+        else
+        {
+            // ⚠️ WHAT OF THE VOLUMES' COPY THE OBJECT KEEPS (5fj) -- CalcMotion
+            // writes the OBJECT's velocity, not the copy it ran on:
+            //   stop (0x450694):        the object's v and a = 0;
+            //   friction (0x450910):    v = a/k + (v_copy - a/k) e^(-k dt);
+            //   no friction (0x4509b5): v = v_object + a_copy dt.
+            // So a volume's ACCELERATION (liquid gravity) carries over from
+            // step to step, but its change to the VELOCITY -- viscosity's
+            // brake, the current's push -- only moves the object this step,
+            // unless it is sliding on a floor (friction branch).
+            if (!bGo)            for (int k = 0; k < 3; ++k) p->m_Vel[k] = 0.0f;
+            else if (bFriction)  for (int k = 0; k < 3; ++k) p->m_Vel[k] = v[k];
+            else                 for (int k = 0; k < 3; ++k) p->m_Vel[k] += a[k] * fDelta;
+            for (int k = 0; k < 3; ++k) p->m_Accel[k] = 0.0f;
+        }
         if (bGo && dr[0]*dr[0] + dr[1]*dr[1] + dr[2]*dr[2] > 0.001f)
         {
             const float want[3] = { p->m_Pos[0] + dr[0], p->m_Pos[1] + dr[1], p->m_Pos[2] + dr[2] };
@@ -1061,6 +1109,7 @@ void LTServerPhys_DumpCensus()
            g_nBranch[LTPHYS_FREE], g_nFriction);
     printf("       %u step(s) on the probe's floor still falling into it (taken as falling); %u step(s) of FLAG_GOTHRUWORLD objects\n",
            g_nArriving, g_nGoThru);
+    printf("       %u object-step(s) handed to their volumes (MID_AFFECTPHYSICS, 5fj)\n", g_nInVolumes);
     if (!g_nIntegrated)
         printf("       ⚠️  NOTHING INTEGRATED. Either no object has velocity or\n"
                "           gravity, or the integrator is not being called.\n");

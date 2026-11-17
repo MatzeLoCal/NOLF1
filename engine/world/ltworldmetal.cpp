@@ -664,6 +664,11 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
     }
     pt.Mark(CPassTimer::kUpload);
 
+    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- the software path's
+    // rule: BEFORE the mirrors, which drop one the leaf cannot see (5fk). A
+    // reflection pass returns at once from this (it never culls).
+    UpdateVisCull(pEye3, pXform);
+
     // ---- pass 0: MIRRORS (HANDOVER 5de) -------------------------------- //
     //
     // The software path's rule (ltworldrender.cpp pass 0): each chosen mirror
@@ -702,9 +707,7 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
             SyncMirrorPseudo(it->second);
     }
 
-    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- the software path's
-    // rule, after the reflection passes (which never cull).
-    UpdateVisCull(pEye3, pXform);
+    // The camera's leaf (UpdateVisCull, above) culls this view's objects.
     CLTVisCulledObjects visObjs(*this, pDyn);
     if (pDyn && VisCulling()) pDyn = &visObjs;
 

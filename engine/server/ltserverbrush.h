@@ -59,6 +59,12 @@ bool LTServerBrush_RaysPassThrough(const char* pObjectName);
 int LTServerBrush_RayTest(const void* hRec, const float* pFrom3, const float* pTo3,
                           float* pFrac, float* pNormal3, unsigned int* pPolyId = 0);
 
+// Does an axis-aligned box (world space) meet a brush object's GEOMETRY in its
+// current placement? -1: not a brush object; 0: no; 1: yes. Convex brushes are
+// tested face by face (*pbExact = true), concave ones by their bounding box.
+// For volumes (containers) -- see the .cpp and HANDOVER 5fj.
+int LTServerBrush_BoxTouches(const void* hRec, const float* pMin3, const float* pMax3, bool* pbExact = 0);
+
 unsigned int LTServerBrush_Count();
 unsigned int LTServerBrush_MovedCount();
 
