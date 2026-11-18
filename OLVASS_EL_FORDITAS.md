@@ -82,6 +82,24 @@ NOLF_LANG=en ./play_linux.sh  # eredeti angol szöveggel
 - Ha a játékmappa máshol van: `NOLF_GAME_DIR=/út/a/játékhoz ./play_linux.sh`
 - Teljes képernyő: **Alt+Enter**. Gyorsmentés: **F6**, gyorsbetöltés: **F9**.
 
+### Felbontás és megjelenítő (Beállítások → Megjelenítés)
+
+- **Felbontás:** a játékban kiválasztott érték azonnal érvényes (ablakos módban az ablak is
+  átméreteződik), és a következő indításkor is ezzel indul. A játék a
+  `~/.local/share/NOLF1/autoexec.cfg`-be menti, a `play_linux.sh` onnan olvassa.
+  Ha paraméterrel adsz meg felbontást (`./play_linux.sh 1920x1080`), az erősebb.
+- **Megjelenítő:** „OpenGL – Linux” (alap, gyors) vagy „Software – Linux” (szoftveres,
+  ha a videódriverrel gond van). A váltás **a következő indításkor** lép életbe, mert
+  futás közben nem lehet megjelenítőt cserélni.
+- Teljes képernyőn a 3D mindig a monitor saját felbontásában készül (éles kép); a választott
+  felbontás ott a menük és a HUD elrendezését adja.
+
+### Napló összeomlás esetén
+
+Minden indítás naplója: `~/.local/share/NOLF1/utolso_futas.log` (az előző futásé:
+`utolso_futas.log.1`). Összeomláskor a végén `[LTFATAL]` sor és a hívási lánc (call stack)
+látható – ezt a fájlt kell elküldeni/megmutatni.
+
 **Menüikon:** a „No One Lives Forever” ikon a menüben és az Asztalon is a `play_linux.sh`-t
 indítja. Ha elveszne, vagy máshová kerül a forrás:
 
@@ -111,7 +129,9 @@ indítja. Ha elveszne, vagy máshová kerül a forrás:
 | Fordítási hiba furcsa include-dal | `./forditas.sh tiszta` (a linkeket is újracsinálja) |
 | Fekete kép vagy összeomlás induláskor | Próbáld meg így: `LT_SOFTWARE=1 ./play_linux.sh`. A naplót a terminálban látod |
 | Hiányzik a zene egy része | Tedd a hangbankot ide: `~/.local/share/NOLF1/GeneralUser-GS.sf2` |
-| Mentések, beállítások | `~/.local/share/NOLF1/` |
+| Kifagyott / kilépett a játék | Nézd meg: `~/.local/share/NOLF1/utolso_futas.log` (vége: `[LTFATAL]` + hívási lánc) |
+| Beállítások (autoexec.cfg) | `~/.local/share/NOLF1/` |
+| Mentett állások | `build-linux/Save/` – **ne töröld** a `build-linux` mappát mentés nélkül! A `./forditas.sh tiszta` csak a `build-linux/obj`-ot törli, a mentéseket nem. |
 
 **Fontos:** a `linux_case_links.py` kb. 50 `.h` symlinket hoz létre (ezek jelennek meg
 `??`-ként a `git status`-ban). Ezeket **ne commitold**, mert minden gépen újra létrejönnek.

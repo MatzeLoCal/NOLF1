@@ -287,6 +287,9 @@ static void LTHost_DebugOut(char* pMsg, ...)
 // "the run reaches here and dies" -- and moving that line is a diff.
 // ----------------------------------------------------------------------- //
 
+#if defined(__linux__)
+#include <execinfo.h>
+#endif
 static void LTHost_FatalSignal(int sig)
 {
     const char* pName = "signal";
@@ -308,6 +311,18 @@ static void LTHost_FatalSignal(int sig)
     ignored = write(2, " -- run record terminated. Rebuild with NOLF_ASAN=1"
                        " to name the site (HANDOVER.md §4.6).\n", 88);
     (void)ignored;
+#if defined(__linux__)
+    // PORT (Linux): the call stack, so a crash in a player's log says where.
+    // backtrace_symbols_fd writes straight to the fd (no malloc). Resolve with
+    //   addr2line -f -C -e build-linux/nolf1 (or libnolfobject.so) <offset>
+    {
+        void* aFrames[64];
+        const int n = backtrace(aFrames, 64);
+        ignored = write(2, "\n[LTFATAL] call stack:\n", 24);
+        backtrace_symbols_fd(aFrames, n, 2);
+        (void)ignored;
+    }
+#endif
 
     // Restore the default and re-raise, so the shell still reports the real
     // signal and a debugger still sees it.

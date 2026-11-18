@@ -304,6 +304,14 @@ bool LTComp_Present(const unsigned char* pB, const unsigned char* pG,
     LTComp_OutputSize(&ow, &oh);
     const LTCompMap m = LTComp_CurrentMap(nLayerW, nLayerH);
     if (bPresent) { g_LastMap = m; g_bHaveMap = true; }
+    if (bPresent && getenv("LT_COMPTRACE"))
+    {
+        static int s_n = 0;
+        if ((s_n++ % 50) == 0)
+        { printf("[COMPTRACE] layer %dx%d out %dx%d src %.1f,%.1f %.1fx%.1f dst %d,%d %dx%d scene %d\n",
+                 nLayerW, nLayerH, ow, oh, m.m_SrcX, m.m_SrcY, m.m_SrcW, m.m_SrcH,
+                 m.m_DstX, m.m_DstY, m.m_DstW, m.m_DstH, (int)m.m_bScene); fflush(stdout); }
+    }
     if (pOutW) *pOutW = ow;
     if (pOutH) *pOutH = oh;
     return g_fnPresent(pB, pG, nLayerW, nLayerH, m, ow, oh, bPresent, pReadRGBA);
