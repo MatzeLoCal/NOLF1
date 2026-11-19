@@ -23,7 +23,7 @@ The fixes below are shared with macOS:
 
 ## Building
 
-Dependencies (Debian/Ubuntu): `clang`, `libsdl3-dev`, Mesa GL drivers, `python3`.
+Dependencies (Debian/Ubuntu): `clang`, `pkg-config`, `python3`, `libsdl3-dev`, `libfreetype-dev`, `fonts-dejavu-core` (the smooth menu and subtitle font), Mesa GL drivers. `./forditas.sh ellenoriz` checks them.
 
 ```sh
 python3 engine/linux_case_links.py          # once: case-exact include symlinks
