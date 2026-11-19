@@ -237,8 +237,17 @@ LTRESULT CLTMessage::ReadMessageFL(ILTMessage* &pMsg)
     return pMsg ? LT_OK : LT_ERROR;
 }
 
+// ⚠️ ILTMessage::ReadObject / WriteObject INSIDE A SAVE. The game's
+// Controller (Controller.cpp Save/Load) writes its fade targets with the
+// ILTMessage methods rather than WriteToLoadSaveMessageObject -- the original
+// engine translated both the same way. Written as a raw pointer, the handle
+// came back after a reload or a level change (Reload.sav) as an address from
+// the previous run, and the first FADE command crashed in GetObjectColor.
+// Inside a save/load context these now use the save-reference index.
 LTRESULT CLTMessage::ReadObjectFL(HOBJECT &hObj)
 {
+    if (LTSaveRefs_InLoad())
+        return LTSaveRefs_ReadObject((HMESSAGEREAD)this, &hObj);
     hObj = (HOBJECT)TakeDWord();
     return m_bOverran ? LT_ERROR : LT_OK;
 }
@@ -330,7 +339,12 @@ LTRESULT CLTMessage::WriteHStringArgList(int messageCode, va_list *pList)
 
 LTRESULT CLTMessage::WriteStringAsHString(char *pStr) { PutHStringText(this, pStr); return LT_OK; }
 
-LTRESULT CLTMessage::WriteObject(HOBJECT hObj) { PutDWord((uintptr_t)hObj); return LT_OK; }
+LTRESULT CLTMessage::WriteObject(HOBJECT hObj)
+{
+    if (LTSaveRefs_InSave()) return LTSaveRefs_WriteObject((HMESSAGEWRITE)this, hObj);
+    PutDWord((uintptr_t)hObj);
+    return LT_OK;
+}
 
 LTRESULT CLTMessage::ResetPos()  { m_nRead = 0; m_bOverran = false; return LT_OK; }
 
@@ -486,7 +500,7 @@ void* LTSaveRefs_OutsideAt(unsigned int i) { return i < g_RefsOutside.size() ? g
 unsigned int LTSaveRefs_Read()       { return g_nRefsRead; }
 unsigned int LTSaveRefs_Unresolved() { return g_nRefsUnresolved; }
 
-LTRESULT ILTCSBase::WriteToLoadSaveMessageObject(HMESSAGEWRITE h, HOBJECT hObject)
+LTRESULT LTSaveRefs_WriteObject(HMESSAGEWRITE h, HOBJECT hObject)
 {
     if (!h) return LT_ERROR;
 
@@ -638,7 +652,16 @@ HSTRING ILTCSBase::ReadFromMessageHString(HMESSAGEREAD h)
     return TakeHStringText(Msg(h), buf, sizeof(buf)) ? LTGetStringMgr()->Create(buf) : (HSTRING)0;
 }
 
+LTRESULT ILTCSBase::WriteToLoadSaveMessageObject(HMESSAGEWRITE h, HOBJECT hObject)
+{ return LTSaveRefs_WriteObject(h, hObject); }
+
 LTRESULT ILTCSBase::ReadFromLoadSaveMessageObject(HMESSAGEREAD h, HOBJECT *hObject)
+{ return LTSaveRefs_ReadObject(h, hObject); }
+
+bool LTSaveRefs_InSave() { return g_bInSave; }
+bool LTSaveRefs_InLoad() { return g_bInLoad; }
+
+LTRESULT LTSaveRefs_ReadObject(HMESSAGEREAD h, HOBJECT *hObject)
 {
     // ⚠️ THE OUTPUT IS WRITTEN ON EVERY PATH, including the failures. The game
     // reads these into members it then uses -- an out-parameter left alone is

@@ -17,6 +17,7 @@
 #include "ltcomp.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <vector>
@@ -1955,7 +1956,64 @@ struct CompU
     float4 layer;       // 2D-layer size w, h
     int    scene;       // the 3D target underlies dst
     int    pad0, pad1, pad2;
+    float4 fx;          // PORT: sharpen, colour grade, bloom (0 = off), unused
 };
+
+// ---- PORT: picture enhancement of the 3D scene only (NOLF_SHARPEN,
+// NOLF_GRADE, NOLF_BLOOM). The 2D layers -- menus, HUD, subtitles -- are
+// combined afterwards and stay exactly as the game drew them.
+static float3 sceneAt(texture2d<float> t, int2 q)
+{
+    int2 m = int2(int(t.get_width()) - 1, int(t.get_height()) - 1);
+    return t.read(uint2(clamp(q, int2(0), m))).rgb;
+}
+
+static float3 enhance(texture2d<float> t, uint2 q0, float4 fx)
+{
+    int2 q = int2(q0);
+    float3 c = t.read(q0).rgb;
+
+    // Sharpen: unsharp mask against the four neighbours, limited so edges
+    // do not ring.
+    if (fx.x > 0.0)
+    {
+        float3 n = (sceneAt(t, q + int2(1, 0)) + sceneAt(t, q - int2(1, 0)) +
+                    sceneAt(t, q + int2(0, 1)) + sceneAt(t, q - int2(0, 1))) * 0.25;
+        float3 d = clamp(c - n, -0.12, 0.12);
+        c = c + d * (1.6 * fx.x);
+    }
+
+    // Bloom: a soft glow from what is bright around the pixel -- two rings
+    // of eight taps, radius relative to the picture height.
+    if (fx.z > 0.0)
+    {
+        const float r = float(t.get_height()) / 220.0;
+        float3 b = float3(0.0);
+        for (int i = 0; i < 8; ++i)
+        {
+            float ang = float(i) * 0.785398;
+            float2 dir = float2(cos(ang), sin(ang));
+            for (int k = 1; k <= 2; ++k)
+            {
+                float3 v = sceneAt(t, q + int2(dir * (r * float(k * k))));
+                b += max(v - 0.78, 0.0) * (k == 1 ? 1.0 : 0.6);
+            }
+        }
+        c += b * (0.14 * fx.z);
+    }
+
+    // Colour grade: a little more saturation and a gentle S-curve.
+    if (fx.y > 0.0)
+    {
+        c = clamp(c, 0.0, 1.0);
+        float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+        c = mix(float3(l), c, 1.0 + 0.15 * fx.y);
+        c = clamp(c, 0.0, 1.0);
+        float3 s = c * c * (3.0 - 2.0 * c);
+        c = mix(c, s, 0.30 * fx.y);
+    }
+    return clamp(c, 0.0, 1.0);
+}
 
 // ⚠️ out = scene * M + A, the affine trick of ltcomp.h. The layers are
 // filtered BEFORE they are combined, which is exact: the result is linear in
@@ -2023,7 +2081,7 @@ fragment float4 fs_comp(CompOut in [[stage_in]],
     {
         uint2 q = uint2(p);
         if (q.x < scene.get_width() && q.y < scene.get_height())
-            c += scene.read(q).rgb * m;
+            c += enhance(scene, q, u.fx) * m;
     }
     return float4(min(c, 1.0), 1.0);
 }
@@ -2569,8 +2627,15 @@ bool LTMetal_Composite(const unsigned char* pB, const unsigned char* pG,
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         id<MTLRenderCommandEncoder> enc = [g_FrameCmd renderCommandEncoderWithDescriptor:rp];
 
-        struct CompU { float dst[4]; float src[4]; float layer[4]; int scene; int pad[3]; } u;
-        static_assert(sizeof(CompU) == 64, "CompU must match the MSL struct (64 bytes)");
+        struct CompU { float dst[4]; float src[4]; float layer[4]; int scene; int pad[3]; float fx[4]; } u;
+        static_assert(sizeof(CompU) == 80, "CompU must match the MSL struct (80 bytes)");
+        // PORT: picture enhancement strengths, 0..1 (0 = off, the original
+        // picture). The launcher sets them; unset = off.
+        static const float s_fx[3] = {
+            getenv("NOLF_SHARPEN") ? (float)atof(getenv("NOLF_SHARPEN")) : 0.0f,
+            getenv("NOLF_GRADE")   ? (float)atof(getenv("NOLF_GRADE"))   : 0.0f,
+            getenv("NOLF_BLOOM")   ? (float)atof(getenv("NOLF_BLOOM"))   : 0.0f };
+        u.fx[0] = s_fx[0]; u.fx[1] = s_fx[1]; u.fx[2] = s_fx[2]; u.fx[3] = 0.0f;
         u.dst[0] = (float)map.m_DstX; u.dst[1] = (float)map.m_DstY;
         u.dst[2] = (float)map.m_DstW; u.dst[3] = (float)map.m_DstH;
         u.src[0] = map.m_SrcX; u.src[1] = map.m_SrcY; u.src[2] = map.m_SrcW; u.src[3] = map.m_SrcH;

@@ -74,6 +74,11 @@ public:
     // Enumeration, for the cross-check harness.
     void                GetIds(std::vector<int>& out) const;
 
+    // PORT: replaces (or adds) one string -- the translation overlay
+    // (CLTStringMgr::LoadTranslation). `s` is already in the game's 8-bit
+    // encoding.
+    void                Set(int nId, const std::string& s) { m_Strings[nId] = s; }
+
     // UTF-16LE -> CP1252, the conversion the original Win32 build performed.
     static void         Utf16ToCP1252(const unsigned short* pIn, unsigned int nChars,
                                       std::string& sOut, unsigned int* pnLossy);

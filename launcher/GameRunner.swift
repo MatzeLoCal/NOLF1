@@ -51,6 +51,10 @@ struct LaunchOptions {
     var trace = false
     var bubbles = true              // placed bubble emitters at their authored rate (E-009)
     var bounce = true               // falling particles bounce off floors (E-010)
+    var hungarian = false           // the Hungarian string table (launcher/hu.txt)
+    var enhance = false             // sharpen / grade / bloom of the 3D (Metal only)
+
+    static var hungarianFile: URL? { Bundle.main.url(forResource: "hu", withExtension: "txt") }
 
     /// The game's environment. `headless` is for the self-test: no window,
     /// a fixed number of frames, a level loaded straight away.
@@ -79,6 +83,12 @@ struct LaunchOptions {
         if !bubbles { env["LT_NOPSRATE"] = "1" }
         // Off = the original: sparks and blood fall through the floor (5dk, E-010).
         if !bounce { env["LT_NOFLOORBOUNCE"] = "1" }
+        if hungarian, let f = Self.hungarianFile { env["NOLF_LANG_FILE"] = f.path }
+        if enhance && !software {
+            env["NOLF_SHARPEN"] = "0.5"
+            env["NOLF_GRADE"] = "0.5"
+            env["NOLF_BLOOM"] = "0.5"
+        }
         if trace {
             for k in ["LT_SHOTTRACE", "LT_DAMAGETRACE", "LT_LIFETRACE", "LT_CAMTRACE", "LT_ACTTRACE"] { env[k] = "1" }
             env["LT_TRIGTRACE"] = "2"

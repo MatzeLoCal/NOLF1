@@ -54,6 +54,12 @@
 #include <map>
 #include <set>
 
+#ifdef __APPLE__
+#define LT_OBJDLL_NAME "/libnolfobject.dylib"
+#else
+#define LT_OBJDLL_NAME "/libnolfobject.so"   // Linux port
+#endif
+
 // See LTServerHost_SetWorldClosingHook.
 static LTServerWorldClosingFn g_pWorldClosing = 0;
 
@@ -5715,7 +5721,7 @@ namespace
             std::string s(pUse);
             const size_t i = s.find_last_of('/');
             if (i != std::string::npos)
-                return s.substr(0, i) + "/libnolfobject.dylib";
+                return s.substr(0, i) + LT_OBJDLL_NAME;
         }
 
         // ⚠️ Last resort only, and it keeps NOLF_BIN working for the scripts
@@ -5725,10 +5731,10 @@ namespace
         {
             std::string s(p);
             const size_t i = s.find_last_of('/');
-            if (i != std::string::npos) return s.substr(0, i) + "/libnolfobject.dylib";
+            if (i != std::string::npos) return s.substr(0, i) + LT_OBJDLL_NAME;
         }
 
-        return "libnolfobject.dylib";
+        return LT_OBJDLL_NAME + 1;
     }
 }
 

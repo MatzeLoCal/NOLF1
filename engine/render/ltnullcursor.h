@@ -78,4 +78,9 @@ private:
 
 CLTNullCursor* LTGetNullCursor();
 
+// PORT: pointer capture (mouse look) from the cursor mode AND the game's
+// "CursorCenter" console variable -- see ltnullcursor.cpp.
+void LTCursor_ApplyMouseLook();
+void LTCursor_SetCenter(bool bCenter);
+
 #endif // __LT_NULLCURSOR_H__

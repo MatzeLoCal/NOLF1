@@ -45,6 +45,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
+#include <stdlib.h>
 
 #include "ltfont.h"
 #include "ltpcx.h"
@@ -243,6 +245,87 @@ LTBOOL CLTGUIFont::Init(ILTClient* pClientDE, LITHFONTCREATESTRUCT* lfCS)
             if (pFont->Build(pcx.GetRGBA(), (int)pcx.GetWidth(), (int)pcx.GetHeight(),
                              (unsigned int)lfCS->hTransColor, flags))
             {
+                if (getenv("LT_FONTTRACE"))
+                { printf("[FONTTRACE] %s h=%d key=%06x chroma=%d\n", lfCS->szFontBitmap, pFont->GetHeight(),
+                         (unsigned int)lfCS->hTransColor, (int)lfCS->bChromaKey); fflush(stdout); }
+                // PORT: SMOOTH FONTS. The 640x480 bitmap fonts are zoomed some
+                // 2-3x to fill a modern screen, and the small ones close up
+                // into blobs. These are rebuilt from an anti-aliased system
+                // font instead (ltfont.cpp BuildSmooth): the subtitle /
+                // message font NOLF_SUBSCALE (default 1.5) times taller, the
+                // menu text fonts at their own height so every layout fits as
+                // before. The stylised title, the HUD numbers and the chooser
+                // keep their bitmaps. NOLF_SUBSCALE=0 = original subtitles,
+                // NOLF_SMOOTHFONTS=0 = original menu fonts.
+                {
+                    struct Smooth { const char* name; bool bMenu; };
+                    static const Smooth kSmooth[] =
+                    {
+                        { "msgfontfore.pcx",  false },
+                        { "font_help.pcx",    true  },
+                        { "font_small_0.pcx", true  },
+                        { "font_med_0.pcx",   true  },
+                        { "font_large_0.pcx", true  },
+                    };
+                    const char* pName = lfCS->szFontBitmap;
+                    const size_t n = strlen(pName);
+                    const char* pScale = getenv("NOLF_SUBSCALE");
+                    const float fSubScale = pScale ? (float)atof(pScale) : 1.5f;
+                    const char* pMenu = getenv("NOLF_SMOOTHFONTS");
+                    const bool bMenuOn = !(pMenu && pMenu[0] == '0');
+                    for (const Smooth& sm : kSmooth)
+                    {
+                        const size_t k = strlen(sm.name);
+                        if (n < k || strcasecmp(pName + n - k, sm.name) != 0) continue;
+                        if (n > k && pName[n - k - 1] != '\\' && pName[n - k - 1] != '/') continue;
+                        const float fScale = sm.bMenu ? (bMenuOn ? 1.0f : 0.0f) : fSubScale;
+                        if (fScale <= 0.0f) break;
+                        int h = (int)(pFont->GetHeight() * fScale + 0.5f);
+                        CLTBitmapFont* pSmooth = new CLTBitmapFont;
+                        bool bOk = pSmooth->BuildSmooth(h, (unsigned int)lfCS->hTransColor);
+                        // ⚠️ NO WIDER THAN THE BITMAP. The menus were laid out
+                        // for the bitmap's widths -- fixed columns, "Vissza"
+                        // beside the help box -- and a long Hungarian word in a
+                        // wider face runs off its panel. A menu font that
+                        // measures wider over the alphabet is rebuilt smaller,
+                        // in proportion (never below 75%). Not the small
+                        // fonts: they set wrapped text, which re-wraps, and
+                        // smaller would be the opposite of the point.
+                        if (bOk && sm.bMenu && pFont->GetHeight() >= 20)
+                        {
+                            static const char* kAbc =
+                                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+                            // 93%: room for the Hungarian items, which run
+                            // longer than the English ones ("Küldetés választás").
+                            const int wb = (pFont->MeasureWidth(kAbc) * 93) / 100;
+                            const int ws = pSmooth->MeasureWidth(kAbc);
+                            if (wb > 0 && ws > wb)
+                            {
+                                int h2 = (int)((float)h * (float)wb / (float)ws);
+                                if (h2 < (h * 3) / 4) h2 = (h * 3) / 4;
+                                for (; h2 >= (h * 3) / 4; --h2)
+                                {
+                                    delete pSmooth;
+                                    pSmooth = new CLTBitmapFont;
+                                    bOk = pSmooth->BuildSmooth(h2, (unsigned int)lfCS->hTransColor);
+                                    if (!bOk || pSmooth->MeasureWidth(kAbc) <= wb) break;
+                                }
+                                h = h2;
+                            }
+                        }
+                        if (bOk)
+                        {
+                            printf("[LTFONT] %s: smooth system font, %d px (bitmap %d px)\n",
+                                   pName, h, pFont->GetHeight());
+                            fflush(stdout);
+                            delete pFont;
+                            pFont = pSmooth;
+                        }
+                        else
+                            delete pSmooth;
+                        break;
+                    }
+                }
                 Term();
                 pFont->m_bChromaKey = lfCS->bChromaKey ? true : false;
                 m_pClientDE   = pClientDE;

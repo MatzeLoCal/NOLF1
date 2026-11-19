@@ -10,6 +10,11 @@
 #include "lt3d.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <cmath>
 #include <cstring>
 #include <stdio.h>
@@ -262,6 +267,88 @@ namespace
         return (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
     }
 
+    // ⚠️ ROW-PARALLEL RASTERISATION (Linux port, 2026-11-15). A software frame
+    // is ~90% RasteriseScreenTri on ONE core. A large triangle's rows are
+    // independent -- every pixel is written once by its own row -- so they are
+    // shared out to worker threads; the triangle is finished before the call
+    // returns, so draw order, depth and blending stay exactly as they were.
+    // Small triangles stay on the caller: waking threads would cost more.
+    // LT_SWTHREADS=N sets the worker count (1 = single-threaded, as before).
+    class RowPool
+    {
+    public:
+        static RowPool& Get() { static RowPool* p = new RowPool(); return *p; }
+        int  Workers() const { return m_nWorkers; }
+        int  Run(int y0, int y1, const std::function<int(int,int)>& fn)
+        {
+            m_pFn = &fn; m_nEnd = y1;
+            m_nNext.store(y0, std::memory_order_relaxed);
+            m_nSum.store(0, std::memory_order_relaxed);
+            m_nBusy.store(m_nWorkers, std::memory_order_relaxed);
+            { std::lock_guard<std::mutex> l(m_M); m_nGen.fetch_add(1, std::memory_order_release); }
+            m_CV.notify_all();
+            Work();
+            while (m_nBusy.load(std::memory_order_acquire) > 0) std::this_thread::yield();
+            return m_nSum.load(std::memory_order_relaxed);
+        }
+    private:
+        enum { kChunk = 4 };
+        RowPool()
+        {
+            // Two cores left free: with every core rasterising, the audio
+            // thread and the compositor preempt a worker and the whole frame
+            // waits for it (170-200 ms hitches measured on the 8-core X1P).
+            int n = (int)std::thread::hardware_concurrency() - 3;
+            if (n > 7) n = 7;
+            if (const char* e = getenv("LT_SWTHREADS")) n = atoi(e) - 1;
+            if (n < 0) n = 0;
+            m_nWorkers = n;
+            for (int i = 0; i < n; ++i) std::thread(&RowPool::Loop, this).detach();
+            if (n) { printf("[LT3D] software rasteriser: %d thread(s)\n", n + 1); fflush(stdout); }
+        }
+        void Work()
+        {
+            int sum = 0;
+            for (;;)
+            {
+                const int y = m_nNext.fetch_add(kChunk, std::memory_order_relaxed);
+                if (y >= m_nEnd) break;
+                sum += (*m_pFn)(y, std::min(y + (int)kChunk, m_nEnd));
+            }
+            m_nSum.fetch_add(sum, std::memory_order_relaxed);
+        }
+        void Loop()
+        {
+            unsigned seen = 0;
+            for (;;)
+            {
+                // Spin briefly first: the next big triangle is usually microseconds away.
+                unsigned g = m_nGen.load(std::memory_order_acquire);
+                for (int i = 0; i < 20000 && g == seen; ++i)
+                {
+                    std::this_thread::yield();
+                    g = m_nGen.load(std::memory_order_acquire);
+                }
+                if (g == seen)
+                {
+                    std::unique_lock<std::mutex> l(m_M);
+                    m_CV.wait(l, [&] { return m_nGen.load(std::memory_order_acquire) != seen; });
+                    g = m_nGen.load(std::memory_order_acquire);
+                }
+                seen = g;
+                Work();
+                m_nBusy.fetch_sub(1, std::memory_order_release);
+            }
+        }
+        int                                 m_nWorkers = 0;
+        const std::function<int(int,int)>*  m_pFn = 0;
+        int                                 m_nEnd = 0;
+        std::atomic<int>                    m_nNext{0}, m_nSum{0}, m_nBusy{0};
+        std::atomic<unsigned>               m_nGen{0};
+        std::mutex                          m_M;
+        std::condition_variable             m_CV;
+    };
+
     int RasteriseScreenTri(const LT3DTarget& t, const LT3DTexture* pTex,
                            const Screen& a, const Screen& b, const Screen& c,
                            bool bCull)
@@ -381,9 +468,11 @@ namespace
             dD_dy  = dl0dy * p0->invW   + dl1dy * p1->invW   + dl2dy * p2->invW;
         }
 
+        auto Rows = [&](int yA, int yB) -> int
+        {
         int nWritten = 0;
 
-        for (int y = minY; y < maxY; ++y)
+        for (int y = yA; y < yB; ++y)
         {
             float fy = (float)y + 0.5f;
             for (int x = minX; x < maxX; ++x)
@@ -825,6 +914,15 @@ namespace
         }
 
         return nWritten;
+        };
+
+        RowPool& pool = RowPool::Get();
+        if (pool.Workers() > 0 && maxY - minY >= 16 && (maxX - minX) * (maxY - minY) >= 4096)
+        {
+            const std::function<int(int,int)> fn = Rows;
+            return pool.Run(minY, maxY, fn);
+        }
+        return Rows(minY, maxY);
     }
 }
 

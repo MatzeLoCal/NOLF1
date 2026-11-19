@@ -219,6 +219,25 @@ static void LTFile_DumpCensus()
 // HANDOVER.md §4.5 is about exactly this.
 // ----------------------------------------------------------------------- //
 
+// ⚠️ ILTClient::Shutdown -- the main menu's Quit (FolderMain.cpp), the
+// in-game escape menu's (FolderEscape.cpp). Unassigned, Quit did nothing.
+// Linux port: it asks the frame loop to end, exactly as the close button does.
+#ifdef __APPLE__
+#define LT_PORT_TITLE "NOLF (macOS port)"
+#define LT_GPU_NAME   "Metal"
+#else
+#define LT_PORT_TITLE "NOLF (Linux port)"
+#define LT_GPU_NAME   "OpenGL"
+#endif
+
+static bool g_bHostQuit = false;
+static void LTHost_Shutdown()
+{
+    printf("[HOST] the game asked to quit (ILTClient::Shutdown)\n");
+    fflush(stdout);
+    g_bHostQuit = true;
+}
+
 static void LTHost_ShutdownWithMessage(char* pMsg, ...)
 {
     // ⚠️ LTSTUB, not LTStub_Report. LTStub_Report counts EVERY call as a new
@@ -268,6 +287,9 @@ static void LTHost_DebugOut(char* pMsg, ...)
 // "the run reaches here and dies" -- and moving that line is a diff.
 // ----------------------------------------------------------------------- //
 
+#if defined(__linux__)
+#include <execinfo.h>
+#endif
 static void LTHost_FatalSignal(int sig)
 {
     const char* pName = "signal";
@@ -289,6 +311,18 @@ static void LTHost_FatalSignal(int sig)
     ignored = write(2, " -- run record terminated. Rebuild with NOLF_ASAN=1"
                        " to name the site (HANDOVER.md §4.6).\n", 88);
     (void)ignored;
+#if defined(__linux__)
+    // PORT (Linux): the call stack, so a crash in a player's log says where.
+    // backtrace_symbols_fd writes straight to the fd (no malloc). Resolve with
+    //   addr2line -f -C -e build-linux/nolf1 (or libnolfobject.so) <offset>
+    {
+        void* aFrames[64];
+        const int n = backtrace(aFrames, 64);
+        ignored = write(2, "\n[LTFATAL] call stack:\n", 24);
+        backtrace_symbols_fd(aFrames, n, 2);
+        (void)ignored;
+    }
+#endif
 
     // Restore the default and re-raise, so the shell still reports the real
     // signal and a debugger still sees it.
@@ -1376,6 +1410,7 @@ public:
         FreeDeviceObjects   = LTHost_FreeDeviceObjects;
 
         ShutdownWithMessage = LTHost_ShutdownWithMessage;
+        Shutdown            = LTHost_Shutdown;
         DebugOut            = LTHost_DebugOut;
         GetEngineHook       = LTHost_GetEngineHook;
 
@@ -3719,7 +3754,7 @@ int main(int argc, char** argv)
             {
                 uint32 w = 640, h = 480;
                 LTGetNullRender()->GetDims(LTGetNullRender()->GetScreenSurface(), &w, &h);
-                LTWindow_Open((int)w, (int)h, "NOLF (macOS port)");
+                LTWindow_Open((int)w, (int)h, LT_PORT_TITLE);
 
                 // With a window, 3 frames is a flicker. Run until the user
                 // closes it unless LT_UPDATES says otherwise -- but NEVER
@@ -3749,7 +3784,7 @@ int main(int argc, char** argv)
                 {
                     if (LTAudio_Start(&client.GetSoundMgr().GetMixer()))
                     {
-                        printf("[SOUND] CoreAudio running at %u Hz\n",
+                        printf("[SOUND] audio running at %u Hz\n",
                                (unsigned)CLTMixer::kRate);
                     }
                     else
@@ -4386,12 +4421,12 @@ int main(int argc, char** argv)
                             int ow = 0, oh = 0;
                             if (LTComp_Active() && LTComp_OutputSize(&ow, &oh))
                                 snprintf(szTitle, sizeof(szTitle),
-                                         "NOLF (macOS port) \u2014 Metal \u2014 3D %dx%d, 2D %ux%u \u2014 %.1f FPS",
+                                         LT_PORT_TITLE " \u2014 " LT_GPU_NAME " \u2014 3D %dx%d, 2D %ux%u \u2014 %.1f FPS",
                                          ow, oh, (unsigned)sw, (unsigned)sh, s_nFrames / dt);
                             else
                             snprintf(szTitle, sizeof(szTitle),
-                                     "NOLF (macOS port) \u2014 %s \u2014 %ux%u \u2014 %.1f FPS",
-                                     bMetalActive ? "Metal" : "Software renderer",
+                                     LT_PORT_TITLE " \u2014 %s \u2014 %ux%u \u2014 %.1f FPS",
+                                     bMetalActive ? LT_GPU_NAME : "Software renderer",
                                      (unsigned)sw, (unsigned)sh, s_nFrames / dt);
                             LTWindow_SetTitle(szTitle);
                             s_tLast = tNow;
@@ -4404,7 +4439,7 @@ int main(int argc, char** argv)
                     // pump above handles the headless case.
                     LTInput_Pump(pShell);
 
-                    if (LTWindow_ShouldClose()) break;
+                    if (LTWindow_ShouldClose() || g_bHostQuit) break;
 
                     // ⚠️ Without this the loop spins a core flat and the clock
                     // races ahead of anything a human could see. 1/60s is the

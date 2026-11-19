@@ -28,11 +28,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <set>
 #include <utility>
 #include <vector>
 #include <mach-o/dyld.h>
+#ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+#endif
 
 
 // ----------------------------------------------------------------------- //
@@ -89,15 +92,39 @@ static const int kNumOfferedModes = (int)(sizeof(kOfferedModes) / sizeof(kOffere
 // GPU game camera is installed on both Metal paths, compositor and readback,
 // and the label said "Software" on the second although Metal drew every
 // frame. Asked when a mode is read, so the list and the current mode agree.
+#ifdef __APPLE__
+#define LT_GPU_RENDERER "Metal"
+#define LT_OS_NAME      "macOS"
+#else
+#define LT_GPU_RENDERER "OpenGL"
+#define LT_OS_NAME      "Linux"
+// PORT (Linux): Options > Display offers BOTH renderers. The renderer cannot
+// change while the game runs -- the GL compositor or the software path is
+// chosen at startup -- so a different choice is remembered here, shown as the
+// current one, and written by the game itself to autoexec.cfg (+RenderDll);
+// play_linux.sh reads it and starts the next session with it.
+static char g_szPendingRenderer[32] = "";
+#endif
+static const char* LTMode_ActualRendererName()
+{
+    return (LTScene_GpuCameraActive() || LTComp_Active()) ? LT_GPU_RENDERER : "Software";
+}
 static const char* LTMode_RendererName()
 {
-    return (LTScene_GpuCameraActive() || LTComp_Active()) ? "Metal" : "Software";
+#ifndef __APPLE__
+    if (g_szPendingRenderer[0]) return g_szPendingRenderer;
+#endif
+    return LTMode_ActualRendererName();
+}
+static void LTMode_SetNamesTo(RMode& m, const char* pName)
+{
+    snprintf(m.m_RenderDLL,    sizeof(m.m_RenderDLL),    "%s", pName);
+    snprintf(m.m_InternalName, sizeof(m.m_InternalName), "%s", pName);
+    snprintf(m.m_Description,  sizeof(m.m_Description),  "%s", LT_OS_NAME);
 }
 static void LTMode_SetNames(RMode& m)
 {
-    snprintf(m.m_RenderDLL,    sizeof(m.m_RenderDLL),    "%s", LTMode_RendererName());
-    snprintf(m.m_InternalName, sizeof(m.m_InternalName), "%s", LTMode_RendererName());
-    snprintf(m.m_Description,  sizeof(m.m_Description),  "macOS");
+    LTMode_SetNamesTo(m, LTMode_RendererName());
 }
 
 
@@ -206,6 +233,7 @@ static void LTMode_RememberForLauncher(uint32 w, uint32 h)
     uint32_t n = sizeof(szExe);
     if (_NSGetExecutablePath(szExe, &n) != 0 || !strstr(szExe, ".app/Contents/Helpers/")) return;
 
+#ifdef __APPLE__
     const CFStringRef app = CFSTR("com.schonder.nolf.launcher");
     int iw = (int)w, ih = (int)h;
     CFNumberRef nw = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &iw);
@@ -220,6 +248,7 @@ static void LTMode_RememberForLauncher(uint32 w, uint32 h)
     }
     if (nw) CFRelease(nw);
     if (nh) CFRelease(nh);
+#endif
 }
 
 bool CLTNullRender::SetMode(const RMode* pMode)
@@ -245,6 +274,25 @@ bool CLTNullRender::SetMode(const RMode* pMode)
     const bool bChosen = m_bStartupDone && !s_bKeep
                       && want.m_Width >= 320 && want.m_Height >= 240
                       && want.m_Width <= 8192 && want.m_Height <= 8192;
+#ifndef __APPLE__
+    if (bChosen)
+    {
+        // The renderer picked in Options > Display: takes effect at the next start.
+        const char* pAsk = pMode->m_RenderDLL;
+        if (strcasecmp(pAsk, LT_GPU_RENDERER) == 0 || strcasecmp(pAsk, "Software") == 0)
+        {
+            const char* pNow = LTMode_ActualRendererName();
+            const char* pNew = strcasecmp(pAsk, "Software") == 0 ? "Software" : LT_GPU_RENDERER;
+            if (strcmp(pNew, pNow) == 0) g_szPendingRenderer[0] = 0;
+            else
+            {
+                snprintf(g_szPendingRenderer, sizeof(g_szPendingRenderer), "%s", pNew);
+                printf("[LTRENDER] renderer %s chosen -- used from the next start (now %s)\n", pNew, pNow);
+                fflush(stdout);
+            }
+        }
+    }
+#endif
     if (bChosen)
     {
         printf("[LTRENDER] the game chose %ux%u (Options > Display)\n", want.m_Width, want.m_Height);
@@ -347,18 +395,29 @@ RMode* CLTNullRender::AllocModeList()
         if (!bCurrent && bScreen && (w > (uint32)sw || h > (uint32)sh)) continue;
         if (!seen.insert(sizes[i]).second) continue;
 
-        RMode* p = (RMode*)calloc(1, sizeof(RMode));
-        if (!p) break;
+        // Linux: every size twice, once per renderer (OpenGL first, Software).
+#ifdef __APPLE__
+        const int nNames = 1;
+        const char* aNames[1] = { LTMode_RendererName() };
+#else
+        const int nNames = 2;
+        const char* aNames[2] = { LT_GPU_RENDERER, "Software" };
+#endif
+        for (int k = 0; k < nNames; ++k)
+        {
+            RMode* p = (RMode*)calloc(1, sizeof(RMode));
+            if (!p) break;
 
-        p->m_bHardware = LTTRUE;
-        p->m_Width     = w;
-        p->m_Height    = h;
-        p->m_BitDepth  = 32;
-        LTMode_SetNames(*p);
-        p->m_pNext = 0;
+            p->m_bHardware = LTTRUE;
+            p->m_Width     = w;
+            p->m_Height    = h;
+            p->m_BitDepth  = 32;
+            LTMode_SetNamesTo(*p, aNames[k]);
+            p->m_pNext = 0;
 
-        if (pTail) pTail->m_pNext = p; else pHead = p;
-        pTail = p;
+            if (pTail) pTail->m_pNext = p; else pHead = p;
+            pTail = p;
+        }
     }
 
     return pHead;

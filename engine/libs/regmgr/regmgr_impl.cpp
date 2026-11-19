@@ -39,6 +39,12 @@
 
 #include "regmgr.h"
 
+#ifdef __APPLE__
+#define LT_APPSUPPORT_DIR "/Library/Application Support/NOLF1"
+#else
+#define LT_APPSUPPORT_DIR "/.local/share/NOLF1"   // Linux port
+#endif
+
 // ----------------------------------------------------------------------- //
 // Backing store: a flat key/value table persisted as text.
 // ----------------------------------------------------------------------- //
@@ -170,7 +176,7 @@ BOOL CRegMgr::Init(const char* sCompany, const char* sApp, const char* sVersion,
     if (!home) home = ".";
 
     snprintf(g_path, sizeof(g_path),
-             "%s/Library/Application Support/NOLF1/%s/%s/settings.cfg",
+             "%s" LT_APPSUPPORT_DIR "/%s/%s/settings.cfg",
              home,
              (sCompany && *sCompany) ? sCompany : "Monolith",
              (sApp && *sApp)         ? sApp     : "NOLF");

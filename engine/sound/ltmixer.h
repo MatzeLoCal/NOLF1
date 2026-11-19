@@ -113,7 +113,11 @@ public:
     void            SetVoicePosition(unsigned int nVoice, const float* pPos3);
     bool            GetVoicePosition(unsigned int nVoice, float* pPos3) const;
 
-    void            SetPaused(bool b) { m_bPaused = b; }
+    // ⚠️ PAUSE HOLDS THE VOICES THAT ARE PLAYING NOW, as LithTech's
+    // PauseSounds did -- not the mixer. The game pauses sounds when its menu
+    // opens and then plays the menu's own clicks; a mixer-wide pause made the
+    // whole menu silent (Linux port, 2026-11-15).
+    void            SetPaused(bool b);
     bool            GetPaused() const { return m_bPaused; }
 
     // Master volume, 0..1.
@@ -176,6 +180,7 @@ private:
         unsigned int    m_nId;
         bool            m_bActive;
         bool            m_bAudible = true;  // mixed, not just running (5et)
+        bool            m_bHeld = false;    // paused by SetPaused(true)
         bool            m_bEar = true;      // in earshot at the last Assign
         unsigned int    m_nSerial = 0;      // start order, newest wins a tie
         unsigned int    m_nFreedGen = 0;    // render pass in which the main thread freed it

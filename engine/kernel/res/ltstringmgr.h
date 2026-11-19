@@ -67,6 +67,12 @@ public:
     // base game's, the same way its Attributes\Missions.txt does.
     bool            LoadResourceDll(CLTFileMgr* pFileMgr, const char* pDllName);
 
+    // PORT: a translation overlay over the loaded table. A UTF-8 text file,
+    // one `<id> TAB <text>` per line, with \n \t \r \\ escapes; each line
+    // replaces that id. Called by LoadResourceDll when NOLF_LANG_FILE names
+    // a file. Returns the number of strings replaced.
+    unsigned int    LoadTranslation(const char* pPath);
+
     bool            HasTable() const { return m_Table.GetCount() > 0; }
     unsigned int    GetTableCount() const { return m_Table.GetCount(); }
 

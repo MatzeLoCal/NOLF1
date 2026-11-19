@@ -13,6 +13,7 @@
 
 #include "ltinput.h"
 #include "ltbindings.h"
+#include "ltconsole.h"
 
 #include "iclientshell.h"
 
@@ -528,9 +529,49 @@ static void LTInput_WheelTick(int nFrame)
     }
 }
 
+// LT_TEST_MOUSE="frame:x:y,..." -- a left click AT a point (2D surface
+// coordinates, what the window delivers after the compositor's mapping):
+// move there, press, release. LT_TEST_CLICK clicks at a fixed point, which
+// fires a weapon but cannot press a menu control.
+static void LTInput_MouseTick(int nFrame)
+{
+    static const char* pWant = getenv("LT_TEST_MOUSE");
+    if (!pWant || !pWant[0]) return;
+
+    static int nAt[32], nX[32], nY[32];
+    static int nCount = -1, nNext = 0;
+    if (nCount < 0)
+    {
+        nCount = 0;
+        for (const char* p = pWant; *p && nCount < 32; )
+        {
+            while (*p == ' ' || *p == ',') ++p;
+            if (!*p) break;
+            nAt[nCount] = atoi(p);
+            nX[nCount] = nY[nCount] = 0;
+            while (*p && *p != ',' && *p != ':') ++p;
+            if (*p == ':') { ++p; nX[nCount] = atoi(p); while (*p && *p != ',' && *p != ':') ++p; }
+            if (*p == ':') { ++p; nY[nCount] = atoi(p); while (*p && *p != ',') ++p; }
+            ++nCount;
+        }
+        fprintf(stderr, "[LTMOUSE] %d scripted click(s)\n", nCount);
+    }
+
+    if (nNext >= nCount || nFrame < nAt[nNext]) return;
+    LTInputEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.m_X = nX[nNext]; ev.m_Y = nY[nNext];
+    ev.m_Kind = LTInputEvent::kMouseMove; LTInput_Push(ev);
+    ev.m_Kind = LTInputEvent::kMouseDown; LTInput_Push(ev);
+    ev.m_Kind = LTInputEvent::kMouseUp;   LTInput_Push(ev);
+    fprintf(stderr, "[LTMOUSE] frame %d: left click at (%d,%d)\n", nFrame, ev.m_X, ev.m_Y);
+    ++nNext;
+}
+
 void LTInput_ClickTick(int nFrame)
 {
     LTInput_WheelTick(nFrame);
+    LTInput_MouseTick(nFrame);
     static const char* pWant = getenv("LT_TEST_CLICK");
     if (!pWant || !pWant[0]) return;
 
@@ -573,12 +614,30 @@ void LTInput_ClickTick(int nFrame)
 
 
 
+
+// PORT: the Mouse folder's sensitivity slider (0..10, console var
+// MouseSensitivity). The game applies it with `scale "<mouse>" "<x-axis>" v`
+// (GameSettings.cpp ImplementMouseSensitivity), but only when the mouse lists
+// X and Y axis objects -- this port's does not, so the slider did nothing.
+// Read the variable here instead, with the game's own curve
+// (0.00125 + s * 0.001125) taken RELATIVE to the default 5, so 5 keeps
+// exactly the feel kAxisGain was tuned for.
+static float LTInput_SensitivityFactor()
+{
+    float s = 5.0f;
+    if (const LTConsoleVar* v = LTGetConsole()->Find("MouseSensitivity"))
+        if (v->m_bHasFloat) s = v->m_fValue;
+    if (s < 0.0f)  s = 0.0f;
+    if (s > 10.0f) s = 10.0f;
+    return (0.00125f + s * 0.001125f) / (0.00125f + 5.0f * 0.001125f);
+}
+
 // The aim instrument's way in: radians the game will add to yaw / pitch,
 // exactly as a mouse movement of that size would deliver them.
 void LTInput_AddAxisRadians(float fYaw, float fPitch)
 {
-    g_AxisDX += fYaw / kAxisGain;
-    g_AxisDY += fPitch / kAxisGain;
+    g_AxisDX += fYaw / (kAxisGain * LTInput_SensitivityFactor());
+    g_AxisDY += fPitch / (kAxisGain * LTInput_SensitivityFactor());
 }
 
 void LTInput_TakeAxisOffsets(float* p3)
@@ -588,8 +647,9 @@ void LTInput_TakeAxisOffsets(float* p3)
     // (clientmgr.cpp ProcessAllInput): the mouse does not turn the player
     // while the message line is open. Taken and discarded, not kept for later.
     const bool bInput = g_bInputState;
-    p3[0] = bInput ? g_AxisDX * kAxisGain : 0.0f;
-    p3[1] = bInput ? g_AxisDY * kAxisGain : 0.0f;
+    const float fGain = kAxisGain * LTInput_SensitivityFactor();
+    p3[0] = bInput ? g_AxisDX * fGain : 0.0f;
+    p3[1] = bInput ? g_AxisDY * fGain : 0.0f;
     p3[2] = 0.0f;
     g_AxisDX = g_AxisDY = 0.0f;
 }

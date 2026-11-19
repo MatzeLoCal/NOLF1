@@ -14,6 +14,8 @@ struct ContentView: View {
     @AppStorage("trace") private var trace = false
     @AppStorage("bubbles") private var bubbles = true
     @AppStorage("bounce") private var bounce = true
+    @AppStorage("hungarian") private var hungarian = true
+    @AppStorage("enhance") private var enhance = true
 
     @StateObject private var runner = GameRunner()
     @State private var install: GameInstall?
@@ -35,6 +37,7 @@ struct ContentView: View {
             Divider()
             playRow
             displayRow
+            languageRow
             // Full width, flush left: a DisclosureGroup centres content narrower
             // than itself, so short captions pulled the whole block to the middle.
             DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
@@ -138,6 +141,19 @@ struct ContentView: View {
         .frame(maxWidth: 300)
     }
 
+    // PORT: the Hungarian translation of the game's string table (menus,
+    // subtitles, objectives, intelligence items) -- launcher/hu.txt, loaded by
+    // the engine over CRES.DLL (NOLF_LANG_FILE, ltstringmgr.cpp).
+    private var languageRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Magyar szöveg és felirat (menük, feliratok, küldetések)", isOn: $hungarian)
+                .disabled(LaunchOptions.hungarianFile == nil)
+            // PORT: picture enhancement of the 3D view (ltmetal.mm fs_comp).
+            Toggle("Képjavítás (élesebb textúrák, élénkebb színek, finom ragyogás)", isOn: $enhance)
+                .disabled(software)
+        }
+    }
+
     private var advanced: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Renderer", selection: $software) {
@@ -235,6 +251,7 @@ struct ContentView: View {
         var o = LaunchOptions()
         o.mode = mode; o.width = width; o.height = height; o.software = software
         o.mission = mission; o.level = level; o.trace = trace; o.bubbles = bubbles; o.bounce = bounce
+        o.hungarian = hungarian; o.enhance = enhance
         message = nil
         runner.start(gi, o)
     }

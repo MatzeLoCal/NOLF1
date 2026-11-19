@@ -112,6 +112,15 @@ public:
                          bool bSolid, unsigned int color,
                          unsigned int transColor, int nExtraSpace = 0) const;
 
+    // PORT: an anti-aliased font from a system font (macOS: the bold system
+    // font; Linux: a bold TrueType font via FreeType), `nHeight` pixels
+    // tall, with every CP1252 letter plus the Hungarian ő ű Ő Ű (at CP1250's
+    // positions -- see AddAccentedGlyphs). Coverage lives in the alpha
+    // channel and Draw blends with it. False where there is no usable font:
+    // the caller keeps the bitmap font.
+    bool            BuildSmooth(int nHeight, unsigned int transColor);
+    bool            IsSmooth() const { return m_bSmooth; }
+
     // The decoded strip, so a caller can blit from it directly.
     const LT2DSurf& GetSheet() const { return m_Sheet; }
 
@@ -124,12 +133,17 @@ private:
 
     struct Glyph { int m_X; int m_W; };
 
+    // PORT: builds á é í ó ö ő ú ü ű (and capitals) from the ASCII glyphs; see
+    // ltfont.cpp. Called at the end of Build.
+    void            AddAccentedGlyphs(unsigned int key);
+
     std::vector<unsigned char>  m_Pixels;       // owns the strip
     LT2DSurf                    m_Sheet;
     std::vector<Glyph>          m_Glyphs;       // in bitmap order
     int                         m_CharToGlyph[256];
     int                         m_Height;
     int                         m_AvgWidth;
+    bool                        m_bSmooth = false;
 };
 
 #endif // __LT_FONT_H__

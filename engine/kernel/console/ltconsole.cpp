@@ -18,6 +18,8 @@
 #include "ltstub.h"
 
 #include "iltclient.h"
+#include "ltnullcursor.h"
+#include <strings.h>
 
 #include <cctype>
 #include <cstdio>
@@ -300,6 +302,12 @@ static void CON_RunConsoleString(char* pString)
     }
 
     LTGetConsole()->RunString(pString);
+
+    // PORT: "CursorCenter 0/1" is how the interface says menu cursor / mouse
+    // look (InterfaceMgr.cpp UseCursor); the window's pointer capture follows
+    // it (ltnullcursor.cpp).
+    if (pString && strncasecmp(pString, "CursorCenter", 12) == 0)
+        LTCursor_SetCenter(atoi(pString + 12) != 0);
 }
 
 static LTRESULT CON_RegisterConsoleProgram(char* pName, ConsoleProgramFn fn)

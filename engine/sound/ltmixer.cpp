@@ -86,6 +86,13 @@ void CLTMixer::SetListener(const float* pPos3, const float* pRight3)
 }
 
 
+void CLTMixer::SetPaused(bool b)
+{
+    m_bPaused = b;
+    for (size_t i = 0; i < m_Voices.size(); ++i)
+        m_Voices[i].m_bHeld = b && m_Voices[i].m_bActive;
+}
+
 void CLTMixer::SetVolume(float f) { m_fMaster = Clamp01(f); }
 
 
@@ -132,6 +139,7 @@ unsigned int CLTMixer::Play(const short* pSamples, unsigned int nSamples,
     pV->m_nChannels = nChannels;
     pV->m_fCursor   = 0.0;
     pV->m_Params    = p;
+    pV->m_bHeld     = false;
     pV->m_bAudible  = OldVoices();      // Assign decides, before any render can mix it
     pV->m_nSerial   = ++m_nSerial;
     pV->m_bActive   = true;
@@ -346,12 +354,10 @@ void CLTMixer::Render(short* pOut, unsigned int nFrames)
             }
         }
     }
-    if (m_bPaused) { m_nRenderGen = m_nRenderGen + 1; return; }
-
     for (size_t i = 0; i < m_Voices.size(); ++i)
     {
         Voice& v = m_Voices[i];
-        if (!v.m_bActive) continue;
+        if (!v.m_bActive || v.m_bHeld) continue;
 
         // Running but not heard (no channel, 5et): time passes, nothing mixed.
         if (!v.m_bAudible) { AdvanceVoice(v, nFrames); continue; }
@@ -418,10 +424,10 @@ void CLTMixer::Advance(unsigned int nFrames)
     // ⚠️ PAUSED MEANS PAUSED, here as in Render. A paused mixer whose cursors
     // kept moving would let the game's pause menu silently run every line of
     // dialogue to its end behind the player's back.
-    if (!nFrames || m_bPaused) return;
+    if (!nFrames) return;
 
     for (size_t i = 0; i < m_Voices.size(); ++i)
-        if (m_Voices[i].m_bActive) AdvanceVoice(m_Voices[i], nFrames);
+        if (m_Voices[i].m_bActive && !m_Voices[i].m_bHeld) AdvanceVoice(m_Voices[i], nFrames);
     m_nRenderGen = m_nRenderGen + 1;
 }
 

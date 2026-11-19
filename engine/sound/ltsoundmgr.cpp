@@ -131,6 +131,10 @@ const CLTSoundMgr::Cached* CLTSoundMgr::Get(const char* pName)
     { delete pC; m_Cache[sKey] = 0; ++m_nMissing; return 0; }
 
     ++m_nDecoded;
+    if (getenv("LT_SNDTRACE"))
+        printf("[SOUND] decode %s: format %d, raw %u bytes -> %u samples, %u ch, %u Hz\n", pName,
+               (int)wav.GetFormat(), (unsigned)wav.GetRaw().size(), (unsigned)pC->m_Samples.size(),
+               pC->m_nChannels, pC->m_nRate);
     m_Cache[sKey] = pC;
     return pC;
 }
@@ -233,6 +237,13 @@ LTRESULT CLTSoundMgr::PlaySound(PlaySoundInfo* pInfo, HLTSOUND& hResult)
         return LT_ERROR;
     }
 
+    if (SndTracing())
+    {
+        printf("[SOUND]   mixer: paused %d master %.2f vol %.2f starved %d mode %d\n",
+               (int)m_Mixer.GetPaused(), m_Mixer.GetVolume(), p.m_fVolume,
+               (int)m_Mixer.IsStarved(nVoice), (int)p.m_eMode);
+        fflush(stdout);
+    }
     if (m_Mixer.IsStarved(nVoice)) m_Starved[pInfo->m_szSoundName]++;
 
     // ⚠️ The handle is only handed BACK when the caller asked for it. Without
