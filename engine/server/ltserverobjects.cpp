@@ -155,6 +155,7 @@ BaseClass* CLTServerObjects::Create(ClassDef* pClass, ObjectCreateStruct* pStruc
     // projectiles, debris and destructibles set 0 or MINIMUM_FORCE (5do).
     pRec->m_fForceIgnoreLimit = 1000.0f;
     pRec->m_bOnGround = false;
+    pRec->m_bEverMoved = false;     // no container links yet (5fj)
 
     // ⚠️ -1, NOT 0. "No animation chosen" and "animation zero" are different
     // states and zero is a real animation -- defaulting to it would make every

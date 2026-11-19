@@ -958,6 +958,7 @@ namespace
                    p->m_sName.c_str(), p->m_Pos[0], p->m_Pos[1], p->m_Pos[2],
                    pPos->x, pPos->y, pPos->z, p->m_Dims[0], p->m_Dims[1], p->m_Dims[2]);
         p->m_Pos[0] = pPos->x; p->m_Pos[1] = pPos->y; p->m_Pos[2] = pPos->z;
+        p->m_bEverMoved = true;     // container links (5fj)
     }
 
     LTRESULT LTHost_GetObjectRotation(HOBJECT h, LTRotation* pRot)
@@ -3894,6 +3895,10 @@ namespace
             pTarget->m_Pos[0] = r.pos[0];
             pTarget->m_Pos[1] = r.pos[1];
             pTarget->m_Pos[2] = r.pos[2];
+            // Restored objects are placed by a teleport in the donor
+            // (game_serialize.cpp: FullMoveObject ... MO_TELEPORT), which
+            // makes their container links (5fj).
+            pTarget->m_bEverMoved = true;
             pTarget->m_Rot[0] = r.rot[0];
             pTarget->m_Rot[1] = r.rot[1];
             pTarget->m_Rot[2] = r.rot[2];
@@ -6158,6 +6163,7 @@ namespace
             float pos[3], q[4];
             FreeAttachTransform(a, pos, q);
             for (int k = 0; k < 3; ++k) a->pChild->m_Pos[k] = pos[k];
+            a->pChild->m_bEverMoved = true;     // MoveAttachments teleports them (5fj)
             for (int k = 0; k < 4; ++k) a->pChild->m_Rot[k] = q[k];
             for (int k = 0; k < 3; ++k) a->lastPPos[k] = a->pParent->m_Pos[k];
             for (int k = 0; k < 4; ++k) a->lastPRot[k] = a->pParent->m_Rot[k];
@@ -6304,6 +6310,7 @@ namespace
                 {
                     for (int k = 0; k < 3; ++k) p->m_Pos[k] = ap[k];
                     for (int k = 0; k < 4; ++k) p->m_Rot[k] = aq[k];
+                    p->m_bEverMoved = true;     // attachments are teleported (5fj)
                 }
             }
 
@@ -6441,6 +6448,7 @@ namespace
                 {
                     for (int k = 0; k < 3; ++k) p->m_Pos[k] = ap[k];
                     for (int k = 0; k < 4; ++k) p->m_Rot[k] = aq[k];
+                    p->m_bEverMoved = true;     // attachments are teleported (5fj)
                 }
             }
             out = LTDynamicSprite();
@@ -7265,6 +7273,7 @@ void LTServerHost_Update(float fElapsed)
                 if (p)
                 {
                     for (int k = 0; k < 3; ++k) { p->m_Pos[k] = v[k]; p->m_Vel[k] = 0.0f; }
+                    p->m_bEverMoved = true;
                     printf("[PLAYERPOS] player moved to (%.0f %.0f %.0f) at frame %u\n",
                            v[0], v[1], v[2], nFrame);
                     fflush(stdout);
@@ -7591,6 +7600,7 @@ bool LTServerHost_PlacePlayer(const float* pPos3)
     SRec* p = LTHost_FindPlayerRecord();
     if (!p) return false;
     for (int k = 0; k < 3; ++k) { p->m_Pos[k] = pPos3[k]; p->m_Vel[k] = 0.0f; }
+    p->m_bEverMoved = true;
     return true;
 }
 
@@ -8073,6 +8083,154 @@ bool LTServerHost_ContainerCode(void* hServer, unsigned short* pCode)
     const bool b = LTHost_ServerContainerCode((HOBJECT)hServer, &c) != LTFALSE;
     if (pCode) *pCode = c;
     return b;
+}
+
+// ⚠️ THE VOLUMES CHANGE WHAT THEY HOLD (HANDOVER 5fj) -- lithtech.exe's object
+// update (0x4698d1..0x469976): an object that is not itself a container and has
+// container links gets a ContainerPhysics -- a COPY of its acceleration,
+// velocity and flags, and its handle -- handed to every container it is linked
+// to, with FLAG_CONTAINER, as MID_AFFECTPHYSICS (EngineMessageFn(9, &cp, 0)),
+// and is then stepped from that copy. The game's VolumeBrush::UpdatePhysics
+// is everything a volume does to what is in it:
+//
+//   * damage -- CorrosiveFluid, PoisonGas, Electricity, the 100,000-damage
+//     fires and CRUSH volumes, and EndlessFall, whose 1e8 is what KILLS Cate
+//     in a bottomless pit: the client only fades the screen. 118 volumes in
+//     40 worlds have Damage > 0, and in this port none of them hurt anyone.
+//     ⚠️ Damage is NOT per second: each frame's message is Damage*dt held 0.25 s
+//     as a rate, in a NEW progressive slot (DoDamage sends no container handle,
+//     so nothing dedupes; 20 slots) -- Damage*0.25 per second at 60 fps.
+//     M11S01's CorrosiveFluid (5) costs 1.25 HP/s; measured 1.35 off the HUD;
+//   * water: viscosity brakes, Current pushes, liquid gravity (-200) replaces
+//     gravity (UpdateLiquidPhysics) -- for everything but the player, whose
+//     container physics is the client's (CMoveMgr);
+//   * a character's "body in liquid" / "on a ladder" (splash sounds, swim and
+//     climb animations).
+//
+// The port never sent it (the old comment above GetObjectContainers had
+// VolumeBrush asking GetContainedObjects -- no NOLF 1 class does).
+//
+// "Linked" = the object's box meets the volume's geometry (LTServerBrush_
+// BoxTouches; the bounding box for a concave one) and the object has been
+// moved since it was created (Record::m_bEverMoved). Volumes are walked in
+// object-list order; lithtech.exe walks the object's link list, whose order is
+// not known -- it matters only where two volumes both change one object.
+// LT_NOCONTAINERPHYSICS=1 = never sent (old; says so). LT_AFFECTTRACE=1 prints
+// each object's set of volumes when it changes, and a census at exit.
+namespace
+{
+    std::vector<SRec*> g_PassContainers;
+    std::map<std::string, unsigned long> g_AffectCensus;    // "object class -> volume class"
+    unsigned long g_nAffectExact = 0, g_nAffectBox = 0, g_nAffectRefused = 0;
+
+    bool AffectTrace()
+    {
+        static const bool b = (getenv("LT_AFFECTTRACE") != 0);
+        return b;
+    }
+    void AffectCensus()
+    {
+        printf("[AFFECT] census: %lu volume test(s) answered exactly (outside the box, or by the faces), %lu by the bounding box of a concave volume; %lu object-step(s) inside a volume's box but outside the volume\n",
+               g_nAffectExact, g_nAffectBox, g_nAffectRefused);
+        for (std::map<std::string, unsigned long>::const_iterator it = g_AffectCensus.begin(); it != g_AffectCensus.end(); ++it)
+            printf("[AFFECT]   %-40s %lu message(s)\n", it->first.c_str(), it->second);
+        fflush(stdout);
+    }
+}
+
+unsigned int LTServerHost_BeginContainerPass()
+{
+    g_PassContainers.clear();
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOCONTAINERPHYSICS") != 0);
+        if (b) { printf("[AFFECT] LT_NOCONTAINERPHYSICS=1 -- volumes are never asked to change what is in them: no water, currents or volume damage on server objects (old)\n"); fflush(stdout); }
+        return b; }();
+    static const bool s_bCensus = []() { if (AffectTrace()) atexit(AffectCensus); return true; }();
+    (void)s_bCensus;
+    if (s_bOff || LTHost_ContainersOff()) return 0;
+    const unsigned int n = g_Objects.ObjectCount();
+    for (unsigned int i = 0; i < n; ++i)
+    {
+        SRec* c = g_Objects.RecordAt(i);
+        if (LTHost_IsLiveContainer(c) && (c->m_Flags & FLAG_CONTAINER)) g_PassContainers.push_back(c);
+    }
+    return (unsigned int)g_PassContainers.size();
+}
+
+unsigned int LTServerHost_ContainerPass(void* hObj, float* pAccel3, float* pVel3, unsigned int* pFlags)
+{
+    SRec* p = CLTServerObjects::FromHandle(hObj);
+    if (!p || g_PassContainers.empty()) return 0;
+    float oMin[3], oMax[3];
+    LTHost_ObjBox(p, oMin, oMax);
+
+    ContainerPhysics cp;
+    cp.m_Acceleration.Init(pAccel3[0], pAccel3[1], pAccel3[2]);
+    cp.m_Velocity.Init(pVel3[0], pVel3[1], pVel3[2]);
+    cp.m_Flags   = *pFlags;
+    cp.m_hObject = (HOBJECT)p;
+
+    unsigned int n = 0;
+    std::string sNow;
+    for (size_t i = 0; i < g_PassContainers.size(); ++i)
+    {
+        SRec* c = g_PassContainers[i];
+        if (c == p) continue;
+        // A message before this one may have removed or hidden it.
+        if (!g_Objects.IsLive(c) || !c->m_pGame || !(c->m_Flags & FLAG_CONTAINER)) continue;
+        bool bExact = false;
+        int r = LTServerBrush_BoxTouches(c, oMin, oMax, &bExact);
+        if (r < 0)
+        {
+            float cMin[3], cMax[3];
+            LTHost_ObjBox(c, cMin, cMax);
+            r = LTHost_BoxesTouch(oMin, oMax, cMin, cMax) ? 1 : 0;
+        }
+        if (AffectTrace() && r >= 0)
+        {
+            if (bExact) ++g_nAffectExact; else ++g_nAffectBox;
+            if (bExact && !r)
+            {
+                float cMin[3], cMax[3];
+                LTHost_ObjBox(c, cMin, cMax);
+                if (LTHost_BoxesTouch(oMin, oMax, cMin, cMax)) ++g_nAffectRefused;
+            }
+        }
+        if (!r) continue;
+
+        c->m_pGame->EngineMessageFn(MID_AFFECTPHYSICS, &cp, 0.0f);
+        ++n;
+        if (AffectTrace())
+        {
+            const char* pOC = p->m_pClass ? p->m_pClass->m_ClassName : "?";
+            const char* pCC = c->m_pClass ? c->m_pClass->m_ClassName : "?";
+            ++g_AffectCensus[std::string(pOC) + " in " + pCC];
+            char b[128];
+            snprintf(b, sizeof b, "%s%s(%s)", sNow.empty() ? "" : ", ", c->m_sName.c_str(), pCC);
+            sNow += b;
+        }
+        // The game may have removed the object (a kill); its record stays
+        // until the end of the frame, as lithtech.exe's does.
+        if (!CLTServerObjects::FromHandle(hObj)) return n;
+    }
+
+    if (AffectTrace())
+    {
+        static std::map<SRec*, std::string> s_Last;
+        if (s_Last[p] != sNow)
+        {
+            printf("[AFFECT] t=%.2f %s '%s' at (%.0f %.0f %.0f) in: %s\n", g_fServerTime,
+                   p->m_pClass ? p->m_pClass->m_ClassName : "?", p->m_sName.c_str(),
+                   p->m_Pos[0], p->m_Pos[1], p->m_Pos[2], sNow.empty() ? "(none)" : sNow.c_str());
+            fflush(stdout);
+            s_Last[p] = sNow;
+        }
+    }
+    if (!n) return 0;
+    pAccel3[0] = cp.m_Acceleration.x; pAccel3[1] = cp.m_Acceleration.y; pAccel3[2] = cp.m_Acceleration.z;
+    pVel3[0]   = cp.m_Velocity.x;     pVel3[1]   = cp.m_Velocity.y;     pVel3[2]   = cp.m_Velocity.z;
+    *pFlags    = cp.m_Flags;
+    return n;
 }
 
 const char* LTServerHost_GameConVarString(const char* pName)

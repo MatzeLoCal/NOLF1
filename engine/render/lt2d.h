@@ -126,6 +126,16 @@ namespace LT2D
                         const LT2DRect* pSrcRect, int destX, int destY,
                         unsigned int key, unsigned int fill, float fAlpha);
 
+    // ⚠️ As BlitSolidColor, but the source's brightest channel is how much of
+    // `fill` covers the pixel: d = d (1 - c) + fill c, c = max(r,g,b)/255 x
+    // fAlpha. For a white-on-black coverage map -- NOLF's blended bitmap
+    // fonts, whose letters carry grey edges -- where BlitSolidColor makes
+    // every grey pixel solid (HANDOVER 5fi, DEVIATIONS E-017). Not an
+    // original 2D call: lithtech.exe has no such draw.
+    void BlitCoverage(const LT2DSurf& dst, const LT2DSurf& src,
+                      const LT2DRect* pSrcRect, int destX, int destY,
+                      unsigned int fill, float fAlpha);
+
     // Nearest-neighbour scale of pSrcRect into pDestRect.
     //
     // ⚠️ NEAREST, NOT BILINEAR, and that is a decision rather than laziness.

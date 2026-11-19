@@ -2659,6 +2659,17 @@ void CLTWorldScene::BuildMirrors()
         printf("[LT3D] %zu mirror plane(s) from %zu polygon(s) in %zu model(s)%s\n",
                m_Mirrors.size(), m_MirrorOfPoly.size(), m_MirrorModels.size(),
                LTMirrorsEnabled() ? "" : " -- reflections OFF");
+        // LT_MIRRORTRACE: every plane, where it is and which way it faces --
+        // what a test needs to aim at one (5fk).
+        if (getenv("LT_MIRRORTRACE"))
+            for (size_t k = 0; k < m_Mirrors.size(); ++k)
+            {
+                const MirrorPlane& mp = m_Mirrors[k];
+                printf("[MIRROR] plane %zu: %s, n=(%.3f %.3f %.3f), %zu poly, box (%.0f %.0f %.0f)-(%.0f %.0f %.0f)\n",
+                       k, mdl[mp.m_nModel].m_sName.c_str(), mp.m_Plane[0], mp.m_Plane[1], mp.m_Plane[2],
+                       mp.m_PolyIdx.size(), mp.m_Min[0], mp.m_Min[1], mp.m_Min[2],
+                       mp.m_Max[0], mp.m_Max[1], mp.m_Max[2]);
+            }
         fflush(stdout);
     }
 }
@@ -2694,15 +2705,52 @@ LT3DTexture* CLTWorldScene::MirrorPseudo(int nPlane, const LT3DTexture* pReal)
 }
 
 
+// LT_MIRRORNOVIS=1: a mirror the camera's leaf cannot see still gets its
+// reflection pass, as before 5fk (says so).
+bool CLTWorldScene::MirrorVisOff()
+{
+    static const bool b = []() {
+        const bool v = (getenv("LT_MIRRORNOVIS") != 0);
+        if (v) { printf("[LT3D] LT_MIRRORNOVIS=1 -- a mirror the camera's leaf cannot see still costs a reflection pass (old)\n"); fflush(stdout); }
+        return v; }();
+    return b;
+}
+
+// LT_MIRRORTRACE's census, at exit: frames, passes, and the mirrors that
+// faced the camera on screen but were not seen (5fk).
+namespace
+{
+    unsigned long g_nMirFrames = 0, g_nMirFramesWith = 0, g_nMirPasses = 0;
+    unsigned long g_nMirNotSeen = 0, g_nMirFramesNotSeen = 0;
+    void MirrorCensusPrint()
+    {
+        printf("[MIRROR] census: %lu frame(s), %lu with a reflection, %lu reflection pass(es); "
+               "%lu mirror(s) in %lu frame(s) facing the camera on screen but not seen from its leaf -- no pass (5fk)\n",
+               g_nMirFrames, g_nMirFramesWith, g_nMirPasses, g_nMirNotSeen, g_nMirFramesNotSeen);
+        fflush(stdout);
+    }
+}
+
+void CLTWorldScene::MirrorCensus(int nPasses, int nNotSeen)
+{
+    static const bool s_bOnce = []() { atexit(MirrorCensusPrint); return true; }();
+    (void)s_bOnce;
+    ++g_nMirFrames;
+    if (nPasses > 0) { ++g_nMirFramesWith; g_nMirPasses += (unsigned long)nPasses; }
+    if (nNotSeen > 0) { ++g_nMirFramesNotSeen; g_nMirNotSeen += (unsigned long)nNotSeen; }
+}
+
 // ⚠️ WHICH MIRRORS GET A REFLECTION THIS FRAME. Each costs a whole scene, so:
-// the camera must be in front of it, some of it must be on screen, and of
-// those the ones covering the most screen win (a 4-unit edge strip of a
-// mirror box never outbids its face). A mirror on a door moves with the door.
+// the camera must be in front of it, some of it must be on screen, the
+// camera's leaf must see it (5fk), and of those the ones covering the most
+// screen win (a 4-unit edge strip of a mirror box never outbids its face). A
+// mirror on a door moves with the door.
 int CLTWorldScene::SelectMirrors(const float* pEye3, const float* pAt3, float fFovY,
                                  float fAspect, const ILTWorldModelXform* pXform)
 {
     m_nActiveMirrors = 0;
     for (size_t k = 0; k < m_Mirrors.size(); ++k) m_Mirrors[k].m_nSlot = -1;
+    const bool bVisOff = MirrorVisOff();    // first, so the switch announces itself in every run
     if (m_Mirrors.empty() || !LTMirrorsEnabled()) return 0;
 
     const float up[3] = { 0, 1, 0 };
@@ -2713,6 +2761,7 @@ int CLTWorldScene::SelectMirrors(const float* pEye3, const float* pAt3, float fF
 
     const std::vector<LTWorldModelHeader>& mdl = m_World.GetModels();
     std::vector<std::pair<float, int> > cand;
+    int nNotSeen = 0;                               // facing, on screen, not seen (5fk)
     for (size_t k = 0; k < m_Mirrors.size(); ++k)
     {
         MirrorPlane& mp = m_Mirrors[k];
@@ -2765,6 +2814,24 @@ int CLTWorldScene::SelectMirrors(const float* pEye3, const float* pAt3, float fF
             fArea = (x1 - x0) * (y1 - y0);
         }
         if (fArea < 0.004f) continue;                   // 0.1% of the view
+
+        // ⚠️ ...AND THE CAMERA'S LEAF MUST SEE IT (5fk). In the view cone is
+        // not in view: a mirror in the next room, behind the wall, passed
+        // every test above and cost a whole scene. The level's visibility
+        // (5ea) is what the main pass culls by -- a polygon it cannot see is
+        // never drawn (DrawModel; Metal's index list, ModelVisibleNow) -- so
+        // a mirror none of whose polygons it can see is never drawn either,
+        // and its reflection would never be looked at. Not a guess at
+        // occlusion: the frame is the same pixel for pixel. Off (everything
+        // seen) when the view does not cull: outside every leaf,
+        // LT_NOVISCULL=1. LT_MIRRORNOVIS=1 = old (says so).
+        if (!bVisOff)
+        {
+            bool bSeen = false;
+            for (size_t q = 0; q < mp.m_PolyIdx.size() && !bSeen; ++q)
+                bSeen = PolyVisible(M, (size_t)mp.m_PolyIdx[q]);
+            if (!bSeen) { ++nNotSeen; continue; }
+        }
         mp.m_Live[0] = n[0]; mp.m_Live[1] = n[1]; mp.m_Live[2] = n[2]; mp.m_Live[3] = d;
         cand.push_back(std::make_pair(-fArea, (int)k));
     }
@@ -2803,13 +2870,18 @@ int CLTWorldScene::SelectMirrors(const float* pEye3, const float* pAt3, float fF
         m_ActiveMirror[m_nActiveMirrors++] = cand[k].second;
     }
 
-    static const bool s_bTrace = (getenv("LT_MIRRORTRACE") != 0);
-    if (s_bTrace)
+    // LT_MIRRORTRACE=1 -- the choice whenever it changes, and a census at
+    // exit; =2 -- every frame (mirrorview's batch of views).
+    static const int s_nTrace = getenv("LT_MIRRORTRACE") ? atoi(getenv("LT_MIRRORTRACE")) : 0;
+    if (s_nTrace)
     {
-        static int s_nLast = -1;
-        if (m_nActiveMirrors != s_nLast)
+        MirrorCensus(m_nActiveMirrors, nNotSeen);
+        static int s_nLast = -1, s_nLastNotSeen = -1;
+        if (m_nActiveMirrors != s_nLast || nNotSeen != s_nLastNotSeen || s_nTrace >= 2)
         {
             printf("[MIRROR] %d reflection(s) this frame", m_nActiveMirrors);
+            if (nNotSeen) printf(" (%d more facing it on screen, not seen from the camera's leaf: no pass)", nNotSeen);
+            s_nLastNotSeen = nNotSeen;
             for (int s = 0; s < m_nActiveMirrors; ++s)
             {
                 const MirrorPlane& mp = m_Mirrors[m_ActiveMirror[s]];
@@ -5027,6 +5099,13 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
     UpdateAnimatedSurfaces();       // `.spr` surfaces to the frame of the moment (5em)
     if (!m_bReflecting) UpdateLightAnims();     // the switched lights into the atlas (5fe)
 
+    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- BEFORE THE MIRRORS
+    // (5fk): SelectMirrors drops a mirror none of whose polygons the leaf can
+    // see. Such a mirror is never drawn in this view, so its reflection would
+    // never be looked at. A reflection pass returns at once from this (it
+    // never culls), so the state is always the main view's.
+    UpdateVisCull(pEye3, pXform);
+
     // ---- pass 0: MIRRORS (HANDOVER 5de) ---------------------------------- //
     //
     // ⚠️ FIRST, because each is a whole scene of its own -- this function,
@@ -5075,9 +5154,7 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             SyncMirrorPseudo(it->second);
     }
 
-    // ⚠️ WHAT THE CAMERA'S LEAF SEES (HANDOVER 5ea) -- after the reflection
-    // passes, which never cull, and before the first pass of this view.
-    UpdateVisCull(pEye3, pXform);
+    // The camera's leaf (UpdateVisCull, above) culls this view's objects.
     CLTVisCulledObjects visObjs(*this, pDyn);
     if (pDyn && VisCulling()) pDyn = &visObjs;
 
