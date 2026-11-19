@@ -286,7 +286,27 @@ LTCompMap LTComp_CurrentMap(int nSurfW, int nSurfH)
         Widen(m, nSurfW, nSurfH, ow, oh);
     }
     else
+    {
         Fit(0.0f, 0.0f, (float)nSurfW, (float)nSurfH, ow, oh, m);
+        // ⚠️ THE SPLASH IS A 4:3 PICTURE. The game scales its .pcx to the
+        // whole surface, which on a 16:10 or 16:9 surface stretches the logo
+        // sideways (the Windows game only ever had 4:3 modes). Shown at 4:3,
+        // centred, black beside it; the map stays affine, so the mouse
+        // inverts through it as before. LT_SPLASHSTRETCH=1 = old (says so).
+        static const bool s_bStretch = []() {
+            const bool b = getenv("LT_SPLASHSTRETCH") != 0;
+            if (b) { printf("[COMP] LT_SPLASHSTRETCH=1 -- full-screen pictures stretched to the surface (old)\n"); fflush(stdout); }
+            return b; }();
+        if (bFull && !s_bStretch && ow > 0 && oh > 0 &&
+            fabsf(((float)nSurfW / (float)nSurfH) / (4.0f / 3.0f) - 1.0f) >= 0.01f)
+        {
+            const float s = fminf((float)ow / 4.0f, (float)oh / 3.0f);
+            m.m_DstW = (int)(4.0f * s + 0.5f); if (m.m_DstW > ow) m.m_DstW = ow;
+            m.m_DstH = (int)(3.0f * s + 0.5f); if (m.m_DstH > oh) m.m_DstH = oh;
+            m.m_DstX = (ow - m.m_DstW) / 2;
+            m.m_DstY = (oh - m.m_DstH) / 2;
+        }
+    }
     m.m_bScene = false;
     // ⚠️ ONE FRAME OF GRACE, as for the camera: a menu frame whose
     // RenderObjects is skipped must not flash the 2D's open (black) area.
