@@ -27,12 +27,17 @@ ellenoriz() {
     else
         piros "  HIÁNYZIK  SDL3 fejlesztői csomag (libsdl3-dev)"; hiba=1
     fi
+    if pkg-config --exists freetype2 2>/dev/null; then
+        zold "  OK   FreeType $(pkg-config --modversion freetype2) (élsimított betűk)"
+    else
+        piros "  HIÁNYZIK  FreeType fejlesztői csomag (libfreetype-dev)"; hiba=1
+    fi
     if [ -f "$R/launcher/hu.txt" ]; then zold "  OK   magyar nyelvi fájl (launcher/hu.txt)"
     else piros "  HIÁNYZIK  launcher/hu.txt -- rossz ágon vagy? (git checkout linux-port)"; hiba=1; fi
     if [ $hiba -ne 0 ]; then
         echo
         piros "Hiányzó csomagok. Telepítés (ehhez internet kell):"
-        echo  "  sudo apt install clang pkg-config python3 libsdl3-dev"
+        echo  "  sudo apt install clang pkg-config python3 libsdl3-dev libfreetype-dev fonts-dejavu-core"
         return 1
     fi
 }

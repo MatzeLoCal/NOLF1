@@ -3,7 +3,7 @@
 2	EGYJÁTÉKOS
 3	NEHÉZSÉG
 4	BEÁLLÍTÁSOK
-5	KÜLDETÉSVÁLASZTÁS
+5	KÜLDETÉS VÁLASZTÁS
 6	BETÖLTÉS
 7	MENTÉS
 8	EGYEDI PÁLYÁK
@@ -18,7 +18,7 @@
 18	Beállítások
 19	Stáblista
 20	Kilépés
-21	Küldetésválasztás
+21	Küldetés választás
 22	Játék betöltése
 23	Játék mentése
 24	Egyedi pálya

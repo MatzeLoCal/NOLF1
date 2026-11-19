@@ -81,7 +81,7 @@ Q="-iquote$R/NOLF/Shared -iquote$R/NOLF/ObjectDLL -iquote$R/NOLF/ClientShellDLL"
 DEF="-DNO_PRAGMA_LIBS -D_NOLFBUILD -D_REZFILE -D_FINAL -DNDEBUG \
  -D_LITHTECH_ -D_LITHTECH2 -DSTRICT"
 
-FLAGS="-std=c++17 -fdeclspec -fPIC -Wno-everything -g -O2 $(pkg-config --cflags sdl3)"
+FLAGS="-std=c++17 -fdeclspec -fPIC -Wno-everything -g -O2 $(pkg-config --cflags sdl3 freetype2)"
 
 # ASan: NOLF_ASAN=1 ./build_skeleton.sh   (HANDOVER.md 4.6 -- reach for this
 # early; a degenerate backtrace means stop inferring and let ASan name the PC.)
@@ -173,7 +173,7 @@ done
 # links Cocoa; nothing else does. Compiled unconditionally so a build never
 # silently loses the window, but the window itself is off unless LT_WINDOW is
 # set (see engine/platform/ltwindow.h).
-LINK_EXTRA="$(pkg-config --libs sdl3) -ldl -lpthread"
+LINK_EXTRA="$(pkg-config --libs sdl3 freetype2) -ldl -lpthread"
 
 # ⚠️ The Metal backend, compiled the same way and for the same reason: always
 # built so a build cannot silently lose it, but inert unless LT_METAL is set.

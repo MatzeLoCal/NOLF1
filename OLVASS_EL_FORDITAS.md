@@ -18,6 +18,7 @@ cd ~/workspace/nolf1
 | **Forráskód**, `linux-port` ág | GitLab vagy a saját git szerver (lásd 6. pont) | Mindkettőn ugyanaz van |
 | **clang / clang++** | `sudo apt install clang` | Ezen a gépen clang 21 van |
 | **SDL3 fejlesztői csomag** | `sudo apt install libsdl3-dev` | Ebből lesz az ablak, a hang és a bevitel |
+| **FreeType + DejaVu betű** | `sudo apt install libfreetype-dev fonts-dejavu-core` | Az élsimított menü- és feliratbetűkhöz |
 | **pkg-config, python3** | `sudo apt install pkg-config python3` | Általában már fent vannak |
 | **A játék adatai** (NOLF GOTY) | `~/workspace/No One Lives Forever` | Telepített játékmappa (`NOLF.REZ` stb.) |
 | **Zenei hangbank** (nem kötelező) | `~/.local/share/NOLF1/GeneralUser-GS.sf2` | Enélkül néhány hangszer hiányzik a zenéből |
@@ -125,6 +126,7 @@ indítja. Ha elveszne, vagy máshová kerül a forrás:
 | Jelenség | Megoldás |
 |---|---|
 | `HIÁNYZIK SDL3` | `sudo apt install libsdl3-dev` (ehhez net kell) |
+| `HIÁNYZIK FreeType` | `sudo apt install libfreetype-dev` (ehhez net kell) |
 | Nincs magyar szöveg | Jó ágon vagy? `git branch` → `linux-port` kell, és létezzen a `launcher/hu.txt`. Ha mégis angol, nézd meg, nincs-e beállítva a `NOLF_LANG=en` |
 | Fordítási hiba furcsa include-dal | `./forditas.sh tiszta` (a linkeket is újracsinálja) |
 | Fekete kép vagy összeomlás induláskor | Próbáld meg így: `LT_SOFTWARE=1 ./play_linux.sh`. A naplót a terminálban látod |

@@ -112,11 +112,12 @@ public:
                          bool bSolid, unsigned int color,
                          unsigned int transColor, int nExtraSpace = 0) const;
 
-    // PORT: an anti-aliased font from the macOS system font, `nHeight` pixels
+    // PORT: an anti-aliased font from a system font (macOS: the bold system
+    // font; Linux: a bold TrueType font via FreeType), `nHeight` pixels
     // tall, with every CP1252 letter plus the Hungarian ő ű Ő Ű (at CP1250's
     // positions -- see AddAccentedGlyphs). Coverage lives in the alpha
-    // channel and Draw blends with it. False where there is no system font
-    // (Linux): the caller keeps the bitmap font.
+    // channel and Draw blends with it. False where there is no usable font:
+    // the caller keeps the bitmap font.
     bool            BuildSmooth(int nHeight, unsigned int transColor);
     bool            IsSmooth() const { return m_bSmooth; }
 

@@ -70,6 +70,16 @@ void	CSubtitle::Init()
 		if (pLang && *pLang) defSubtitles = 1.0f;
 	}
 	g_vtSubtitles.Init(g_pLTClient, "Subtitles", LTNULL, defSubtitles);
+	// PORT: ...and ON, whatever autoexec.cfg says. An English run saves
+	// "Subtitles" "0" (the default for English), and that saved value would
+	// otherwise switch the translated subtitles off for good.
+	// NOLF_SUBTITLES=0 still turns them off.
+	{
+		const char* pLang = getenv("NOLF_LANG_FILE");
+		const char* pSub  = getenv("NOLF_SUBTITLES");
+		if (pLang && *pLang && !(pSub && pSub[0] == '0'))
+			g_vtSubtitles.SetFloat(1.0f);
+	}
     g_vtSubtitleMaxDist.Init(g_pLTClient, "SubtitleMaxDist", LTNULL, 1000.0f);
 
 	m_vSpeakerPos.Init();

@@ -496,10 +496,9 @@ void CLTBitmapFont::Draw(const LT2DSurf& dst, int x, int y, const char* pStr,
 //
 // ----------------------------------------------------------------------- //
 
-#ifdef __APPLE__
+// ltsysfont.mm on macOS, engine/linux/ltsysfont_ft.cpp (FreeType) on Linux.
 bool LTSysFont_RasterGlyph(unsigned int cp, int nPixelHeight,
-                           std::vector<unsigned char>& cov, int& nWidth);   // ltsysfont.mm
-#endif
+                           std::vector<unsigned char>& cov, int& nWidth);
 
 namespace
 {
@@ -528,10 +527,6 @@ namespace
 
 bool CLTBitmapFont::BuildSmooth(int nHeight, unsigned int transColor)
 {
-#ifndef __APPLE__
-    (void)nHeight; (void)transColor;
-    return false;
-#else
     if (nHeight < 6) return false;
 
     struct G { int code; int w; std::vector<unsigned char> cov; };
@@ -588,5 +583,4 @@ bool CLTBitmapFont::BuildSmooth(int nHeight, unsigned int transColor)
     m_AvgWidth = nSpace;
     m_bSmooth  = true;
     return true;
-#endif
 }
