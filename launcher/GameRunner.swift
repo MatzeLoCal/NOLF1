@@ -1,11 +1,24 @@
-// GameRunner.swift -- starts the game the way build/play.sh does, as its own
-// process, and watches it.
+// GameRunner.swift -- starts the game the way build/play.sh does, INSIDE THIS
+// APP'S OWN PROCESS (2026-11-21), and comes back to the launcher afterwards.
 //
-// The game is the engine's command-line host (`nolf1`) with its server dylib
-// beside it, both copied into this app's Contents/Helpers by the Xcode build.
-// Everything play.sh exported is set here; nothing else is needed.
+// ⚠️ ONE PROGRAM, ONE DOCK ICON. The engine and the game's client code are
+// linked into this app (the static library `nolf1core`, -force_load; the
+// bridging header declares NOLF1_Main). The game used to be a second
+// executable, Contents/Helpers/nolf1, with its own Dock icon. Only the game
+// MODULE is still a file of its own -- libnolfobject.dylib, in
+// Contents/Frameworks, which the engine dlopens (NOLF_SERVER says where).
+//
+// ⚠️ ONCE PER PROCESS. The engine's globals and the game module are not reset
+// when NOLF1_Main returns, so after a game the app RESTARTS ITSELF (a tiny
+// shell waits for this process to end, then `open`s the app with
+// --after-game) and shows the result and the log as before. Cmd-Q while
+// playing ends the game cleanly first and then quits (AppDelegate).
+//
+// Everything play.sh exported is set here, in this process's environment,
+// before NOLF1_Main runs; nothing else is needed.
 //
 //   * game data      NOLF_GAME_DIR (GameInstall)
+//   * game module    NOLF_SERVER = Contents/Frameworks/libnolfobject.dylib
 //   * a window       LT_WINDOW=1 -- also what makes the game keep its
 //                    settings in ~/Library/Application Support/NOLF1
 //   * renderer       LT_METAL=1, or LT_SOFTWARE=1
@@ -30,10 +43,68 @@ enum Paths {
         FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs/NOLF1", isDirectory: true)
     }
-    /// The game, inside this app. Overridable for development runs.
-    static var gameExecutable: URL {
-        if let p = ProcessInfo.processInfo.environment["NOLF1_GAME_BINARY"] { return URL(fileURLWithPath: p) }
-        return Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/nolf1")
+    /// The game's module (its server side), inside this app. The engine itself
+    /// is linked into the app.
+    static var gameModule: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Frameworks/libnolfobject.dylib")
+    }
+}
+
+/// The game, run in this process (NOLF1_Main, the bridging header).
+enum InProcessGame {
+    /// NOLF1_Main has been entered: it may not be entered again.
+    private(set) static var used = false
+    /// The game is running right now (Cmd-Q asks it to end first).
+    private(set) static var running = false
+    /// Cmd-Q came while it ran: quit when it is done, do not come back.
+    static var quitWhenDone = false
+
+    /// This process's LT_* / NOLF_* variables become exactly the game's.
+    private static func applyEnvironment(_ env: [String: String]) {
+        let game: (String) -> Bool = { $0.hasPrefix("LT_") || $0.hasPrefix("NOLF_") }
+        for k in ProcessInfo.processInfo.environment.keys where game(k) { unsetenv(k) }
+        for (k, v) in env where game(k) { setenv(k, v, 1) }
+    }
+
+    /// Runs the whole game, as `nolf1` would with this environment, in this
+    /// directory, its output appended to `output`. `restoreOutput` puts this
+    /// process's stdout/stderr back afterwards (the self-test prints after it).
+    static func run(env: [String: String], in dir: URL, output: URL, restoreOutput: Bool) -> Int32 {
+        precondition(!used, "the game runs once per process")
+        used = true
+        applyEnvironment(env)
+        FileManager.default.changeCurrentDirectoryPath(dir.path)
+
+        fflush(stdout); fflush(stderr)
+        let savedOut = restoreOutput ? dup(STDOUT_FILENO) : -1
+        let savedErr = restoreOutput ? dup(STDERR_FILENO) : -1
+        let fd = Darwin.open(output.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        if fd >= 0 { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd) }
+
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup("NOLF1"), nil]
+        running = true
+        let rc = NOLF1_Main(1, &argv)
+        running = false
+        free(argv[0])
+
+        fflush(stdout); fflush(stderr)
+        if restoreOutput {
+            if savedOut >= 0 { dup2(savedOut, STDOUT_FILENO); close(savedOut) }
+            if savedErr >= 0 { dup2(savedErr, STDERR_FILENO); close(savedErr) }
+        }
+        return rc
+    }
+
+    /// After a game: a shell waits until this process has ended, then opens the
+    /// app again with the result -- so the next game starts in a fresh process.
+    static func restartLauncher(status: Int32, log: URL) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c",
+                       "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.05; done; "
+                       + "exec /usr/bin/open -n \"$2\" --args --after-game \"$3\" \"$4\"",
+                       "sh", String(getpid()), Bundle.main.bundleURL.path, String(status), log.path]
+        try? p.run()
     }
 }
 
@@ -57,6 +128,9 @@ struct LaunchOptions {
     func environment(gameDirs: [URL], headless: Bool = false, updates: Int = 0) -> [String: String] {
         var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("LT_") && !$0.key.hasPrefix("NOLF_") }
         env["NOLF_GAME_DIR"] = gameDirs.map { $0.path }.joined(separator: ":")
+        // The engine looks beside its executable -- this app's Contents/MacOS --
+        // so it is told where the module really is.
+        env["NOLF_SERVER"] = Paths.gameModule.path
         if headless {
             env["LT_UPDATES"] = String(updates)
             env["LT_STUB_QUIET"] = "1"
@@ -140,70 +214,63 @@ final class GameRunner: ObservableObject {
     }
     @Published private(set) var state: State = .idle
     @Published private(set) var log: URL?
-    private var process: Process?
 
     var isRunning: Bool { state == .running }
 
+    init() {
+        // Back from a game (InProcessGame.restartLauncher): its result and log.
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--after-game"), i + 2 < args.count {
+            state = .ended(Int32(args[i + 1]) ?? 0)
+            log = URL(fileURLWithPath: args[i + 2])
+        }
+    }
+
     func start(_ install: GameInstall, _ options: LaunchOptions) {
-        guard process == nil else { return }
+        guard !InProcessGame.used else { return }
         do {
             let fm = FileManager.default
-            let exe = Paths.gameExecutable
-            guard fm.isExecutableFile(atPath: exe.path) else {
-                state = .failed("The game itself is missing from the app (\(exe.path)).")
+            guard fm.fileExists(atPath: Paths.gameModule.path) else {
+                state = .failed("The game module is missing from the app (\(Paths.gameModule.path)).")
                 return
             }
             try fm.createDirectory(at: Paths.profile, withIntermediateDirectories: true)
             if options.mode == .mission { try Profile.unlock(upTo: options.mission, in: Paths.profile) }
             let dirs = try install.directoriesForEngine()
-
+            let env = options.environment(gameDirs: dirs)
             let logURL = try Self.newLog()
-            let handle = try FileHandle(forWritingTo: logURL)
 
-            let p = Process()
-            p.executableURL = exe
-            p.currentDirectoryURL = Paths.profile
-            p.environment = options.environment(gameDirs: dirs)
-            p.standardOutput = handle
-            p.standardError = handle
-            p.terminationHandler = { [weak self] proc in
-                let status = proc.terminationStatus
-                let reason = proc.terminationReason
-                try? handle.close()
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.process = nil
-                    self.state = reason == .uncaughtSignal ? .crashed(status) : .ended(status)
-                }
-            }
-            try p.run()
-            process = p
             log = logURL
             state = .running
-            handOverFocus(to: p.processIdentifier)
+            // The launcher steps aside; the game opens its own window in this app.
+            for w in NSApp.windows where w.isVisible { w.orderOut(nil) }
+
+            // ⚠️ NOT INSIDE THE BUTTON'S ACTION: SwiftUI finishes this update
+            // first, then the game's frame loop runs on the main thread -- it
+            // pumps the app's events itself until its window closes.
+            //
+            // ⚠️ FROM A RUN-LOOP TIMER, NEVER FROM DispatchQueue.main.async
+            // (user's bug 2026-11-21: the green button hung the game a while,
+            // then no key reached it). GCD runs no other main-queue block while
+            // one is running, so a game loop started INSIDE one starved the main
+            // queue for the whole session, its own event pumping included --
+            // and AppKit's fullscreen transition finishes on the main queue: it
+            // timed out and left the window without the keyboard. Measured
+            // (scratch mq.m): main-queue work queued during such a loop ran
+            // NO from a main-queue block, YES from a timer. `nolf1` alone runs
+            // the loop straight from main(), which is why it never had this.
+            Timer.scheduledTimer(withTimeInterval: 0, repeats: false) { _ in
+                let rc = InProcessGame.run(env: env, in: Paths.profile, output: logURL, restoreOutput: false)
+                if !InProcessGame.quitWhenDone { InProcessGame.restartLauncher(status: rc, log: logURL) }
+                exit(rc)
+            }
         } catch {
             state = .failed(error.localizedDescription)
         }
     }
 
-    func stop() { process?.terminate() }
-
-    /// Since macOS 14 activation is cooperative: the game asks to come to the
-    /// front (ltwindow.mm, `[NSApp activate]`), and that only works if the
-    /// app in front -- this one, the Play button was just clicked -- yields.
-    /// The game is a plain process, so wait for it to show up as one.
-    private func handOverFocus(to pid: Int32) {
-        Task { @MainActor in
-            for _ in 0..<50 {
-                if let app = NSRunningApplication(processIdentifier: pid), app.activationPolicy == .regular {
-                    NSApp.yieldActivation(to: app)
-                    app.activate()
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(100))
-            }
-        }
-    }
+    /// Ends a running game as its close button would.
+    func stop() { NOLF1_RequestQuit() }
 
     /// A fresh log file; the newest 20 are kept.
     static func newLog() throws -> URL {

@@ -389,7 +389,13 @@ bool LTWindow_Open(int nWidth, int nHeight, const char* pTitle)
         // keyboard/binding problem rather than an application-startup one.
         // Measured: zero NSEventTypeKeyDown in a windowed run, with the
         // bindings verified correct headlessly.
-        [NSApp finishLaunching];
+        // ⚠️ ONLY IF NOBODY ELSE HAS (2026-11-21): inside the launcher the app
+        // is already launched and running -- SwiftUI's own -run did it -- and
+        // a second finishLaunching would send its delegate the launch
+        // notifications again. `nolf1` on its own has no -run, so it still
+        // finishes launching here, exactly as before.
+        if (![NSApp isRunning])
+            [NSApp finishLaunching];
 
         // ⚠️ FITTED TO THE SCREEN, keeping the surface's shape. The surface is
         // sized in pixels for the game; as a window in points it can be taller
@@ -583,6 +589,23 @@ void LTWindow_PumpEvents()
 bool LTWindow_ShouldClose()
 {
     return g_bShouldClose;
+}
+
+// The same as the window's close button: the frame loop ends at its next
+// check, then the game saves the player's settings and tears down as it
+// always does.
+void LTWindow_RequestClose()
+{
+    g_bShouldClose = true;
+}
+
+// ⚠️ FOR THE LAUNCHER, which runs the game in its own process (2026-11-21):
+// Cmd-Q in the app asks the game to end this way first, so the audio device
+// is stopped and the settings are written before the process exits -- an
+// abrupt exit with CoreAudio still rendering is the old windowed-quit crash.
+extern "C" void NOLF1_RequestQuit(void)
+{
+    LTWindow_RequestClose();
 }
 
 

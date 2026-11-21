@@ -3274,7 +3274,16 @@ static bool LTHost_WantMetal(bool bWindow)
 }
 
 
-int main(int argc, char** argv)
+// ⚠️ THE GAME'S ENTRY, AND IT IS NOT `main` (2026-11-21). The engine and the
+// game's client code are the static library `nolf1core`; two programs run it:
+//   * `nolf1` (tool/nolf1_main.cpp) -- the command line, the harness, the
+//     gates, NOLF1/build -- whose main() is exactly this;
+//   * the launcher, NOLF1.app, which calls it INSIDE ITS OWN PROCESS (one
+//     program, one Dock icon; the game was a second executable in
+//     Contents/Helpers before).
+// ⚠️ ONCE PER PROCESS: nothing below resets the engine's globals or the game
+// module on the way out. The launcher restarts itself after a game.
+extern "C" int NOLF1_Main(int argc, char** argv)
 {
     bool bClient = true;
     for (int i = 1; i < argc; ++i)
