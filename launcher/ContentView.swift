@@ -29,24 +29,36 @@ struct ContentView: View {
     private var mode: LaunchOptions.Mode { LaunchOptions.Mode(rawValue: modeRaw) ?? .play }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            header
-            gameFolder
-            Divider()
-            playRow
-            displayRow
-            // Full width, flush left: a DisclosureGroup centres content narrower
-            // than itself, so short captions pulled the whole block to the middle.
-            DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
-                advanced.padding(.top, 8).frame(maxWidth: .infinity, alignment: .leading)
+        HStack(alignment: .top, spacing: 18) {
+            VStack(alignment: .leading) {
+                header
+                gameFolder
+                Divider()
+                playRow
+                displayRow
+                // Full width, flush left: a DisclosureGroup centres content narrower
+                // than itself, so short captions pulled the whole block to the middle.
+                ScrollView {
+                    DisclosureGroup("Advanced", isExpanded: $showAdvanced) {
+                        advanced.padding(.top, 8).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                Spacer(minLength: 0)
+                footer
             }
-            Spacer(minLength: 0)
-            footer
+            .padding(12)
+            .frame(width: 400)
+            .background(
+                RoundedRectangle(cornerRadius: 30)
+                    .fill(Color("OverlayBackground"))
+                    .overlay(RoundedRectangle(cornerRadius: 30)
+                        .strokeBorder(Color("OverlayStroke"), lineWidth: 1.2))
+            )
+            Spacer()
         }
-        .padding(24)
-        .frame(width: 768)
-        .frame(minHeight: 460)
-        .background(Image("LauncherBackground2")
+        .padding(EdgeInsets(top: 240, leading: 24, bottom: 24, trailing: 24))
+        .frame(minWidth: 1024, minHeight: 600)
+        .background(Image("LauncherBackground")
             .resizable()
             .scaledToFill())
         .onAppear(perform: rescan)
@@ -62,14 +74,15 @@ struct ContentView: View {
     // MARK: - parts
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
+            let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
             Text("No One Lives Forever").font(.largeTitle.bold())
-            Text("macOS port — launcher").foregroundStyle(.secondary)
+            Text(verbatim: "Version: \(appVersion)").foregroundStyle(.secondary)
         }
     }
 
     private var gameFolder: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             Text("Game data").font(.headline)
             HStack {
                 Text(gamePath.isEmpty ? "No folder chosen" : gamePath)
@@ -97,7 +110,9 @@ struct ContentView: View {
             Button(action: play) {
                 Text(runner.isRunning ? "Running…" : playTitle)
                     .font(.title2.bold()).frame(minWidth: 180)
+                    .foregroundStyle(Color.white)
             }
+            .tint(Color("Button"))
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.defaultAction)
@@ -135,7 +150,6 @@ struct ContentView: View {
                 Text(verbatim: "\(p[0]) × \(p[1])").tag(t)
             }
         }
-        .frame(maxWidth: 300)
     }
 
     private var advanced: some View {

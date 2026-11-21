@@ -5,8 +5,22 @@
 import SwiftUI
 import AppKit
 
+/// Cmd-Q while the game runs in this process: the game is asked to end the
+/// way its close button ends it (settings written, audio stopped, torn down),
+/// and the app quits when it has -- never with the game's audio still running.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard InProcessGame.running else { return .terminateNow }
+        InProcessGame.quitWhenDone = true
+        NOLF1_RequestQuit()
+        return .terminateCancel
+    }
+}
+
 @main
 struct NOLF1LauncherApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     init() {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--selftest") {

@@ -191,8 +191,8 @@ static bool LTScreen_Wanted(uint32* pW, uint32* pH)
 // The launcher passes its size as LT_SCREEN at every start, and that wins at
 // startup -- so without this the choice would last one session. Written to
 // the launcher's own preferences (com.schonder.nolf.launcher width/height,
-// its @AppStorage), and only when this binary runs from inside the launcher
-// (Contents/Helpers): a headless test or play.sh never touches them.
+// its @AppStorage), and only when the game runs inside the launcher (the
+// app's own executable): a headless test or play.sh never touches them.
 // LT_NOLAUNCHERSIZE=1 = not written (says so).
 static void LTMode_RememberForLauncher(uint32 w, uint32 h)
 {
@@ -204,7 +204,9 @@ static void LTMode_RememberForLauncher(uint32 w, uint32 h)
     }
     char szExe[2048];
     uint32_t n = sizeof(szExe);
-    if (_NSGetExecutablePath(szExe, &n) != 0 || !strstr(szExe, ".app/Contents/Helpers/")) return;
+    // Inside the app: the launcher's own executable since the game runs in its
+    // process (Contents/MacOS, 2026-11-21); Contents/Helpers was the old place.
+    if (_NSGetExecutablePath(szExe, &n) != 0 || !strstr(szExe, ".app/Contents/")) return;
 
     const CFStringRef app = CFSTR("com.schonder.nolf.launcher");
     int iw = (int)w, ih = (int)h;

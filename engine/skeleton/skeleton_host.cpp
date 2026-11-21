@@ -219,6 +219,37 @@ static void LTFile_DumpCensus()
 // HANDOVER.md §4.5 is about exactly this.
 // ----------------------------------------------------------------------- //
 
+// ⚠️ THE GAME'S OWN QUIT (user 2026-11-21: "Selecting Quit in the game does
+// nothing, but should lead back to the launcher"). Main menu and Esc menu ->
+// Quit -> "Are you sure?" -> Yes ends in g_pLTClient->Shutdown()
+// (FolderMain.cpp:155, FolderEscape.cpp:94; also the demo screens and two
+// callbacks), and it was the generated STUB -- so only the window's close
+// button ever ended a game. The engine's contract is "shut down after the
+// current update": the frame loop ends at its next check, then the host tears
+// down exactly as for the close button (settings written, audio stopped,
+// OnEngineTerm) and NOLF1_Main returns -- `nolf1` exits, the launcher comes
+// back. Headless too (the loop checks the flag itself).
+static bool g_bHostShutdown = false;
+
+static void LTHost_Shutdown()
+{
+    LTIMPL("ILTClient::Shutdown");
+    // LT_NOGAMEQUIT=1: the game's Quit does nothing, as before (says so) --
+    // for a headless probe that might land on Quit and should keep running.
+    static const bool s_bOff = []() {
+        const bool b = (getenv("LT_NOGAMEQUIT") != 0);
+        if (b) { printf("[HOST] LT_NOGAMEQUIT=1 -- the game's Quit (ILTClient::Shutdown) is ignored (old)\n"); fflush(stdout); }
+        return b; }();
+    if (s_bOff) return;
+    if (!g_bHostShutdown)
+    {
+        printf("[HOST] the game asked to quit (ILTClient::Shutdown) -- the run ends after this frame\n");
+        fflush(stdout);
+    }
+    g_bHostShutdown = true;
+    LTWindow_RequestClose();
+}
+
 static void LTHost_ShutdownWithMessage(char* pMsg, ...)
 {
     // ⚠️ LTSTUB, not LTStub_Report. LTStub_Report counts EVERY call as a new
@@ -1375,6 +1406,7 @@ public:
         GetDeviceObjects    = LTHost_GetDeviceObjects;
         FreeDeviceObjects   = LTHost_FreeDeviceObjects;
 
+        Shutdown            = LTHost_Shutdown;          // the game's Quit
         ShutdownWithMessage = LTHost_ShutdownWithMessage;
         DebugOut            = LTHost_DebugOut;
         GetEngineHook       = LTHost_GetEngineHook;
@@ -3274,7 +3306,16 @@ static bool LTHost_WantMetal(bool bWindow)
 }
 
 
-int main(int argc, char** argv)
+// ⚠️ THE GAME'S ENTRY, AND IT IS NOT `main` (2026-11-21). The engine and the
+// game's client code are the static library `nolf1core`; two programs run it:
+//   * `nolf1` (tool/nolf1_main.cpp) -- the command line, the harness, the
+//     gates, NOLF1/build -- whose main() is exactly this;
+//   * the launcher, NOLF1.app, which calls it INSIDE ITS OWN PROCESS (one
+//     program, one Dock icon; the game was a second executable in
+//     Contents/Helpers before).
+// ⚠️ ONCE PER PROCESS: nothing below resets the engine's globals or the game
+// module on the way out. The launcher restarts itself after a game.
+extern "C" int NOLF1_Main(int argc, char** argv)
 {
     bool bClient = true;
     for (int i = 1; i < argc; ++i)
@@ -4336,6 +4377,10 @@ int main(int argc, char** argv)
                 // Headless: the frame's GPU work is committed here (a window
                 // commits it with the present just below).
                 if (!bWindow) LTComp_FrameEnd();
+
+                // The game's Quit, headless (windowed, LTWindow_ShouldClose
+                // below ends the loop the same way).
+                if (!bWindow && g_bHostShutdown) break;
 
                 // ⚠️ LT_WINRESIZE=WxH@frame -- A TEST SWITCH: resizes the window's
                 // content to W x H points at that frame, the one thing a headless

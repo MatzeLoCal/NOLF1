@@ -48,6 +48,9 @@ void LTWindow_PumpEvents();
 
 // True once the user has asked to close the window.
 bool LTWindow_ShouldClose();
+// As if the close button had been pressed (the launcher's Cmd-Q; extern "C"
+// NOLF1_RequestQuit is the same, for Swift).
+void LTWindow_RequestClose();
 
 void LTWindow_Close();
 
