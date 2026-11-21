@@ -12,6 +12,7 @@
 		254A22CA0E8AF406F1904413 /* AudioToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3D7FBC7CFA81222BE19E14C0 /* AudioToolbox.framework */; };
 		2E1C05D3F6A40116E42CF46B /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 67FD5AA3EF4C9D7CE30A767A /* Cocoa.framework */; };
 		2FA548333085967D00999826 /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2FA548323085967D00999826 /* Images.xcassets */; };
+		2FD2A1EF30B2479D000F55E7 /* Colors.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2FD2A1EE30B2479D000F55E7 /* Colors.xcassets */; };
 		56104E5FAFB56ED77080F5FF /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8AF5C1122BFF2E64F52BE687 /* QuartzCore.framework */; };
 		750F0A84DA59D9B196C6B522 /* libnolfobject.dylib in Embed Game */ = {isa = PBXBuildFile; fileRef = 0349ABFBFD7CC065F95E0CC3 /* libnolfobject.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		76F21D7950A364FA90FBA6CA /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F0226477C15C69B85D9A27C6 /* Metal.framework */; };
@@ -71,6 +72,7 @@
 		1736FF0A2ADF996916ADD3F2 /* nolf1 */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = nolf1; sourceTree = BUILT_PRODUCTS_DIR; };
 		21FFE7C225508CF261CF23F1 /* NOLF1.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NOLF1.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		2FA548323085967D00999826 /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Images.xcassets; sourceTree = "<group>"; };
+		2FD2A1EE30B2479D000F55E7 /* Colors.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Colors.xcassets; sourceTree = "<group>"; };
 		3D7FBC7CFA81222BE19E14C0 /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		5E3F6A940386AEE8D47C4748 /* libnolf1core.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libnolf1core.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		67FD5AA3EF4C9D7CE30A767A /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
@@ -149,6 +151,13 @@
 			membershipExceptions = (
 				generated/AnimationLex.cpp,
 				generated/AnimationParse.cpp,
+			);
+			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
+		};
+		789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1core" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				sdk/inc/ltengineobjects.cpp,
 			);
 			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
 		};
@@ -333,13 +342,6 @@
 				Shared/DebugMgr.cpp,
 			);
 			target = 8D6261D67E55699873A0B202 /* nolfobject */;
-		};
-		789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1core" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				sdk/inc/ltengineobjects.cpp,
-			);
-			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
 		};
 		909E3F37E78342C72E308FB9 /* Exceptions for "NOLF" folder in "nolf1core" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -607,6 +609,7 @@
 			isa = PBXGroup;
 			children = (
 				2FA548323085967D00999826 /* Images.xcassets */,
+				2FD2A1EE30B2479D000F55E7 /* Colors.xcassets */,
 			);
 			path = assets;
 			sourceTree = "<group>";
@@ -781,6 +784,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				2FA548333085967D00999826 /* Images.xcassets in Resources */,
+				2FD2A1EF30B2479D000F55E7 /* Colors.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -995,12 +999,29 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.launcher;
 				PRODUCT_NAME = NOLF1;
+				STRIP_STYLE = "non-global";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "launcher/NOLF1Launcher-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
 				STRIP_STYLE = "non-global";
+			};
+			name = Release;
+		};
+		929A38AC23966B8A4C50854A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					_CLIENTBUILD,
+				);
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRIP_INSTALLED_PRODUCT = NO;
 			};
 			name = Release;
 		};
@@ -1231,12 +1252,29 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.schonder.nolf.launcher;
 				PRODUCT_NAME = NOLF1;
+				STRIP_STYLE = "non-global";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "launcher/NOLF1Launcher-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 				STRIP_STYLE = "non-global";
+			};
+			name = Debug;
+		};
+		D2D42D66DD33F27F3F3B1FEE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = EJBTKE7CEJ;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					_CLIENTBUILD,
+				);
+				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRIP_INSTALLED_PRODUCT = NO;
 			};
 			name = Debug;
 		};
