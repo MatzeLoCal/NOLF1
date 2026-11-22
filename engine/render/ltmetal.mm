@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <vector>
+#include <map>
 
 // ----------------------------------------------------------------------- //
 //
@@ -452,12 +453,66 @@ vertex VOut vs_skin(uint vid [[vertex_id]],
     o.luv = float2(-1.0);           // and no lightmap (5fc)
     return o;
 }
+
+// ---- CANVASES (HANDOVER 5fo): ILTCustomDraw's primitives -------------------- //
+// RGBA per vertex, the game's texture ops; blend factors and depth are the
+// pipeline's. lt3d.cpp's DrawCanvasTriangle is the same arithmetic.
+struct CanvasIn {
+    float3 pos  [[attribute(0)]];
+    float2 uv   [[attribute(1)]];
+    float4 rgba [[attribute(2)]];
+};
+struct CanvasOut {
+    float4 pos [[position]];
+    float2 uv;
+    float4 rgba;
+};
+struct CanvasU { float4x4 mvp; int colorOp; int alphaOp; int hasTex; int pad; };
+
+vertex CanvasOut vs_canvas(CanvasIn in [[stage_in]], constant CanvasU& u [[buffer(1)]])
+{
+    CanvasOut o;
+    o.pos  = u.mvp * float4(in.pos, 1.0);
+    o.uv   = in.uv;
+    o.rgba = in.rgba;
+    return o;
+}
+
+static float canvasOp(int op, float t, float d)
+{
+    if (op == 1) return t;              // SELECTTEXTURE
+    if (op == 2) return d;              // SELECTDIFFUSE
+    if (op == 4) return t + d;          // ADD
+    if (op == 5) return t + d - 0.5;    // ADDSIGNED
+    return t * d;                       // MODULATE
+}
+
+fragment float4 fs_canvas(CanvasOut in [[stage_in]], constant CanvasU& u [[buffer(1)]],
+                          texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]])
+{
+    const float4 d = saturate(in.rgba);
+    const float4 t = (u.hasTex != 0) ? tex.sample(smp, in.uv) : float4(1.0);
+    float4 o;
+    o.r = canvasOp(u.colorOp, t.r, d.r);
+    o.g = canvasOp(u.colorOp, t.g, d.g);
+    o.b = canvasOp(u.colorOp, t.b, d.b);
+    o.a = canvasOp(u.alphaOp, t.a, d.a);
+    return saturate(o);
+}
 )METAL";
 
 namespace
 {
     id<MTLDevice>               g_Device   = nil;
     id<MTLCommandQueue>         g_Queue    = nil;
+    id<MTLLibrary>              g_Lib      = nil;      // kShaderSrc, for pipelines made later (5fo)
+    // The canvas path's state (5fo, LTMetal_DrawCanvas): a pipeline per blend
+    // factor pair and sample count, made on first use; a depth state per
+    // read/write pair; a sampler per address mode; a white texel for "no texture".
+    std::map<int, id<MTLRenderPipelineState> > g_CanvasPipes;
+    id<MTLDepthStencilState>    g_CanvasDepth[4]   = { nil, nil, nil, nil };
+    id<MTLSamplerState>         g_CanvasSampler[2] = { nil, nil };
+    id<MTLTexture>              g_CanvasWhite      = nil;
     id<MTLRenderPipelineState>  g_Pipe     = nil;
     id<MTLRenderPipelineState>  g_PipeBlend = nil;
 
@@ -654,6 +709,7 @@ namespace
             return false;
         }
 
+        g_Lib = lib;
         id<MTLFunction> vs = [lib newFunctionWithName:@"vs_world"];
         id<MTLFunction> fs = [lib newFunctionWithName:@"fs_world"];
         if (!vs || !fs) { Fail("shader entry point missing"); return false; }
@@ -871,6 +927,9 @@ void LTMetal_Shutdown()
     g_Arena = nil; g_ArenaUsed = g_ArenaCap = 0;
     g_DepthTex = nil; g_Sampler = nil; g_Depth = nil;
     g_Pipe = nil; g_Queue = nil; g_Device = nil; g_Layer = nil;
+    g_Lib = nil; g_CanvasPipes.clear(); g_CanvasWhite = nil;
+    for (int i = 0; i < 4; ++i) g_CanvasDepth[i] = nil;
+    g_CanvasSampler[0] = g_CanvasSampler[1] = nil;
     g_bInit = false; g_bFail = false;
 }
 
@@ -2661,4 +2720,166 @@ namespace
         [g_Enc setDepthStencilState:g_Depth];
         g_nEncMode = -1;        // the next world draw rebinds its pipeline
     }
+}
+
+
+// ---- CANVASES (HANDOVER 5fo) ------------------------------------------------ //
+//
+// ILTCustomDraw's primitives -- see ltmetal.h. Their own pipelines, made on
+// first use, so no state any other draw relies on is touched; after a canvas
+// run the next ordinary run rebinds (g_nEncMode).
+
+namespace
+{
+    MTLBlendFactor CanvasBlendFactor(int n)
+    {
+        switch (n)
+        {
+            case 1:  return MTLBlendFactorZero;
+            case 2:  return MTLBlendFactorOne;
+            case 3:  return MTLBlendFactorSourceColor;
+            case 4:  return MTLBlendFactorOneMinusSourceColor;
+            case 6:  return MTLBlendFactorOneMinusSourceAlpha;
+            default: return MTLBlendFactorSourceAlpha;
+        }
+    }
+
+    id<MTLRenderPipelineState> CanvasPipe(bool bBlend, int nSrc, int nDst, int nSamples)
+    {
+        if (nSrc < 1 || nSrc > 6) nSrc = 5;
+        if (nDst < 1 || nDst > 6) nDst = 6;
+        if (!bBlend) { nSrc = 2; nDst = 1; }            // ONE, ZERO: the source as it is
+        const int nKey = nSrc | (nDst << 3) | (nSamples << 6);
+        std::map<int, id<MTLRenderPipelineState> >::iterator it = g_CanvasPipes.find(nKey);
+        if (it != g_CanvasPipes.end()) return it->second;
+
+        id<MTLRenderPipelineState> pipe = nil;
+        id<MTLFunction> vs = g_Lib ? [g_Lib newFunctionWithName:@"vs_canvas"] : nil;
+        id<MTLFunction> fs = g_Lib ? [g_Lib newFunctionWithName:@"fs_canvas"] : nil;
+        if (vs && fs)
+        {
+            MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+            vd.attributes[0].format = MTLVertexFormatFloat3; vd.attributes[0].offset = 0;                 vd.attributes[0].bufferIndex = 0;
+            vd.attributes[1].format = MTLVertexFormatFloat2; vd.attributes[1].offset = sizeof(float) * 3; vd.attributes[1].bufferIndex = 0;
+            vd.attributes[2].format = MTLVertexFormatFloat4; vd.attributes[2].offset = sizeof(float) * 5; vd.attributes[2].bufferIndex = 0;
+            vd.layouts[0].stride = sizeof(LTMetalCanvasVert);
+            vd.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+            MTLRenderPipelineDescriptor* pd = [[MTLRenderPipelineDescriptor alloc] init];
+            [pd setVertexFunction:vs];
+            [pd setFragmentFunction:fs];
+            [pd setVertexDescriptor:vd];
+            pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            [pd setDepthAttachmentPixelFormat:MTLPixelFormatDepth32Float];
+            if (nSamples > 1) [pd setRasterSampleCount:(NSUInteger)nSamples];
+            // ⚠️ ALPHA IS NOT BLENDED, as in every other pipeline here: the
+            // software path leaves 255 in the target's alpha.
+            pd.colorAttachments[0].blendingEnabled             = YES;
+            pd.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+            pd.colorAttachments[0].sourceRGBBlendFactor        = CanvasBlendFactor(nSrc);
+            pd.colorAttachments[0].destinationRGBBlendFactor   = CanvasBlendFactor(nDst);
+            pd.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+            pd.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorZero;
+            pd.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+            NSError* err = nil;
+            pipe = [g_Device newRenderPipelineStateWithDescriptor:pd error:&err];
+            if (!pipe) { printf("[METAL] canvas pipeline %d/%d x%d failed: %s\n", nSrc, nDst, nSamples,
+                                err ? [[err localizedDescription] UTF8String] : "?"); fflush(stdout); }
+        }
+        g_CanvasPipes[nKey] = pipe;
+        return pipe;
+    }
+
+    id<MTLDepthStencilState> CanvasDepth(bool bRead, bool bWrite)
+    {
+        if (bRead && bWrite)  return g_Depth;
+        if (bRead && !bWrite) return g_DepthNoWrite;
+        const int i = bWrite ? 1 : 0;
+        if (!g_CanvasDepth[i])
+        {
+            MTLDepthStencilDescriptor* dd = [[MTLDepthStencilDescriptor alloc] init];
+            [dd setDepthCompareFunction:MTLCompareFunctionAlways];
+            [dd setDepthWriteEnabled:bWrite ? YES : NO];
+            g_CanvasDepth[i] = [g_Device newDepthStencilStateWithDescriptor:dd];
+        }
+        return g_CanvasDepth[i];
+    }
+
+    // Level 0, bilinear, as lt3d.cpp's CanvasSample.
+    id<MTLSamplerState> CanvasSampler(bool bClamp)
+    {
+        const int i = bClamp ? 1 : 0;
+        if (!g_CanvasSampler[i])
+        {
+            MTLSamplerDescriptor* sd = [[MTLSamplerDescriptor alloc] init];
+            sd.minFilter = MTLSamplerMinMagFilterLinear;
+            sd.magFilter = MTLSamplerMinMagFilterLinear;
+            sd.mipFilter = MTLSamplerMipFilterNotMipmapped;
+            const MTLSamplerAddressMode m = bClamp ? MTLSamplerAddressModeClampToEdge : MTLSamplerAddressModeRepeat;
+            sd.sAddressMode = m; sd.tAddressMode = m;
+            g_CanvasSampler[i] = [g_Device newSamplerStateWithDescriptor:sd];
+        }
+        return g_CanvasSampler[i];
+    }
+
+    id<MTLTexture> CanvasWhite()
+    {
+        if (!g_CanvasWhite && g_Device)
+        {
+            MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                          width:1 height:1 mipmapped:NO];
+            g_CanvasWhite = [g_Device newTextureWithDescriptor:td];
+            const unsigned char px[4] = { 255, 255, 255, 255 };
+            [g_CanvasWhite replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:px bytesPerRow:4];
+        }
+        return g_CanvasWhite;
+    }
+}
+
+void LTMetal_DrawCanvas(const float* pMVP, unsigned int nTexture,
+                        const LTMetalCanvasVert* pVerts, int nVerts,
+                        const LTMetalCanvasState& s)
+{
+    if (!g_Enc || !g_Device || !pVerts || nVerts < 3 || !pMVP) return;
+    const int nSamples = g_bSceneVP ? SceneSamples() : 1;
+    id<MTLRenderPipelineState> pipe = CanvasPipe(s.m_bBlend, s.m_nSrc, s.m_nDst, nSamples);
+    if (!pipe) return;
+
+    const size_t nBytes = sizeof(LTMetalCanvasVert) * (size_t)nVerts;
+    if (g_ArenaUsed + nBytes > g_ArenaCap)
+    {
+        size_t nWant = (g_ArenaUsed + nBytes) * 2;
+        if (nWant < (size_t)(4 << 20)) nWant = (size_t)(4 << 20);
+        id<MTLBuffer> nb = [g_Device newBufferWithLength:nWant options:MTLResourceStorageModeShared];
+        if (!nb) return;
+        if (g_Arena && g_ArenaUsed) memcpy([nb contents], [g_Arena contents], g_ArenaUsed);
+        g_Arena = nb;
+        g_ArenaCap = nWant;
+    }
+    memcpy((unsigned char*)[g_Arena contents] + g_ArenaUsed, pVerts, nBytes);
+    const size_t nOffset = g_ArenaUsed;
+    g_ArenaUsed += nBytes;
+
+    // ⚠️ MUST MATCH CanvasU in the MSL above. Transposed on the way in, as
+    // EncodeTris does: this engine's matrices are row-major.
+    struct CanvasU { float mvp[16]; int colorOp; int alphaOp; int hasTex; int pad; } u;
+    static_assert(sizeof(CanvasU) == 80, "CanvasU must match the MSL struct");
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) u.mvp[c*4 + r] = pMVP[r*4 + c];
+    const bool bTex = nTexture != 0 && nTexture < g_Textures.size() && g_Textures[nTexture];
+    u.colorOp = s.m_nColorOp;
+    u.alphaOp = s.m_nAlphaOp;
+    u.hasTex  = bTex ? 1 : 0;
+    u.pad     = 0;
+
+    [g_Enc setRenderPipelineState:pipe];
+    [g_Enc setDepthStencilState:CanvasDepth(s.m_bZRead, s.m_bZWrite)];
+    [g_Enc setCullMode:MTLCullModeNone];
+    [g_Enc setFragmentSamplerState:CanvasSampler(s.m_bClamp) atIndex:0];
+    [g_Enc setFragmentTexture:(bTex ? g_Textures[nTexture] : CanvasWhite()) atIndex:0];
+    [g_Enc setVertexBuffer:g_Arena offset:nOffset atIndex:0];
+    [g_Enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+    [g_Enc setFragmentBytes:&u length:sizeof(u) atIndex:1];
+    [g_Enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nVerts];
+    g_nEncMode = -1;        // the next ordinary run rebinds its pipeline and depth state
+    g_nTris += (unsigned int)(nVerts / 3);
 }

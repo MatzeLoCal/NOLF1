@@ -581,4 +581,48 @@ extern unsigned g_nDynTriTests, g_nDynTriLit;
                          bool bCull = true);
 }
 
+// ⚠️ A CANVAS TRIANGLE (HANDOVER 5fo) -- one triangle of the game's own
+// geometry, `ILTCustomDraw::DrawPrimitive` (iltcustomdraw.h): the laser
+// beams, the zipcord, the flashlight cone, vehicle trails. Its own path, NOT
+// LT3DVert: these vertices carry an ALPHA each (a beam fades to 0 at its
+// edge) and the game sets D3D's blend factors, depth switches and texture
+// ops itself -- none of which the world's vertex or texture state can say.
+// Kept apart so that nothing else the renderer draws changes by a bit.
+struct LT3DCanvasVert
+{
+    float m_Clip[4];            // x, y, z, w, the world MVP applied
+    float m_U, m_V;
+    float m_RGBA[4];            // 0..1, the game's LTVertexColor / 255
+};
+
+// The ILTCustomDraw states, with the SDK's numbers (iltcustomdraw.h) so a
+// value from the game needs no translation:
+//   blend factors 1 ZERO, 2 ONE, 3 SRCCOLOR, 4 INVSRCCOLOR, 5 SRCALPHA,
+//                 6 INVSRCALPHA;
+//   texture ops   1 SELECTTEXTURE, 2 SELECTDIFFUSE, 3 MODULATE, 4 ADD,
+//                 5 ADDSIGNED.
+// Defaults are the interface's own (iltcustomdraw.h's LTRState comments).
+struct LT3DCanvasState
+{
+    const LT3DTexture* m_pTex = 0;  // null = no texture: D3D's texture colour is white
+    bool m_bBlend   = false;        // LTRSTATE_ALPHABLENDENABLE
+    int  m_nSrc     = 5;            // LTRSTATE_SRCBLEND
+    int  m_nDst     = 6;            // LTRSTATE_DESTBLEND
+    bool m_bZRead   = true;         // LTRSTATE_ZREADENABLE
+    bool m_bZWrite  = true;         // LTRSTATE_ZWRITEENABLE
+    bool m_bClamp   = false;        // LTRSTATE_TEXADDR == LTTEXADDR_CLAMP
+    int  m_nColorOp = 3;            // LTRSTATE_COLOROP
+    int  m_nAlphaOp = 1;            // LTRSTATE_ALPHAOP
+};
+
+namespace LT3D
+{
+    // Near-clipped like DrawTriangle, never culled (the game winds its quads
+    // either way), perspective-correct, bilinear. Destination alpha is left at
+    // 255, as every other write here does. Returns the pixels written.
+    int     DrawCanvasTriangle(const LT3DTarget& target, const LT3DCanvasState& s,
+                               const LT3DCanvasVert& a, const LT3DCanvasVert& b,
+                               const LT3DCanvasVert& c);
+}
+
 #endif // __LT_3D_H__

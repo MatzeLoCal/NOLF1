@@ -1947,6 +1947,63 @@ const LT3DTexture* CLTWorldScene::GetWhiteTexture(float fAlpha, int nBlendOp)
     return &pC->m_Tex;
 }
 
+// ⚠️ THE CANVASES (HANDOVER 5fo) -- see ltworldrender.h. A texture the game
+// names is loaded as any other (level 0 sampled); one that does not load is
+// drawn without, as d3d.ren would with a NULL texture.
+// LT_CANVASTRACE=1 -- every 120th frame: primitives, triangles, pixels, and
+// the first primitive's states.
+void CLTWorldScene::DrawCanvases(const LT3DTarget& t, const float* pMVP,
+                                 const ILTWorldDynamicObjects& dyn, Stats& st)
+{
+    const std::vector<LTCanvasPrim>* pv = dyn.CanvasPrims();
+    if (!pv || pv->empty()) return;
+    int nPix = 0;
+    unsigned int nTris = 0;
+    for (size_t i = 0; i < pv->size(); ++i)
+    {
+        const LTCanvasPrim& p = (*pv)[i];
+        LT3DCanvasState s;
+        s.m_pTex     = p.m_sTexture.empty() ? 0 : GetTexture(p.m_sTexture, true);
+        s.m_bBlend   = p.m_bBlend;
+        s.m_nSrc     = p.m_nSrc;
+        s.m_nDst     = p.m_nDst;
+        s.m_bZRead   = p.m_bZRead;
+        s.m_bZWrite  = p.m_bZWrite;
+        s.m_bClamp   = p.m_bClamp;
+        s.m_nColorOp = p.m_nColorOp;
+        s.m_nAlphaOp = p.m_nAlphaOp;
+        for (size_t q = 0; q + 2 < p.m_Tris.size(); q += 3)
+        {
+            LT3DCanvasVert v[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                const LTCanvasVert& c = p.m_Tris[q + k];
+                LT3D::TransformPoint(pMVP, c.m_Pos, v[k].m_Clip);
+                v[k].m_U = c.m_UV[0];
+                v[k].m_V = c.m_UV[1];
+                for (int j = 0; j < 4; ++j) v[k].m_RGBA[j] = c.m_RGBA[j];
+            }
+            nPix += LT3D::DrawCanvasTriangle(t, s, v[0], v[1], v[2]);
+            ++nTris;
+        }
+    }
+    st.m_nPixels += nPix;
+    st.m_nObjTris += (int)nTris;
+    static const bool s_bTrace = (getenv("LT_CANVASTRACE") != 0);
+    static int s_n = 0;
+    if (s_bTrace && (s_n++ % 120) == 0)
+    {
+        const LTCanvasPrim& p = (*pv)[0];
+        printf("[CANVAS] drawn: %zu primitive(s), %u triangle(s), %d pixel(s); first: blend %d %d/%d z %d/%d "
+               "tex '%s' %s ops %d/%d, rgba (%.2f %.2f %.2f %.2f)\n",
+               pv->size(), nTris, nPix, (int)p.m_bBlend, p.m_nSrc, p.m_nDst, (int)p.m_bZRead, (int)p.m_bZWrite,
+               p.m_sTexture.c_str(), p.m_bClamp ? "clamp" : "wrap", p.m_nColorOp, p.m_nAlphaOp,
+               p.m_Tris.empty() ? 0.0f : p.m_Tris[0].m_RGBA[0], p.m_Tris.empty() ? 0.0f : p.m_Tris[0].m_RGBA[1],
+               p.m_Tris.empty() ? 0.0f : p.m_Tris[0].m_RGBA[2], p.m_Tris.empty() ? 0.0f : p.m_Tris[0].m_RGBA[3]);
+        fflush(stdout);
+    }
+}
+
 void CLTWorldScene::DrawPolyGrid(const LT3DTarget& t, const float* pMVP,
                                  const LTDynamicPolyGrid& pg,
                                  Stats& st, ILTWorldGeomSink* pSink)
@@ -6117,6 +6174,10 @@ CLTWorldScene::Stats CLTWorldScene::Render(unsigned char* pRGBA, float* pDepth,
             fflush(stdout);
         }
     }
+
+    // ---- pass 5d: CANVASES (5fo) -- the game's own lines: laser beams, the
+    // zipcord, the flashlight cone. Never in a reflection. ---------------- //
+    if (pDyn && !m_bReflecting) DrawCanvases(t, MVP, *pDyn, st);
 
     // Depth was cleared between the sky and the world, so anything still at
     // zero is a pixel the world never covered -- which is where the sky shows.

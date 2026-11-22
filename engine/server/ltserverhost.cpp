@@ -3126,7 +3126,12 @@ namespace
         // and on moving, and does not save its handles -- a loaded game's door
         // never sets them again. (Whether lithtech.exe saved them was not
         // found; without it a loaded level would keep those lights off.)
-        const unsigned int nVersion = 11;
+        // ⚠️ VERSION 12 (5fp) adds NOTHING to the layout: the object references
+        // the game writes through the message's own WriteObject (a Controller's
+        // fade targets) are save indices now, not this session's pointers. The
+        // number moves so that a build before it REFUSES such a save instead of
+        // reading an index as a pointer -- a crash at the first fade step.
+        const unsigned int nVersion = 12;
         fwrite(&nVersion, sizeof(nVersion), 1, pF);
         const long nCountAt = ftell(pF);
         unsigned int nSaved = 0;
@@ -3440,10 +3445,13 @@ namespace
         // animations, so an older save loads with them as a fresh level has
         // them -- the LightFX lamps set themselves every frame; a door's
         // shadow lights stay off until it moves.
-        if (nVersion < 5 || nVersion > 11)
+        // ⚠️ VERSION 11 AND BELOW ARE STILL READ (5fp): their Controller targets
+        // were written as pointers, which now come back out of range -- null,
+        // and the Controller checks for that -- instead of as garbage.
+        if (nVersion < 5 || nVersion > 12)
         {
             fclose(pF);
-            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 11\n",
+            printf("[SERVER] RestoreObjects: %s is version %u, this build reads 5 to 12\n",
                    sPath.c_str(), nVersion);
             fflush(stdout);
             return LT_ERROR;

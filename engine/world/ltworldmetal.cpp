@@ -1745,6 +1745,8 @@ bool CLTWorldScene::RenderMetalInto(bool bOffscreen, unsigned char* pRGBA,
         }
     }
     batch.SetOrdered(false);
+    // ---- pass 5d: canvases (5fo) -- see the software pass ------------- //
+    if (pDyn && !m_bReflecting) DrawCanvasesMetal(MVP, *pDyn, st);
     pt.Mark(CPassTimer::kSprites);
 
     // ---- pass 6: FLAG_REALLYCLOSE -- the player-view weapon -------------- //
@@ -2081,4 +2083,57 @@ bool LTWorldMetal_MenuObjects(int nOutW, int nOutH, const int* pRect4, bool bCle
     }
     LTMetal_EndScene();
     return true;
+}
+
+
+// ---- CANVASES (HANDOVER 5fo) -- the software pass's DrawCanvases on the GPU ---- //
+void CLTWorldScene::DrawCanvasesMetal(const float* pMVP, const ILTWorldDynamicObjects& dyn,
+                                      Stats& st)
+{
+    const std::vector<LTCanvasPrim>* pv = dyn.CanvasPrims();
+    if (!pv || pv->empty()) return;
+    std::vector<LTMetalCanvasVert> v;
+    for (size_t i = 0; i < pv->size(); ++i)
+    {
+        const LTCanvasPrim& p = (*pv)[i];
+        if (p.m_Tris.size() < 3) continue;
+
+        // The texture, uploaded on first use: a canvas names its texture by
+        // the frame it draws, after the frame's upload of the cache has run.
+        unsigned int nTex = 0;
+        if (!p.m_sTexture.empty())
+            if (const LT3DTexture* pT = GetTexture(p.m_sTexture, true))
+            {
+                std::map<const LT3DTexture*, unsigned int>::const_iterator h = m_MetalTex.find(pT);
+                if (h != m_MetalTex.end()) nTex = h->second;
+                else if (pT->m_pRGBA && pT->m_Width > 0 && pT->m_Height > 0)
+                {
+                    const unsigned char* pLv[1] = { pT->m_pRGBA };
+                    const int w[1] = { pT->m_Width }, hh[1] = { pT->m_Height };
+                    nTex = LTMetal_CreateTexture(pLv, w, hh, 1, false, 0.5f);
+                    m_MetalTex[pT] = nTex;
+                }
+            }
+
+        LTMetalCanvasState s;
+        s.m_bBlend   = p.m_bBlend;
+        s.m_nSrc     = p.m_nSrc;
+        s.m_nDst     = p.m_nDst;
+        s.m_bZRead   = p.m_bZRead;
+        s.m_bZWrite  = p.m_bZWrite;
+        s.m_bClamp   = p.m_bClamp;
+        s.m_nColorOp = p.m_nColorOp;
+        s.m_nAlphaOp = p.m_nAlphaOp;
+
+        v.resize(p.m_Tris.size());
+        for (size_t k = 0; k < p.m_Tris.size(); ++k)
+        {
+            const LTCanvasVert& c = p.m_Tris[k];
+            for (int j = 0; j < 3; ++j) v[k].m_Pos[j] = c.m_Pos[j];
+            v[k].m_UV[0] = c.m_UV[0]; v[k].m_UV[1] = c.m_UV[1];
+            for (int j = 0; j < 4; ++j) v[k].m_RGBA[j] = c.m_RGBA[j];
+        }
+        LTMetal_DrawCanvas(pMVP, nTex, &v[0], (int)v.size(), s);
+        st.m_nObjTris += (int)(v.size() / 3);
+    }
 }

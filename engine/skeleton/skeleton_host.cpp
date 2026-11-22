@@ -1605,6 +1605,34 @@ public:
         return LT_OK;
     }
 
+    // ⚠️ CANVASES (HANDOVER 5fo) -- were generated stubs, and OT_CANVAS was
+    // refused, so the game's polylines (laser-trigger beams, the zipcord, the
+    // flashlight cone) were never drawn. The function runs each frame from
+    // the view's snapshot (ltscene.cpp, CCanvasRecorder).
+    LTRESULT GetCanvasFn(HOBJECT hCanvas, CanvasDrawFn& fn, void*& pUserData) override
+    {
+        LTIMPL("ILTClient::GetCanvasFn");
+        void* pfn = 0;
+        const bool b = LTScene_GetCanvasFn((void*)hCanvas, &pfn, &pUserData);
+        fn = (CanvasDrawFn)pfn;
+        return b ? LT_OK : LT_ERROR;
+    }
+    LTRESULT SetCanvasFn(HOBJECT hCanvas, CanvasDrawFn fn, void* pUserData) override
+    {
+        LTIMPL("ILTClient::SetCanvasFn");
+        return LTScene_SetCanvasFn((void*)hCanvas, (void*)fn, pUserData) ? LT_OK : LT_ERROR;
+    }
+    LTRESULT GetCanvasRadius(HOBJECT hCanvas, float& radius) override
+    {
+        LTIMPL("ILTClient::GetCanvasRadius");
+        return LTScene_GetCanvasRadius((void*)hCanvas, &radius) ? LT_OK : LT_ERROR;
+    }
+    LTRESULT SetCanvasRadius(HOBJECT hCanvas, float radius) override
+    {
+        LTIMPL("ILTClient::SetCanvasRadius");
+        return LTScene_SetCanvasRadius((void*)hCanvas, radius) ? LT_OK : LT_ERROR;
+    }
+
     HMODELANIM GetAnimIndex(HOBJECT hObj, char* pAnimName) override
     {
         LTIMPL("ILTCSBase::GetAnimIndex");

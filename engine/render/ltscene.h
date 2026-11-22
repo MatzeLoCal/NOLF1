@@ -172,6 +172,13 @@ struct LTSceneObject
     float           m_LightColor[3];
     float           m_fLightRadius;
 
+    // ⚠️ AN OT_CANVAS's draw function (HANDOVER 5fo): SetCanvasFn's CanvasDrawFn
+    // (ltbasedefs.h) and its user data, called each frame with an
+    // ILTCustomDraw; SetCanvasRadius's radius (kept, not used for culling).
+    void*           m_pfnCanvas = 0;
+    void*           m_pCanvasUser = 0;
+    float           m_fCanvasRadius = 0.0f;
+
     std::string     m_sFilename;
 
     // Camera state. Meaningful only when m_nType == OT_CAMERA.
@@ -603,6 +610,14 @@ class CLTABCModel;
 const CLTABCModel* LTScene_ModelForFile(const char* pFilename);
 
 void            LTScene_SetNodeControl(void* hObj, LTSceneNodeFn fn, void* pUser);
+
+// ILTClient's canvas calls (HANDOVER 5fo). The function pointer is the game's
+// CanvasDrawFn, kept untyped here. Each answers false for a handle that is not
+// a canvas of this scene, and writes its outputs either way.
+bool            LTScene_SetCanvasFn(void* hObj, void* pfn, void* pUser);
+bool            LTScene_GetCanvasFn(void* hObj, void** ppfn, void** ppUser);
+bool            LTScene_SetCanvasRadius(void* hObj, float fRadius);
+bool            LTScene_GetCanvasRadius(void* hObj, float* pRadius);
 bool            LTScene_GetNodeControl(void* hObj, LTSceneNodeFn* pFn, void** ppUser);
 
 int             LTScene_GetAnimIndexForFile(const char* pFilename,

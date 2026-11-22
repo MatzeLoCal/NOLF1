@@ -319,4 +319,27 @@ void LTMetal_CompShutdown();
 unsigned int LTMetal_FrameTriangles();
 const char*  LTMetal_LastError();
 
+// ⚠️ A CANVAS RUN (HANDOVER 5fo) -- ILTCustomDraw's primitives, lt3d.cpp's
+// DrawCanvasTriangle on the GPU: RGBA per vertex, the game's own blend
+// factors, depth switches, texture address mode and texture ops (the SDK's
+// numbers, see LT3DCanvasState). nTexture 0 = no texture (white). Triangles,
+// never culled. Its own pipelines; nothing else drawn changes.
+struct LTMetalCanvasVert
+{
+    float m_Pos[3];             // world space -- pMVP takes it to clip
+    float m_UV[2];
+    float m_RGBA[4];            // 0..1
+};
+struct LTMetalCanvasState
+{
+    bool m_bBlend   = false;
+    int  m_nSrc     = 5, m_nDst = 6;    // LTBLEND_*
+    bool m_bZRead   = true, m_bZWrite = true;
+    bool m_bClamp   = false;
+    int  m_nColorOp = 3, m_nAlphaOp = 1; // LTOP_*
+};
+void LTMetal_DrawCanvas(const float* pMVP, unsigned int nTexture,
+                        const LTMetalCanvasVert* pVerts, int nVerts,
+                        const LTMetalCanvasState& s);
+
 #endif // __LT_METAL_H__

@@ -369,6 +369,90 @@ int main(int argc, char** argv)
         check(dTerm * 2.0 < dSize, "CONTROL: the GPU adds the same chrome the software does");
     }
 
+    // ---- CANVASES (HANDOVER 5fo) ----------------------------------------- //
+    //
+    // ⚠️ THE GAME'S OWN GEOMETRY through a path of its own in each renderer
+    // (lt3d.cpp DrawCanvasTriangle, ltmetal.mm LTMetal_DrawCanvas). Four quads
+    // in front of the corridor view, one per combination the game uses
+    // (PolyLineFX.cpp's users): the zipcord's (zipcord.dtx, clamped, source
+    // alpha over, texture alpha x vertex alpha), a laser beam's (additive, no
+    // texture, alpha fading to 0 at one edge), a vehicle trail's (multiply,
+    // its fxtest44.dtx missing = no texture) and an opaque one writing depth.
+    // Compared as chrome is: each renderer's CHANGE, with minus without.
+    {
+        struct CanvasSource : public ILTWorldDynamicObjects
+        {
+            std::vector<LTCanvasPrim> m_Prims;
+            unsigned int Count() const override { return 0; }
+            bool Get(unsigned int, LTDynamicModel&) const override { return false; }
+            const std::vector<LTCanvasPrim>* CanvasPrims() const override { return &m_Prims; }
+        };
+        float fwd[3] = { at[0] - eye[0], at[1] - eye[1], at[2] - eye[2] };
+        const float fl = sqrtf(fwd[0]*fwd[0] + fwd[1]*fwd[1] + fwd[2]*fwd[2]);
+        for (int k = 0; k < 3; ++k) fwd[k] /= fl;
+        const float up[3] = { 0.0f, 1.0f, 0.0f };
+        const float rt[3] = { fwd[2], 0.0f, -fwd[0] };     // horizontal, across the view
+        CanvasSource src;
+        auto quad = [&](float fX, const char* pTex, bool bBlend, int nSrc, int nDst, bool bZWrite,
+                        bool bClamp, int nAlphaOp, const float* rgbIn, float aIn, const float* rgbOut, float aOut) {
+            LTCanvasPrim p;
+            p.m_sTexture = pTex; p.m_bBlend = bBlend; p.m_nSrc = nSrc; p.m_nDst = nDst;
+            p.m_bZWrite = bZWrite; p.m_bClamp = bClamp; p.m_nColorOp = 3; p.m_nAlphaOp = nAlphaOp;
+            // The game's order: lower left (outer), upper left (inner), upper
+            // right (inner), lower right (outer) -- a fan 0-1-2, 0-2-3.
+            const float cx[4] = { -1, -1, 1, 1 }, cy[4] = { -1, 1, 1, -1 };
+            const float uv[4][2] = { { 0, 0 }, { 0, 1 }, { 1, 1 }, { 1, 0 } };
+            LTCanvasVert c[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                for (int k = 0; k < 3; ++k)
+                    c[i].m_Pos[k] = eye[k] + fwd[k] * 60.0f + rt[k] * (fX + 7.0f * cx[i]) + up[k] * 10.0f * cy[i];
+                c[i].m_UV[0] = uv[i][0]; c[i].m_UV[1] = uv[i][1];
+                const bool bIn = (i == 1 || i == 2);
+                for (int k = 0; k < 3; ++k) c[i].m_RGBA[k] = bIn ? rgbIn[k] : rgbOut[k];
+                c[i].m_RGBA[3] = bIn ? aIn : aOut;
+            }
+            const int fan[6] = { 0, 1, 2, 0, 2, 3 };
+            for (int i = 0; i < 6; ++i) p.m_Tris.push_back(c[fan[i]]);
+            src.m_Prims.push_back(p);
+        };
+        const float white[3] = { 1, 1, 1 }, red[3] = { 1, 0, 0 }, black[3] = { 0, 0, 0 };
+        const float blue[3] = { 0.5f, 0.8f, 1.0f }, green[3] = { 0.1f, 0.9f, 0.2f };
+        quad(-24.0f, "sfx\\test\\zipcord.dtx", true, 5, 6, false, true, 1, white, 1.0f, white, 0.0f);
+        quad( -8.0f, "", true, 2, 2, false, false, 2, red, 0.7f, black, 0.0f);
+        quad(  8.0f, "sfx\\test\\fxtest44.dtx", true, 1, 3, false, false, 2, blue, 1.0f, blue, 1.0f);
+        quad( 24.0f, "", false, 5, 6, true, false, 2, green, 1.0f, green, 1.0f);
+
+        CanvasSource none;
+        std::vector<unsigned char> sOff((size_t)W*H*4, 0), sOn((size_t)W*H*4, 0),
+                                   gOff((size_t)W*H*4, 0), gOn((size_t)W*H*4, 0);
+        scene.Render(&sOff[0], &depth[0], W, H, eye, at, 1.4f, 0, &none);
+        scene.Render(&sOn[0], &depth[0], W, H, eye, at, 1.4f, 0, &src);
+        scene.RenderMetalOffscreen(&gOff[0], W, H, eye, at, 1.4f, 0, &none);
+        check(scene.RenderMetalOffscreen(&gOn[0], W, H, eye, at, 1.4f, 0, &src),
+              "the GPU renders the canvases");
+        long long nRegion = 0; double dTerm = 0.0, dSize = 0.0;
+        for (size_t i = 0; i < sOff.size(); i += 4)
+        {
+            int ds = 0;
+            for (int k = 0; k < 3; ++k) ds += abs((int)sOn[i+k] - (int)sOff[i+k]);
+            if (ds <= 3) continue;
+            ++nRegion;
+            for (int k = 0; k < 3; ++k)
+            {
+                const int ts = (int)sOn[i+k] - (int)sOff[i+k], tg = (int)gOn[i+k] - (int)gOff[i+k];
+                dTerm += abs(tg - ts);
+                dSize += abs(ts);
+            }
+        }
+        if (nRegion) { dTerm /= (double)(nRegion * 3); dSize /= (double)(nRegion * 3); }
+        printf("        canvases: %lld pixels change with them, by %.2f on average; GPU's change differs from software's by %.2f\n",
+               nRegion, dSize, dTerm);
+        check(nRegion > 2000, "the four canvas quads change the picture (software)");
+        check(dTerm < 4.0 && dTerm * 5.0 < dSize,
+              "CONTROL: and the GPU draws them as the software does");
+    }
+
     printf("\n=== %d passed, %d failed ===\n", g_nPass, g_nFail);
     return g_nFail ? 1 : 0;
 }

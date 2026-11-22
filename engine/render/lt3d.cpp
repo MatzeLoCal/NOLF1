@@ -1018,3 +1018,223 @@ int DrawTriangle(const LT3DTarget& target, const LT3DTexture* pTex,
 }
 
 } // namespace LT3D
+
+
+// ----------------------------------------------------------------------- //
+//
+// CANVAS TRIANGLES (HANDOVER 5fo) -- see lt3d.h. A path of their own: the
+// world rasteriser above is not touched, so nothing it draws can change.
+//
+// ----------------------------------------------------------------------- //
+
+namespace
+{
+    struct CanvasScreen
+    {
+        float x, y;
+        float invW;
+        float uW, vW;           // u/w, v/w
+        float cW[4];            // rgba/w
+    };
+
+    LT3DCanvasVert LerpCanvas(const LT3DCanvasVert& a, const LT3DCanvasVert& b, float t)
+    {
+        LT3DCanvasVert v;
+        for (int i = 0; i < 4; ++i) v.m_Clip[i] = a.m_Clip[i] + (b.m_Clip[i] - a.m_Clip[i]) * t;
+        v.m_U = a.m_U + (b.m_U - a.m_U) * t;
+        v.m_V = a.m_V + (b.m_V - a.m_V) * t;
+        for (int i = 0; i < 4; ++i) v.m_RGBA[i] = a.m_RGBA[i] + (b.m_RGBA[i] - a.m_RGBA[i]) * t;
+        return v;
+    }
+
+    CanvasScreen ToCanvasScreen(const LT3DCanvasVert& v, int w, int h)
+    {
+        CanvasScreen s;
+        const float invW = 1.0f / v.m_Clip[3];
+        s.x = (v.m_Clip[0] * invW * 0.5f + 0.5f) * (float)w;
+        s.y = (v.m_Clip[1] * invW * 0.5f + 0.5f) * (float)h;
+        s.invW = invW;
+        s.uW = v.m_U * invW;
+        s.vW = v.m_V * invW;
+        for (int i = 0; i < 4; ++i) s.cW[i] = v.m_RGBA[i] * invW;
+        return s;
+    }
+
+    // Level 0, bilinear, wrapped or clamped (LTRSTATE_TEXADDR).
+    void CanvasSample(const LT3DTexture* p, float u, float v, bool bClamp, float* o4)
+    {
+        const int tw = p->m_Width, th = p->m_Height;
+        const float fu = u * (float)tw - 0.5f, fv = v * (float)th - 0.5f;
+        const float f0 = std::floor(fu), g0 = std::floor(fv);
+        const float ax = fu - f0, ay = fv - g0;
+        auto cx = [&](int x) { return bClamp ? (x < 0 ? 0 : (x >= tw ? tw - 1 : x)) : (((x % tw) + tw) % tw); };
+        auto cy = [&](int y) { return bClamp ? (y < 0 ? 0 : (y >= th ? th - 1 : y)) : (((y % th) + th) % th); };
+        const int x0 = cx((int)f0), x1 = cx((int)f0 + 1), y0 = cy((int)g0), y1 = cy((int)g0 + 1);
+        const unsigned char* p00 = p->m_pRGBA + ((size_t)y0 * tw + x0) * 4;
+        const unsigned char* p10 = p->m_pRGBA + ((size_t)y0 * tw + x1) * 4;
+        const unsigned char* p01 = p->m_pRGBA + ((size_t)y1 * tw + x0) * 4;
+        const unsigned char* p11 = p->m_pRGBA + ((size_t)y1 * tw + x1) * 4;
+        const float w00 = (1.0f - ax) * (1.0f - ay), w10 = ax * (1.0f - ay);
+        const float w01 = (1.0f - ax) * ay,          w11 = ax * ay;
+        for (int k = 0; k < 4; ++k)
+            o4[k] = (p00[k] * w00 + p10[k] * w10 + p01[k] * w01 + p11[k] * w11) * (1.0f / 255.0f);
+    }
+
+    // D3D's texture-stage ops (LTOP_*), texture argument first.
+    inline float CanvasOp(int nOp, float fTex, float fDif)
+    {
+        switch (nOp)
+        {
+            case 1:  return fTex;                   // SELECTTEXTURE
+            case 2:  return fDif;                   // SELECTDIFFUSE
+            case 4:  return fTex + fDif;            // ADD
+            case 5:  return fTex + fDif - 0.5f;     // ADDSIGNED
+            default: return fTex * fDif;            // MODULATE (3)
+        }
+    }
+
+    // D3D's blend factors (LTBLEND_*) for channel k of the source s4.
+    inline float CanvasFactor(int nF, const float* s4, int k)
+    {
+        switch (nF)
+        {
+            case 1:  return 0.0f;                   // ZERO
+            case 2:  return 1.0f;                   // ONE
+            case 3:  return s4[k];                  // SRCCOLOR
+            case 4:  return 1.0f - s4[k];           // INVSRCCOLOR
+            case 6:  return 1.0f - s4[3];           // INVSRCALPHA
+            default: return s4[3];                  // SRCALPHA (5)
+        }
+    }
+
+    inline float Clamp01(float f) { return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f); }
+
+    int RasteriseCanvasTri(const LT3DTarget& t, const LT3DCanvasState& st,
+                           const CanvasScreen& a, const CanvasScreen& b, const CanvasScreen& c)
+    {
+        float fArea = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        if (fArea == 0.0f) return 0;
+        const CanvasScreen* p0 = &a;
+        const CanvasScreen* p1 = &b;
+        const CanvasScreen* p2 = &c;
+        if (fArea < 0.0f) { p1 = &c; p2 = &b; fArea = -fArea; }     // never culled
+        const float fInvArea = 1.0f / fArea;
+
+        int minX = (int)std::floor(std::min(p0->x, std::min(p1->x, p2->x)));
+        int maxX = (int)std::ceil (std::max(p0->x, std::max(p1->x, p2->x)));
+        int minY = (int)std::floor(std::min(p0->y, std::min(p1->y, p2->y)));
+        int maxY = (int)std::ceil (std::max(p0->y, std::max(p1->y, p2->y)));
+        if (minX < 0) minX = 0;
+        if (minY < 0) minY = 0;
+        if (maxX > t.m_Width)  maxX = t.m_Width;
+        if (maxY > t.m_Height) maxY = t.m_Height;
+        if (minX >= maxX || minY >= maxY) return 0;
+
+        struct Edge { float A, B, C; bool bTopLeft; };
+        Edge e[3];
+        const CanvasScreen* v[3] = { p0, p1, p2 };
+        for (int i = 0; i < 3; ++i)
+        {
+            const CanvasScreen& s = *v[i];
+            const CanvasScreen& d = *v[(i + 1) % 3];
+            e[i].A = s.y - d.y;
+            e[i].B = d.x - s.x;
+            e[i].C = s.x * d.y - s.y * d.x;
+            const float dx = d.x - s.x, dy = d.y - s.y;
+            e[i].bTopLeft = (dy == 0.0f) ? (dx < 0.0f) : (dy < 0.0f);
+        }
+
+        const bool bTex = st.m_pTex && st.m_pTex->m_pRGBA && st.m_pTex->m_Width > 0 && st.m_pTex->m_Height > 0;
+        int nWritten = 0;
+        for (int y = minY; y < maxY; ++y)
+        {
+            const float fy = (float)y + 0.5f;
+            for (int x = minX; x < maxX; ++x)
+            {
+                const float fx = (float)x + 0.5f;
+                const float w0 = e[1].A * fx + e[1].B * fy + e[1].C;
+                const float w1 = e[2].A * fx + e[2].B * fy + e[2].C;
+                const float w2 = e[0].A * fx + e[0].B * fy + e[0].C;
+                const bool bIn =
+                    (w0 > 0.0f || (w0 == 0.0f && e[1].bTopLeft)) &&
+                    (w1 > 0.0f || (w1 == 0.0f && e[2].bTopLeft)) &&
+                    (w2 > 0.0f || (w2 == 0.0f && e[0].bTopLeft));
+                if (!bIn) continue;
+                const float l0 = w0 * fInvArea, l1 = w1 * fInvArea, l2 = w2 * fInvArea;
+                const float invW = l0 * p0->invW + l1 * p1->invW + l2 * p2->invW;
+                if (invW <= 0.0f) continue;
+                if (t.m_fFarW > 0.0f && invW * t.m_fFarW < 1.0f) continue;
+                const int nIdx = y * t.m_Width + x;
+                if (st.m_bZRead && t.m_pDepth && invW <= t.m_pDepth[nIdx]) continue;
+
+                const float w = 1.0f / invW;
+                float dif[4];
+                for (int k = 0; k < 4; ++k)
+                    dif[k] = Clamp01((l0 * p0->cW[k] + l1 * p1->cW[k] + l2 * p2->cW[k]) * w);
+                float tex[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+                if (bTex)
+                {
+                    const float u  = (l0 * p0->uW + l1 * p1->uW + l2 * p2->uW) * w;
+                    const float vv = (l0 * p0->vW + l1 * p1->vW + l2 * p2->vW) * w;
+                    CanvasSample(st.m_pTex, u, vv, st.m_bClamp, tex);
+                }
+                float src[4];
+                for (int k = 0; k < 3; ++k) src[k] = Clamp01(CanvasOp(st.m_nColorOp, tex[k], dif[k]));
+                src[3] = Clamp01(CanvasOp(st.m_nAlphaOp, tex[3], dif[3]));
+
+                unsigned char* d = t.m_pRGBA + (size_t)nIdx * 4;
+                for (int k = 0; k < 3; ++k)
+                {
+                    float o = src[k];
+                    if (st.m_bBlend)
+                    {
+                        const float dst = d[k] * (1.0f / 255.0f);
+                        o = src[k] * CanvasFactor(st.m_nSrc, src, k)
+                          + dst    * CanvasFactor(st.m_nDst, src, k);
+                    }
+                    d[k] = ToByte(o);
+                }
+                d[3] = 255;
+                if (st.m_bZWrite && t.m_pDepth) t.m_pDepth[nIdx] = invW;
+                ++nWritten;
+            }
+        }
+        return nWritten;
+    }
+}
+
+namespace LT3D
+{
+
+int DrawCanvasTriangle(const LT3DTarget& target, const LT3DCanvasState& s,
+                       const LT3DCanvasVert& a, const LT3DCanvasVert& b,
+                       const LT3DCanvasVert& c)
+{
+    if (!target.m_pRGBA || target.m_Width <= 0 || target.m_Height <= 0) return 0;
+
+    // The near plane, as DrawTriangle clips it: in front is z + w > 0.
+    const LT3DCanvasVert* in[3] = { &a, &b, &c };
+    LT3DCanvasVert kept[4];
+    int nKept = 0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const LT3DCanvasVert& cur = *in[i];
+        const LT3DCanvasVert& nxt = *in[(i + 1) % 3];
+        const float dCur = cur.m_Clip[2] + cur.m_Clip[3];
+        const float dNxt = nxt.m_Clip[2] + nxt.m_Clip[3];
+        if (dCur > 0.0f) kept[nKept++] = cur;
+        if ((dCur > 0.0f) != (dNxt > 0.0f)) kept[nKept++] = LerpCanvas(cur, nxt, dCur / (dCur - dNxt));
+        if (nKept >= 4) break;
+    }
+    if (nKept < 3) return 0;
+    for (int i = 0; i < nKept; ++i)
+        if (kept[i].m_Clip[3] <= kNearEpsilon) return 0;
+
+    CanvasScreen sc[4];
+    for (int i = 0; i < nKept; ++i) sc[i] = ToCanvasScreen(kept[i], target.m_Width, target.m_Height);
+    int n = RasteriseCanvasTri(target, s, sc[0], sc[1], sc[2]);
+    if (nKept == 4) n += RasteriseCanvasTri(target, s, sc[0], sc[2], sc[3]);
+    return n;
+}
+
+} // namespace LT3D

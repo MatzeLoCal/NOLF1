@@ -442,6 +442,25 @@ struct LTDynamicLight
     unsigned int    m_Flags;
 };
 
+// ⚠️ A CANVAS PRIMITIVE (HANDOVER 5fo) -- what the game drew this frame through
+// ILTCustomDraw in a canvas object's callback (CBasePolyDrawFX: laser beams,
+// the zipcord, the flashlight cone, vehicle trails), with the states that were
+// set when it drew. iltcustomdraw.h's numbers -- see LT3DCanvasState. Each
+// DrawPrimitive is a triangle FAN of its vertices (the game hands quads in
+// perimeter order), stored here as triangles, world space.
+struct LTCanvasVert { float m_Pos[3]; float m_UV[2]; float m_RGBA[4]; };
+struct LTCanvasPrim
+{
+    std::string m_sTexture;             // "" = none
+    bool m_bBlend = false;
+    int  m_nSrc = 5, m_nDst = 6;
+    bool m_bZRead = true, m_bZWrite = true;
+    bool m_bClamp = false;
+    int  m_nColorOp = 3, m_nAlphaOp = 1;
+    bool m_bReallyClose = false;        // FLAG_REALLYCLOSE handed to DrawPrimitive
+    std::vector<LTCanvasVert> m_Tris;   // 3 per triangle
+};
+
 class ILTWorldDynamicObjects
 {
 public:
@@ -466,6 +485,9 @@ public:
     // The visible OT_LIGHTs (5ey), if the source has any. Default: none.
     virtual unsigned int LightCount() const { return 0; }
     virtual bool         GetLight(unsigned int /*i*/, LTDynamicLight& /*out*/) const { return false; }
+
+    // This frame's CANVAS primitives (5fo), if the source has any. Default: none.
+    virtual const std::vector<LTCanvasPrim>* CanvasPrims() const { return 0; }
 };
 
 // ⚠️ ONE POLYGRID AS THE RENDERER SEES IT -- see LTScenePolyGrid
@@ -1034,6 +1056,15 @@ private:
     // Every alpha step's entry of every particle texture in pDyn (Metal).
     void                PreloadParticleTextures(const ILTWorldDynamicObjects* pDyn);
 
+    // ⚠️ THE CANVASES (5fo) -- the game's own geometry (LTCanvasPrim), after
+    // the translucent passes and before the REALLYCLOSE pass, never in a
+    // reflection (the game builds it facing the MAIN camera). Software
+    // (DrawCanvasTriangle) and Metal (LTMetal_DrawCanvas, ltworldmetal.cpp).
+    void                DrawCanvases(const LT3DTarget& t, const float* pMVP,
+                                     const ILTWorldDynamicObjects& dyn, Stats& st);
+    void                DrawCanvasesMetal(const float* pMVP, const ILTWorldDynamicObjects& dyn,
+                                          Stats& st);
+
     // Draws one PolyGrid (water surface) as its (W-1)(H-1)*2 triangles, the
     // same way: software raster, or pSink for Metal.
     void                DrawPolyGrid(const LT3DTarget& t, const float* pMVP,
@@ -1439,6 +1470,8 @@ public:
     // Lights are not culled by the view: one out of sight still lights a wall in it.
     unsigned int LightCount() const override          { return m_p->LightCount(); }
     bool         GetLight(unsigned int i, LTDynamicLight& out) const override { return m_p->GetLight(i, out); }
+    // Canvases are not culled: the game gives its one canvas a 10000 radius.
+    const std::vector<LTCanvasPrim>* CanvasPrims() const override { return m_p->CanvasPrims(); }
 private:
     CLTWorldScene&                  m_S;
     const ILTWorldDynamicObjects*   m_p;

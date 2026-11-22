@@ -38,6 +38,14 @@
 
 namespace { LTMsgStats g_Stats = {{0},{0},{0},0,0,0}; }
 
+// The save-reference rules, defined with their state below (5fp): what an
+// object reference becomes in a save file, and back.
+namespace
+{
+    uintptr_t SaveRefToFile(void* hObject, unsigned int nBlobOffset);
+    void*     SaveRefFromFile(uintptr_t nValue);
+}
+
 
 CLTMessage::CLTMessage(ELTMsgDest eDest, unsigned int nId)
     : m_hClient(0), m_hTarget(0), m_pSender(0), m_pSFXObject(0)
@@ -237,9 +245,16 @@ LTRESULT CLTMessage::ReadMessageFL(ILTMessage* &pMsg)
     return pMsg ? LT_OK : LT_ERROR;
 }
 
+// ⚠️ IN A LOAD, A SAVE INDEX, NOT A POINTER (HANDOVER 5fp) -- the message's
+// own ReadObject/WriteObject, which Controller::Load/Save use for each fade
+// target (Controller.cpp:282, 315). They copied the raw pointer, so a loaded
+// Controller held the SAVING session's pointer and its next fade step read
+// through it: EXC_BAD_ACCESS in GetObjectColor (user, T07S01, 2026-11-22).
+// Same rule as ReadFromLoadSaveMessageObject; outside a save or load the
+// pointer (messages between server and client in one process).
 LTRESULT CLTMessage::ReadObjectFL(HOBJECT &hObj)
 {
-    hObj = (HOBJECT)TakeDWord();
+    hObj = (HOBJECT)SaveRefFromFile(TakeDWord());
     return m_bOverran ? LT_ERROR : LT_OK;
 }
 
@@ -330,7 +345,11 @@ LTRESULT CLTMessage::WriteHStringArgList(int messageCode, va_list *pList)
 
 LTRESULT CLTMessage::WriteStringAsHString(char *pStr) { PutHStringText(this, pStr); return LT_OK; }
 
-LTRESULT CLTMessage::WriteObject(HOBJECT hObj) { PutDWord((uintptr_t)hObj); return LT_OK; }
+LTRESULT CLTMessage::WriteObject(HOBJECT hObj)
+{
+    PutDWord(SaveRefToFile((void*)hObj, (unsigned int)Size()));     // see ReadObjectFL
+    return LT_OK;
+}
 
 LTRESULT CLTMessage::ResetPos()  { m_nRead = 0; m_bOverran = false; return LT_OK; }
 
@@ -478,6 +497,58 @@ void LTSaveRefs_End()
     g_bInSave = g_bInLoad = false;
     g_SaveIndexOf.clear();
     g_LoadHandles.clear();
+}
+
+namespace
+{
+    // LT_RAWSAVEOBJECTS=1 -- the message's Read/WriteObject copy the pointer
+    // in a save too (old; says so).
+    bool RawSaveObjects()
+    {
+        static const bool b = []() {
+            const bool v = (getenv("LT_RAWSAVEOBJECTS") != 0);
+            if (v) { printf("[MSG] LT_RAWSAVEOBJECTS=1 -- ILTMessage Read/WriteObject keep raw pointers in saves (old)\n"); fflush(stdout); }
+            return v; }();
+        return b;
+    }
+
+    uintptr_t SaveRefToFile(void* hObject, unsigned int nBlobOffset)
+    {
+        if (!g_bInSave || RawSaveObjects()) return (uintptr_t)hObject;
+        unsigned int nIndex = 0;
+        if (hObject)
+        {
+            std::map<void*, unsigned int>::const_iterator it = g_SaveIndexOf.find(hObject);
+            if (it != g_SaveIndexOf.end()) nIndex = it->second;
+        }
+        if (hObject && !nIndex)
+        {
+            ++g_nRefsNull; g_RefsOutside.push_back(hObject);
+            if (getenv("LT_SAVEREFTRACE"))
+            {
+                void* frames[8];
+                const int n = backtrace(frames, 8);
+                printf("[SAVEREF] handle %p written (message WriteObject) at blob offset %u by:\n", hObject, nBlobOffset);
+                fflush(stdout);
+                backtrace_symbols_fd(frames + 1, n - 1, 1);
+            }
+        }
+        ++g_nRefsWritten;
+        return nIndex;
+    }
+
+    void* SaveRefFromFile(uintptr_t nValue)
+    {
+        if (!g_bInLoad || RawSaveObjects()) return (void*)nValue;
+        ++g_nRefsRead;
+        if (nValue == 0) return 0;
+        // A save written before 5fp holds a pointer here: far out of range,
+        // so it comes back null -- which Controller checks -- not as garbage.
+        if (nValue > g_LoadHandles.size()) { ++g_nRefsUnresolved; return 0; }
+        void* h = g_LoadHandles[nValue - 1];
+        if (!h) ++g_nRefsUnresolved;
+        return h;
+    }
 }
 
 unsigned int LTSaveRefs_Written()    { return g_nRefsWritten; }

@@ -36,6 +36,7 @@
 #include <stddef.h>
 
 #include "iltclient.h"
+#include "iltcustomdraw.h"     // the canvases' interface (5fo)
 
 #include <cmath>
 #include <map>
@@ -381,7 +382,17 @@ LTSceneObject* CLTScene::CreateObject(const LTSceneCreateInfo& info)
     // stopped at `if (!m_hObject)` and nothing ever lit -- in GOTY M16S01,
     // baked with no ambient at all, the lighter was the way to see.
     // LT_NODYNLIGHTS=1 refuses it again.
+    // ⚠️ OT_CANVAS TOO (2026-11-22, HANDOVER 5fo): the game's own geometry --
+    // CBasePolyDrawFX makes ONE canvas and draws every polyline through it
+    // (laser-trigger beams, the zipcord, the flashlight cone, LaserBeam,
+    // vehicle trails). Refused, its CreateObject failed and none was ever
+    // drawn. LT_NOCANVAS=1 refuses it again (says so).
+    static const bool s_bNoCanvas = []() {
+        const bool b = (getenv("LT_NOCANVAS") != 0);
+        if (b) { printf("[LT3D] LT_NOCANVAS=1 -- OT_CANVAS refused: no laser beams, zipcord or flashlight cone (old)\n"); fflush(stdout); }
+        return b; }();
     if (info.m_nType == OT_LIGHT && LTDynLightsEnabled()) { /* accepted */ }
+    else if (info.m_nType == OT_CANVAS && !s_bNoCanvas) { /* accepted */ }
     else if (info.m_nType != OT_MODEL && info.m_nType != OT_CAMERA &&
         info.m_nType != OT_NORMAL && info.m_nType != OT_SPRITE &&
         info.m_nType != OT_CONTAINER &&
@@ -2305,6 +2316,48 @@ bool LTScene_GetNodeControl(void* hObj, LTSceneNodeFn* pFn, void** ppUser)
     return true;
 }
 
+// ---- canvases (HANDOVER 5fo) -- see ltscene.h ---------------------------- //
+namespace
+{
+    LTSceneObject* CanvasObj(void* hObj)
+    {
+        LTSceneObject* p = Obj((HLOCALOBJ)hObj);
+        return (p && p->m_nType == OT_CANVAS) ? p : 0;
+    }
+}
+
+bool LTScene_SetCanvasFn(void* hObj, void* pfn, void* pUser)
+{
+    LTSceneObject* p = CanvasObj(hObj);
+    if (!p) return false;
+    p->m_pfnCanvas   = pfn;
+    p->m_pCanvasUser = pUser;
+    return true;
+}
+
+bool LTScene_GetCanvasFn(void* hObj, void** ppfn, void** ppUser)
+{
+    LTSceneObject* p = CanvasObj(hObj);
+    if (ppfn)   *ppfn   = p ? p->m_pfnCanvas : 0;
+    if (ppUser) *ppUser = p ? p->m_pCanvasUser : 0;
+    return p != 0;
+}
+
+bool LTScene_SetCanvasRadius(void* hObj, float fRadius)
+{
+    LTSceneObject* p = CanvasObj(hObj);
+    if (!p) return false;
+    p->m_fCanvasRadius = fRadius;
+    return true;
+}
+
+bool LTScene_GetCanvasRadius(void* hObj, float* pRadius)
+{
+    LTSceneObject* p = CanvasObj(hObj);
+    if (pRadius) *pRadius = p ? p->m_fCanvasRadius : 0.0f;
+    return p != 0;
+}
+
 // ⚠️ LENGTH IN MILLISECONDS, i.e. the last key's time -- the unit the game's
 // GetCurAnimLength and MS_PLAYDONE are defined in. -1 when unknown, so a caller
 // cannot mistake "no such animation" for "an animation of length zero", which
@@ -3591,6 +3644,96 @@ void LTScene_SetDynamicSource(const ILTWorldDynamicObjects* p) { s_pDynamic = p;
 // composed with the camera here, so the renderer receives world space.
 //
 // LT_NOCLIENTMODELS=1 draws server objects only, as before (says so).
+// ⚠️ ILTCustomDraw, AS A RECORDER (HANDOVER 5fo). A canvas's function is
+// called with one of these while the view is snapshotted; every DrawPrimitive
+// is kept, with the states set at that moment, and the world renderer draws
+// them after its translucent passes. The states start at the interface's
+// defaults (iltcustomdraw.h) for each frame; the game saves and restores what
+// it changes. A primitive is a triangle FAN of its vertices -- the game hands
+// its quads over in perimeter order (PolyLineFX.cpp: lower left, upper left,
+// upper right, lower right).
+namespace
+{
+    class CCanvasRecorder : public ILTCustomDraw
+    {
+    public:
+        std::vector<LTCanvasPrim>* m_pOut = 0;
+        unsigned int m_nReallyClose = 0;
+
+        void Reset()
+        {
+            m_State[LTRSTATE_ALPHABLENDENABLE] = 0;
+            m_State[LTRSTATE_ZREADENABLE]      = 1;
+            m_State[LTRSTATE_ZWRITEENABLE]     = 1;
+            m_State[LTRSTATE_SRCBLEND]         = LTBLEND_SRCALPHA;
+            m_State[LTRSTATE_DESTBLEND]        = LTBLEND_INVSRCALPHA;
+            m_State[LTRSTATE_TEXADDR]          = LTTEXADDR_WRAP;
+            m_State[LTRSTATE_COLOROP]          = LTOP_MODULATE;
+            m_State[LTRSTATE_ALPHAOP]          = LTOP_SELECTTEXTURE;
+            m_sTexture.clear();
+            m_nReallyClose = 0;
+        }
+
+        LTRESULT DrawPrimitive(LTVertex* pVerts, uint32 nVerts, uint32 flags) override
+        {
+            if (!pVerts || nVerts < 3 || !m_pOut) return LT_ERROR;
+            LTCanvasPrim p;
+            p.m_sTexture     = m_sTexture;
+            p.m_bBlend       = m_State[LTRSTATE_ALPHABLENDENABLE] != 0;
+            p.m_nSrc         = (int)m_State[LTRSTATE_SRCBLEND];
+            p.m_nDst         = (int)m_State[LTRSTATE_DESTBLEND];
+            p.m_bZRead       = m_State[LTRSTATE_ZREADENABLE] != 0;
+            p.m_bZWrite      = m_State[LTRSTATE_ZWRITEENABLE] != 0;
+            p.m_bClamp       = m_State[LTRSTATE_TEXADDR] == LTTEXADDR_CLAMP;
+            p.m_nColorOp     = (int)m_State[LTRSTATE_COLOROP];
+            p.m_nAlphaOp     = (int)m_State[LTRSTATE_ALPHAOP];
+            p.m_bReallyClose = (flags & FLAG_REALLYCLOSE) != 0;
+            if (p.m_bReallyClose) ++m_nReallyClose;
+            auto put = [&p](const LTVertex& v) {
+                LTCanvasVert c;
+                c.m_Pos[0] = v.m_Vec.x; c.m_Pos[1] = v.m_Vec.y; c.m_Pos[2] = v.m_Vec.z;
+                c.m_UV[0] = v.m_TU; c.m_UV[1] = v.m_TV;
+                const float k = 1.0f / 255.0f;
+                c.m_RGBA[0] = v.m_Color.r * k; c.m_RGBA[1] = v.m_Color.g * k;
+                c.m_RGBA[2] = v.m_Color.b * k; c.m_RGBA[3] = v.m_Color.a * k;
+                p.m_Tris.push_back(c);
+            };
+            for (uint32 i = 1; i + 1 < nVerts; ++i) { put(pVerts[0]); put(pVerts[i]); put(pVerts[i + 1]); }
+            m_pOut->push_back(p);
+            return LT_OK;
+        }
+        LTRESULT SetState(LTRState state, uint32 val) override
+        {
+            if ((unsigned)state >= (unsigned)NUM_LTRSTATES) return LT_ERROR;
+            m_State[state] = val;
+            return LT_OK;
+        }
+        LTRESULT GetState(LTRState state, uint32& val) override
+        {
+            if ((unsigned)state >= (unsigned)NUM_LTRSTATES) { val = 0; return LT_ERROR; }
+            val = m_State[state];
+            return LT_OK;
+        }
+        LTRESULT SetTexture(const char* pTexture) override
+        {
+            m_sTexture = pTexture ? pTexture : "";
+            return LT_OK;
+        }
+        // NOLF never asks (no caller in the client sources); answered as
+        // unknown, outputs written.
+        LTRESULT GetTexelSize(float& fSizeU, float& fSizeV) override
+        {
+            fSizeU = fSizeV = 0.0f;
+            return LT_ERROR;
+        }
+
+    private:
+        uint32      m_State[NUM_LTRSTATES] = { 0, 1, 1, LTBLEND_SRCALPHA, LTBLEND_INVSRCALPHA,
+                                               LTTEXADDR_WRAP, LTOP_MODULATE, LTOP_SELECTTEXTURE };
+        std::string m_sTexture;
+    };
+}
+
 class CLTSceneViewObjects : public ILTWorldDynamicObjects
 {
 public:
@@ -3612,9 +3755,17 @@ public:
             return b; }();
         if (s_bOff) return;
         const std::vector<LTSceneObject*>& v = g_Scene.Objects();
+        std::vector<LTSceneObject*> canvases;
+        m_CanvasPrims.clear();
         for (size_t i = 0; i < v.size(); ++i)
         {
             LTSceneObject* p = v[i];
+            // A canvas draws through its function, run below (5fo).
+            if (p->m_nType == OT_CANVAS)
+            {
+                if ((p->m_Flags & FLAG_VISIBLE) && p->m_pfnCanvas) canvases.push_back(p);
+                continue;
+            }
             // ⚠️ FLAG_WASDRAWN -- "the engine sets this if a particle system
             // or PolyGrid was drawn" (ltbasedefs.h:1094), and CPolyGridFX
             // stops animating its water without it. Set for a visible grid,
@@ -3655,7 +3806,34 @@ public:
             if (p->m_Flags & FLAG_VISIBLE) p->m_bInGameView = true;
             m_Client.push_back(p);
         }
+
+        // ⚠️ THE CANVASES' FUNCTIONS RUN HERE (5fo), once per view, so the
+        // renderer draws what the game drew this frame. Collected first: the
+        // game's function may create or remove objects.
+        // LT_CANVASTRACE=1 -- also every 120th view: canvases, primitives, and
+        // how many were FLAG_REALLYCLOSE (drawn as world ones; only the game's
+        // LaserBeamDebug > 1 makes any).
+        if (!canvases.empty())
+        {
+            m_Recorder.m_pOut = &m_CanvasPrims;
+            m_Recorder.Reset();
+            for (size_t i = 0; i < canvases.size(); ++i)
+                ((CanvasDrawFn)canvases[i]->m_pfnCanvas)(&m_Recorder, (HLOCALOBJ)canvases[i],
+                                                         canvases[i]->m_pCanvasUser);
+            static const bool s_bTrace = (getenv("LT_CANVASTRACE") != 0);
+            static int s_n = 0;
+            if (s_bTrace && (s_n++ % 120) == 0)
+            {
+                printf("[CANVAS] %zu canvas(es) recorded %zu primitive(s), %u FLAG_REALLYCLOSE\n",
+                       canvases.size(), m_CanvasPrims.size(), m_Recorder.m_nReallyClose);
+                fflush(stdout);
+            }
+        }
     }
+
+    const std::vector<LTCanvasPrim>* CanvasPrims() const override { return &m_CanvasPrims; }
+    std::vector<LTCanvasPrim>       m_CanvasPrims;
+    CCanvasRecorder                 m_Recorder;
 
     std::vector<LTSceneObject*>     m_Sprites;
     std::vector<LTSceneObject*>     m_PolyGrids;
