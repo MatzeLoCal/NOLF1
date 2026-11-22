@@ -2189,6 +2189,25 @@ static bool LTHost_SFXAllowed(unsigned int nId)
             // Every other particle effect is instant or made by the client and
             // never passed through this gate.
             if (LTParticlesEnabled()) { allow.insert(30); allow.insert(3); allow.insert(29); }
+
+            // ⚠️ THE SUNGLASSES' TWO DETECTORS (5fm) -- dropped here since the
+            // gate was made, so the mine detector and the infrared laser view
+            // had nothing to show (user's play test 2026-11-17):
+            //   40 SFX_MINE_ID           M01S04 48, M12S04 23, T09S01 13 Mines;
+            //                            CMineFX shows a pulsing radius model
+            //                            only in SUN_MINES (MineFX.cpp:101)
+            //   39 SFX_LASERTRIGGER_ID   M08S06 23, T07S01 1 LaserTriggers; the
+            //                            beam is a canvas (OT_CANVAS, not in
+            //                            this port: its CreateObject fails and
+            //                            LaserTriggerFX ignores that), the two
+            //                            end sprites show in SUN_IR
+            // Each run alone in its levels. LT_NOSUNGLASSFX=1 gates both again
+            // (says so).
+            static const bool s_bNoSun = []() {
+                const bool b = (getenv("LT_NOSUNGLASSFX") != 0);
+                if (b) { printf("[HOST] LT_NOSUNGLASSFX=1 -- mine and laser-trigger effects dropped (old)\n"); fflush(stdout); }
+                return b; }();
+            if (!s_bNoSun) { allow.insert(40); allow.insert(39); }
         }
     }
 

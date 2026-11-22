@@ -6369,6 +6369,16 @@ namespace
                     out.m_nBlendOp = (p->m_Flags2 & FLAG2_ADDITIVE) ? 1 : ((p->m_Flags2 & FLAG2_MULTIPLY) ? 2 : 0);
             }
 
+            // ⚠️ THE GAME'S MODEL HOOK (5fm) reads the USER FLAGS of the object
+            // it is handed -- USRFLG_NIGHT_INFRARED (characters, bodies, what
+            // they hold), USRFLG_GLOW (pickups, intel) -- through the CLIENT,
+            // so it needs this object's client mirror, which keeps the server's
+            // user flags (LTReplicate_Sync). lithtech.exe has one for every
+            // object it draws; here it is made on first draw. Only while a hook
+            // is installed (LT_NOMODELHOOK=1: never).
+            out.m_nObjFlags = p->m_Flags;
+            out.m_hHookObj  = LTWorld_ModelHookInstalled() ? LTReplicate_Ensure((void*)p) : 0;
+
             // ⚠️ THE GAME'S NODE CONTROL lives on the CLIENT mirror of this
             // object -- CNodeController registers it on GetServerObj() as the
             // client sees it. Handed to the renderer with the pose.

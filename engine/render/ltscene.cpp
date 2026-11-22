@@ -3383,6 +3383,17 @@ static void SC_GetGlobalLightScale(LTVector* pScale)
     pScale->Init(s[0], s[1], s[2]);
 }
 
+// ⚠️ THE GAME'S MODEL HOOK (5fm) -- a generated stub answering LT_ERROR, so
+// the sunglasses' infrared view and the glow of every pickup never ran.
+// lithtech.exe 0x408150 stores fn and user and answers LT_OK; the renderer
+// calls it per model (LTWorld_SetModelHook).
+static LTRESULT SC_SetModelHook(ModelHookFn fn, void* pUser)
+{
+    LTIMPL("ILTClient::SetModelHook");
+    LTWorld_SetModelHook((void*)fn, pUser);
+    return LT_OK;
+}
+
 // ⚠️ A CAMERA'S LIGHT ADD -- the game's screen flashes (hit, flash grenade,
 // the water's LightAdd). Kept per camera; applied with the global light scale
 // at the end of RenderCamera. Both halves were stubs (the getter answered
@@ -3841,6 +3852,9 @@ public:
         out.m_bNoLight = (p->m_Flags & FLAG_NOLIGHT) != 0;
         out.m_bChrome  = (p->m_Flags & FLAG_ENVIRONMENTMAP) != 0;      // 5en
         for (int k = 0; k < 3; ++k) out.m_Colour[k] = p->m_Color[k];
+        // The game's model hook is asked about this object by its own handle (5fm).
+        out.m_hHookObj  = (void*)p;
+        out.m_nObjFlags = p->m_Flags;
 
         if (!out.m_bReallyClose)
         {
@@ -4276,6 +4290,7 @@ void LTScene_Wire(ILTClient* p)
     p->GetGlobalLightScale     = SC_GetGlobalLightScale;
     p->SetCameraLightAdd       = SC_SetCameraLightAdd;
     p->GetCameraLightAdd       = SC_GetCameraLightAdd;
+    p->SetModelHook            = SC_SetModelHook;
 
     p->RenderObjects           = SC_RenderObjects;
     p->RenderCamera            = SC_RenderCamera;

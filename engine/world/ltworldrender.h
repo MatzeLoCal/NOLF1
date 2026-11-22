@@ -384,7 +384,22 @@ struct LTDynamicModel
     // a view weapon whose Weapons.txt says EnvironmentMap 1 (WeaponModel.cpp
     // 1261), a chrome Prop or PropType, a vehicle. Drawn only when opaque.
     bool        m_bChrome = false;
+
+    // ⚠️ THE GAME'S MODEL HOOK (5fm) is asked about this object every time it
+    // is drawn: the CLIENT handle it reads the user flags of (a server
+    // object's mirror), and the object's flags. Null = not asked (a model
+    // with no client handle). See LTWorld_SetModelHook.
+    void*        m_hHookObj = 0;
+    unsigned int m_nObjFlags = 0;
 };
+
+// ⚠️ ILTClient::SetModelHook (5fm) -- the game's per-model render callback
+// (GameClientShell.cpp: DefaultModelHook, IRModelHook, NVModelHook; a
+// ModelHookFn, ltbasedefs.h). Kept here because the renderer calls it, as
+// d3d.ren does (0x10019a20, before each model's lighting). A null fn removes
+// it. LT_NOMODELHOOK=1 = never called and the old light rule (says so).
+void LTWorld_SetModelHook(void* pfn, void* pUser);
+bool LTWorld_ModelHookInstalled();
 
 // Is FLAG_NOLIGHT honoured for game-spawned models? LT_LITNOLIGHT=1 lights
 // them by the level as before (announces itself).
@@ -1031,9 +1046,13 @@ private:
     // ⚠️ fAlpha IS ALSO PART OF THE KEY, for the same reason bChromakey is:
     // `WineBottle_01.abc` is placed both as a PropType at 0.999 and as a plain
     // Prop, and the skins carry the treatment.
+    // ⚠️ bNoTexture (5fm): every skin WHITE -- the game's model hook cleared
+    // MHF_USETEXTURE (infrared, night vision), and d3d.ren then sets no
+    // texture at all (0x10047b8e) and draws the vertex colour. A separate
+    // cache entry, so the textured one is untouched.
     CachedModel*        GetModel(const std::string& sModel, const std::string& sSkin,
                                  bool bChromakey, float fAlpha = 1.0f,
-                                 int nBlendOp = 0);
+                                 int nBlendOp = 0, bool bNoTexture = false);
 
     // ⚠️ WHICH HALF OF THE GEOMETRY TO DRAW. A blended surface writes no depth,
     // so it MUST come after every opaque one -- which means the world is

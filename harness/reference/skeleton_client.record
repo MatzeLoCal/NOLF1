@@ -30,7 +30,7 @@ file   Attributes\Missions.txt 40167 nolfgoty.rez
 file   Attributes\ClientButes.txt 12924 nolfu003.rez
 impl   ILTClient::RegisterConsoleProgram
 file   Attributes\Attachments.txt 15306 nolfgoty.rez
-stub   ILTClient::SetModelHook
+impl   ILTClient::SetModelHook
 impl   ILTClient::SetRenderMode
 mode   set 640x480x32 hw=1 Software
 impl   ILTCursor::LoadCursorBitmapResource
@@ -157,7 +157,7 @@ surf   dims of unknown surface
 impl   ILTClient::SetGlobalLightScale
 surf   dims of unknown surface
 host   frames 3
-count  stubs 1
+count  stubs 0
 count  files-opened 68
 count  files-missing 0
 drawn  FillRect 22

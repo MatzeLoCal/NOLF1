@@ -2037,7 +2037,8 @@ CLTWorldScene::CachedModel* CLTWorldScene::GetModel(const std::string& sModel,
                                                     const std::string& sSkin,
                                                     bool bChromakey,
                                                     float fAlpha,
-                                                    int nBlendOp)
+                                                    int nBlendOp,
+                                                    bool bNoTexture)
 {
     if (!(fAlpha >= 0.0f && fAlpha <= 1.0f)) fAlpha = 1.0f;
     if (nBlendOp < 0 || nBlendOp > 2) nBlendOp = 0;
@@ -2049,7 +2050,8 @@ CLTWorldScene::CachedModel* CLTWorldScene::GetModel(const std::string& sModel,
 
     char aKey[32];
     snprintf(aKey, sizeof aKey, "|a%.4f|b%d", fAlpha, nBlendOp);
-    std::string sKey = sModel + "|" + sSkin + (bChromakey ? "|ck" : "|--") + aKey;
+    std::string sKey = sModel + "|" + sSkin + (bChromakey ? "|ck" : "|--") + aKey
+                     + (bNoTexture ? "|nt" : "");
     std::map<std::string, CachedModel*>::iterator it = m_Models.find(sKey);
     if (it != m_Models.end()) return it->second->m_bValid ? it->second : 0;
 
@@ -2061,7 +2063,7 @@ CLTWorldScene::CachedModel* CLTWorldScene::GetModel(const std::string& sModel,
     // must build the same animation table.
     if (pC->m_bValid) pC->m_Model.MergeChildAnimations(m_pFileMgr, sModel.c_str());
 
-    if (pC->m_bValid && !sSkin.empty())
+    if (pC->m_bValid && !sSkin.empty() && !bNoTexture)
     {
         // ⚠️ Split on ';' and trim -- the shipped strings carry spaces around
         // it. Loading only the first entry draws every piece that indexes a
@@ -2177,6 +2179,65 @@ CLTWorldScene::CachedModel* CLTWorldScene::GetModel(const std::string& sModel,
                 }
             }
             ++pC->m_nSkins;     // counted either way -- indexed by position
+        }
+    }
+
+    // ⚠️ A SKIN THAT DID NOT LOAD DRAWS UNTEXTURED, NOT NOT AT ALL (5fm).
+    // d3d.ren binds a piece's texture only if the object has one at that
+    // index (0x1004726e); otherwise SetTexture(stage, NULL) (0x100478a0) and
+    // the piece is drawn in its vertex colour, with the object's blend state.
+    // The port's software path drew such a piece untextured but OPAQUE (the
+    // blend state lives on the skin), and both Metal paths dropped it ("no
+    // skin, no draw"). That is why the mine detector showed nothing: CMineFX
+    // asks for `SFX\Beams\Skins\Spotlight_beam.dtx`, which no shipped archive
+    // holds (the file is `SpotlightBeam.dtx`), so on Windows the pulsing
+    // radius sphere is flat additive colour. A white 4x4 skin in each empty
+    // slot is that rule for every renderer: vertex colour x 1. Also the whole
+    // set for bNoTexture (the model hook). LT_NOWHITESKIN=1 = the old
+    // (says so); the hook's untextured models stay white either way.
+    if (pC->m_bValid)
+    {
+        static const bool s_bOff = []() {
+            const bool b = (getenv("LT_NOWHITESKIN") != 0);
+            if (b) { printf("[LT3D] LT_NOWHITESKIN=1 -- a model skin that did not load is not drawn in Metal, opaque in software (old)\n"); fflush(stdout); }
+            return b; }();
+        int nWant = 0;
+        const std::vector<LTABCPiece>& pcs = pC->m_Model.GetPieces();
+        for (size_t i = 0; i < pcs.size(); ++i)
+            if ((int)pcs[i].m_nTexture + 1 > nWant) nWant = (int)pcs[i].m_nTexture + 1;
+        if (nWant > kMaxSkins) nWant = kMaxSkins;
+        if (nWant < pC->m_nSkins) nWant = pC->m_nSkins;
+        if (!s_bOff || bNoTexture)
+        {
+            int nWhite = 0;
+            for (int k = 0; k < nWant; ++k)
+            {
+                LT3DTexture& T = pC->m_Skins[k];
+                if (T.m_pRGBA && !bNoTexture) continue;
+                T = LT3DTexture();
+                pC->m_SkinRGBA[k].assign(4 * 4 * 4, 255);  // 4x4: wrapping masks a power of two
+                for (int q = 0; q < LT3DTexture::kMaxMips; ++q) pC->m_SkinMipRGBA[k][q].clear();
+                T.m_pRGBA  = &pC->m_SkinRGBA[k][0];
+                T.m_Width  = 4;
+                T.m_Height = 4;
+                if (bTranslucent)
+                {
+                    T.m_bBlend      = true;
+                    T.m_fConstAlpha = fAlpha;
+                    T.m_nBlendOp    = nBlendOp;
+                    T.m_bTexAlpha   = false;
+                }
+                ++nWhite;
+            }
+            pC->m_nSkins = nWant;
+            // One line per model that needed it: the census of what draws
+            // white, so a level that suddenly shows a white shape names it.
+            if (nWhite && !bNoTexture)
+            {
+                printf("[LT3D] untextured: %s -- %d of %d skin slot(s) did not load (skins '%s'); drawn white, as d3d.ren\n",
+                       sModel.c_str(), nWhite, nWant, sSkin.c_str());
+                fflush(stdout);
+            }
         }
     }
 
@@ -4454,6 +4515,98 @@ namespace
         const NodeTramp* t = (const NodeTramp*)pUser;
         t->fn(t->hObj, nNode, pGlobal16, t->user);
     }
+
+    // ⚠️ THE GAME'S MODEL HOOK (5fm). ILTClient::SetModelHook was a generated
+    // stub, so none of the three hooks the game installs ever ran:
+    //   DefaultModelHook (always) -- USRFLG_GLOW: pickups, intel, the zipcord
+    //     hook pulse (LightAdd = ModelGlowMin..Max over ModelGlowTime);
+    //     USRFLG_MODELADD: LightAdd from the user flags' top bytes;
+    //   IRModelHook (sunglasses, infrared) -- every USRFLG_NIGHT_INFRARED
+    //     object (characters, bodies, what they hold) untextured, ObjectColor
+    //     = Layout.txt InfraredModelColor <96,32,0>;
+    //   NVModelHook (night vision) -- untextured, LightAdd = its colour.
+    ModelHookFn s_pfnModelHook = 0;
+    void*       s_pModelHookUser = 0;
+
+    bool ModelHookOff()
+    {
+        static const bool b = []() {
+            const bool v = (getenv("LT_NOMODELHOOK") != 0);
+            if (v) { printf("[LT3D] LT_NOMODELHOOK=1 -- the game's model hook is never called; lit models ignore their colour (old)\n"); fflush(stdout); }
+            return v; }();
+        return b;
+    }
+
+    // What the hook hands back, in d3d.ren's terms: whether the model keeps
+    // its texture (MHF_USETEXTURE), its colour (0..1, d3d.ren's ObjectColor
+    // / 255) and its light add (0..1, ModelAdd unless the hook changed it).
+    struct HookOut { bool bTexture; float col[3]; float add[3]; };
+
+    // ⚠️ d3d.ren's ORDER (0x1001a80d..0x1001a87a): ObjectColor = the object's
+    // colour bytes, LightAdd = the scene's ModelAdd, m_Flags = MHF_USETEXTURE,
+    // m_ObjectFlags = the object's flags -- then the hook, if one is set. The
+    // hook's m_ObjectFlags is read back only for shadow, wireframe and
+    // REALLYCLOSE (0x10044105, 0x10047bff); the light test uses the OBJECT's
+    // flags (0x1001a8f8), so IRModelHook's FLAG_NOLIGHT changes nothing.
+    // LT_HOOKTRACE=1 -- every object whose hook output differs from its input,
+    // once per (object, output).
+    HookOut RunModelHook(const LTDynamicModel& d)
+    {
+        HookOut o;
+        o.bTexture = true;
+        for (int k = 0; k < 3; ++k) { o.col[k] = d.m_Colour[k]; o.add[k] = g_ModelAdd[k] / 255.0f; }
+        if (!s_pfnModelHook || !d.m_hHookObj || ModelHookOff()) return o;
+
+        LTVector vAdd(g_ModelAdd[0], g_ModelAdd[1], g_ModelAdd[2]);
+        LTVector vCol(d.m_Colour[0] * 255.0f, d.m_Colour[1] * 255.0f, d.m_Colour[2] * 255.0f);
+        ModelHookData hd;
+        hd.m_hObject     = (HLOCALOBJ)d.m_hHookObj;
+        hd.m_Flags       = MHF_USETEXTURE;
+        hd.m_ObjectFlags = d.m_nObjFlags;
+        hd.m_LightAdd    = &vAdd;
+        hd.m_ObjectColor = &vCol;
+        s_pfnModelHook(&hd, s_pModelHookUser);
+
+        o.bTexture = (hd.m_Flags & MHF_USETEXTURE) != 0;
+        o.col[0] = vCol.x / 255.0f; o.col[1] = vCol.y / 255.0f; o.col[2] = vCol.z / 255.0f;
+        o.add[0] = vAdd.x / 255.0f; o.add[1] = vAdd.y / 255.0f; o.add[2] = vAdd.z / 255.0f;
+
+        static const bool s_bTrace = (getenv("LT_HOOKTRACE") != 0);
+        if (s_bTrace)
+        {
+            const bool bSame = o.bTexture
+                && fabsf(vAdd.x - g_ModelAdd[0]) < 0.5f && fabsf(vAdd.y - g_ModelAdd[1]) < 0.5f
+                && fabsf(vAdd.z - g_ModelAdd[2]) < 0.5f
+                && fabsf(o.col[0] - d.m_Colour[0]) < 0.002f && fabsf(o.col[1] - d.m_Colour[1]) < 0.002f
+                && fabsf(o.col[2] - d.m_Colour[2]) < 0.002f;
+            if (!bSame)
+            {
+                static std::set<std::string> s_Seen;
+                char szK[256];
+                snprintf(szK, sizeof szK, "%p|%d|%.0f %.0f %.0f|%.0f %.0f %.0f", d.m_hHookObj, (int)o.bTexture,
+                         vCol.x, vCol.y, vCol.z, vAdd.x / 25.0f, vAdd.y / 25.0f, vAdd.z / 25.0f);
+                if (s_Seen.insert(szK).second)
+                {
+                    printf("[HOOK] %-40s %s colour (%.0f %.0f %.0f) light add (%.0f %.0f %.0f)\n",
+                           d.sModel.c_str(), o.bTexture ? "textured  " : "UNTEXTURED",
+                           vCol.x, vCol.y, vCol.z, vAdd.x, vAdd.y, vAdd.z);
+                    fflush(stdout);
+                }
+            }
+        }
+        return o;
+    }
+}
+
+void LTWorld_SetModelHook(void* pfn, void* pUser)
+{
+    s_pfnModelHook   = (ModelHookFn)pfn;
+    s_pModelHookUser = pUser;
+}
+
+bool LTWorld_ModelHookInstalled()
+{
+    return s_pfnModelHook != 0 && !ModelHookOff();
 }
 
 bool LTWorldScene_ProbeDump(const char* pBase)
@@ -4500,7 +4653,24 @@ bool LTWorldScene_ProbeDump(const char* pBase)
 bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
                                    DynamicDraw& out)
 {
-    CachedModel* pM = GetModel(d.sModel, d.sSkins, false, d.m_fAlpha, d.m_nBlendOp);
+    // The game's model hook first (5fm): it decides the texture as well as
+    // the light.
+    const HookOut hook = RunModelHook(d);
+    // ⚠️ THE ALPHA AS LITHTECH KEEPS IT -- A BYTE, (uint8)(a x 255) (the
+    // server's si_SetObjectColor rule, ltserverhost.cpp). The model cache is
+    // keyed by the alpha at 4 decimals, so a model whose alpha moves every
+    // frame was LOADED AGAIN every frame: the mine detector's pulsing spheres
+    // (CBaseScaleFX, alpha 0.4..0.9) made 157 cache entries of one model in
+    // 20 s (5fm). By the byte, at most 256 per model; the +0.001 keeps a
+    // server byte b/255 at b. LT_ALPHAKEY4=1 = the old key (says so).
+    static const bool s_bAlpha4 = []() {
+        const bool b = (getenv("LT_ALPHAKEY4") != 0);
+        if (b) { printf("[LT3D] LT_ALPHAKEY4=1 -- game models cached by their alpha to 4 decimals (old)\n"); fflush(stdout); }
+        return b; }();
+    float fAlphaKey = d.m_fAlpha;
+    if (!s_bAlpha4 && fAlphaKey >= 0.0f && fAlphaKey <= 1.0f)
+        fAlphaKey = floorf(fAlphaKey * 255.0f + 0.001f) / 255.0f;
+    CachedModel* pM = GetModel(d.sModel, d.sSkins, false, fAlphaKey, d.m_nBlendOp, !hook.bTexture);
     if (!pM) return false;
 
     // ⚠️ GAME-SPAWNED MODELS ARE NOT MIRRORED -- props are. Measured
@@ -4728,12 +4898,33 @@ bool CLTWorldScene::PrepareDynamic(const LTDynamicModel& d, const float* MVP,
         }
         if (d.m_bNoLight && LTNoLightEnabled())
         {
-            // FLAG_NOLIGHT: the object's own colour, nothing from the level.
-            for (int k = 0; k < 3; ++k) ML.m_Ambient[k] = d.m_Colour[k];
+            // FLAG_NOLIGHT: the object's own colour (as the hook left it),
+            // nothing from the level.
+            for (int k = 0; k < 3; ++k) ML.m_Ambient[k] = hook.col[k];
             ML.m_nLights = 0;
         }
         else
+        {
             ComputeModelLighting(d.m_Pos, ML, bTrace);
+            // ⚠️ d3d.ren's VERTEX RULE (0x1000925f..0x100092d4): colour =
+            // min(255, light x ObjectColor/255 + LightAdd) per channel, the
+            // light being the level's (ambient + each light x N.L) -- ModelAdd
+            // is NOT in it, it is the LightAdd the hook starts from. The port
+            // folded ModelAdd into the ambient and never applied the colour to
+            // a lit model. With light L, colour c and add a:
+            //     (L_amb + SUM L_i dd) c + a = (L_amb c + a) + SUM (L_i c) dd
+            // so the ambient and each light are scaled here and the clamp
+            // after the sum stays where it is -- both backends unchanged. For
+            // a white model the hook left alone this is the old result
+            // exactly. LT_NOMODELHOOK=1 = the old rule.
+            if (!ModelHookOff())
+            {
+                for (int k = 0; k < 3; ++k)
+                    ML.m_Ambient[k] = (ML.m_Ambient[k] - g_ModelAdd[k] / 255.0f) * hook.col[k] + hook.add[k];
+                for (int l = 0; l < ML.m_nLights; ++l)
+                    for (int k = 0; k < 3; ++k) ML.m_Color[l][k] *= hook.col[k];
+            }
+        }
     }
 
     // ⚠️ LT_ANIMTRACE=<substr> -- WHICH ANIMATION AND KEYFRAME a model is

@@ -154,13 +154,6 @@
 			);
 			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
 		};
-		789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1core" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				sdk/inc/ltengineobjects.cpp,
-			);
-			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
-		};
 		48FD1BDEECB4EDA6EDF655D2 /* Exceptions for "NOLF" folder in "nolfobject" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -342,6 +335,13 @@
 				Shared/DebugMgr.cpp,
 			);
 			target = 8D6261D67E55699873A0B202 /* nolfobject */;
+		};
+		789C2252D465E5E0EED642BA /* Exceptions for "LT2" folder in "nolf1core" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				sdk/inc/ltengineobjects.cpp,
+			);
+			target = C7C55763DFFB0BD5B525B35C /* nolf1core */;
 		};
 		909E3F37E78342C72E308FB9 /* Exceptions for "NOLF" folder in "nolf1core" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -976,7 +976,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = EJBTKE7CEJ;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -988,7 +988,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.7;
+				MARKETING_VERSION = 0.7.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-force_load",
@@ -1005,23 +1005,6 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "launcher/NOLF1Launcher-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
-				STRIP_STYLE = "non-global";
-			};
-			name = Release;
-		};
-		929A38AC23966B8A4C50854A /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = EJBTKE7CEJ;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					_CLIENTBUILD,
-				);
-				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRIP_INSTALLED_PRODUCT = NO;
 			};
 			name = Release;
 		};
@@ -1229,7 +1212,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = EJBTKE7CEJ;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -1241,7 +1224,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.7;
+				MARKETING_VERSION = 0.7.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-force_load",
@@ -1258,23 +1241,6 @@
 				SWIFT_OBJC_BRIDGING_HEADER = "launcher/NOLF1Launcher-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
-				STRIP_STYLE = "non-global";
-			};
-			name = Debug;
-		};
-		D2D42D66DD33F27F3F3B1FEE /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = EJBTKE7CEJ;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"$(inherited)",
-					_CLIENTBUILD,
-				);
-				OTHER_LIBTOOLFLAGS = "-no_warning_for_no_symbols";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRIP_INSTALLED_PRODUCT = NO;
 			};
 			name = Debug;
 		};
